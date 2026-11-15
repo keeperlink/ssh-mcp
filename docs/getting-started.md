@@ -106,7 +106,28 @@ image directory.
 
 ## 3. Validate and start the single-service example
 
-From the repository root:
+From the repository root, after preparing your private configuration in
+steps 1–2, **use the published Linux AMD64 image** without building from
+source:
+
+~~~sh
+docker pull keeperlink/ssh-mcp:0.1.1
+docker image tag keeperlink/ssh-mcp:0.1.1 ssh-mcp:basic
+docker compose --env-file examples/basic/.env -f examples/basic/compose.yaml config --quiet
+docker compose --env-file examples/basic/.env -f examples/basic/compose.yaml up -d --no-build --pull never
+~~~
+
+The basic Compose example names its local image `ssh-mcp:basic`. The
+`docker image tag` command assigns that **local alias** to the already
+pulled Docker Hub image; it does not rebuild or republish anything.
+`--no-build --pull never` ensures the service uses the locally pulled,
+versioned image, even though the example Compose file also includes
+a `build:` definition. If the published image is not present locally,
+the command fails instead of silently building another image. For
+reproducible production deployments, record and pin the resolved digest.
+
+**Alternatively**, to build the image from your reviewed checkout
+instead of using the published release:
 
 ~~~sh
 docker compose --env-file examples/basic/.env -f examples/basic/compose.yaml config --quiet
@@ -114,7 +135,7 @@ docker compose --env-file examples/basic/.env -f examples/basic/compose.yaml bui
 docker compose --env-file examples/basic/.env -f examples/basic/compose.yaml up -d --no-build
 ~~~
 
-The first command checks Compose syntax and interpolation, **not**
+The `config` command checks Compose syntax and interpolation, **not**
 real SSH host keys, credentials, DNS, certificates or proxy routing.
 The basic Compose file exposes `127.0.0.1:8000` **only on the host**
 (or a different loopback port if configured). It is HTTP behind a

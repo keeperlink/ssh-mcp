@@ -65,6 +65,7 @@ COPY --chown=10001:10001 pyproject.toml /validation/pyproject.toml
 COPY --chown=10001:10001 .github/workflows/ci.yml /validation/.github/workflows/ci.yml
 COPY --chown=10001:10001 .github/workflows/docker-publish.yml /validation/.github/workflows/docker-publish.yml
 COPY --chown=10001:10001 docs/container-publishing.md /validation/docs/container-publishing.md
+COPY --chown=10001:10001 docs/getting-started.md /validation/docs/getting-started.md
 USER 10001:10001
 WORKDIR /validation
 RUN python -m pip check \
