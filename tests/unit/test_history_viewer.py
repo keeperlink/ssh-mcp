@@ -415,6 +415,17 @@ class HistoryStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.history.list({}, page=1, before="0:_")
 
+    def test_numeric_story_filter_accepts_multiple_project_prefixes(self):
+        first = self.save(story_id="TEST-243")
+        second = self.save(story_id="OTHER-243")
+        other = self.save(story_id="OTHER-1243")
+        results = self.history.list({"story_id": "00243"})
+        self.assertEqual({x["id"] for x in results["jobs"]}, {first, second})
+        self.assertNotIn(other, {x["id"] for x in results["jobs"]})
+        self.assertEqual([x["id"] for x in
+                          self.history.list({"story_id": "other-243"})["jobs"]],
+                         [second])
+
     def test_invalid_queries_are_rejected(self):
         for query in (
             {"status": "nonsense"}, {"mode": "pretend"}, {"story_id": "x" * 100},

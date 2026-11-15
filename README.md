@@ -5,10 +5,12 @@ server for audited SSH commands, bounded file operations and operator-controlled
 access. OAuth-protected clients select explicitly allowed SSH hosts; the
 service uses pinned host keys and the remote account's existing permissions.
 
-This project is licensed under Apache-2.0. Build the published source
-and use the [getting started guide](docs/getting-started.md) to configure
-a trusted HTTPS reverse proxy, OAuth and a dedicated SSH account. Public
-prebuilt container image availability will be announced separately.
+This project is licensed under Apache-2.0. To deploy, follow the
+[getting started guide](docs/getting-started.md) and configure a trusted HTTPS
+reverse proxy, OAuth and a dedicated SSH account. A prebuilt Linux AMD64 image
+is available on [Docker Hub](https://hub.docker.com/r/keeperlink/ssh-mcp):
+`keeperlink/ssh-mcp:0.1.1` (`latest` also available). Prefer the numbered
+tag or an immutable digest for reproducible deployments.
 
 ## What it does
 
