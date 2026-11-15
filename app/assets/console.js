@@ -113,8 +113,9 @@
     if (state.privilegedOnly) data.privileged = "true";
     data.conversation_id = String(data.conversation_id || "").trim();
     const story = String(data.story_id || "").trim();
-    if (/^[0-9]{1,9}$/.test(story)) data.story_id = "SKY-" + String(Number(story));
-    else if (/^sky-[1-9][0-9]*$/i.test(story)) data.story_id = story.toUpperCase();
+    if (/^[0-9]{1,9}$/.test(story)) data.story_id = String(Number(story));
+    else if (/^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$/i.test(story))
+      data.story_id = story.toUpperCase();
     return Object.fromEntries(Object.entries(data).filter(([, value]) => Boolean(value)));
   };
   const matches = (job) => {
@@ -122,7 +123,12 @@
     if (f.privileged === "true" && (job.record_kind === "file" || job.privileged !== true))
       return false;
     if (f.host && job.server !== f.host) return false;
-    if (f.story_id && job.story_id !== f.story_id) return false;
+    if (f.story_id) {
+      const jobStory = String(job.story_id || "");
+      if (/^[0-9]{1,9}$/.test(f.story_id)) {
+        if (!jobStory.endsWith("-" + f.story_id)) return false;
+      } else if (jobStory !== f.story_id) return false;
+    }
     if (f.conversation_id && job.conversation_id !== f.conversation_id) return false;
     if (f.status && job.status !== f.status) return false;
     if (f.mode && job.mode !== f.mode) return false;
