@@ -164,6 +164,51 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn('"--min", "95"', validator)
         self.assertIn("assert tests import only the installed wheel and CLI", validator)
 
+    def test_dockerhub_publish_requires_reviewed_main_and_smoke_test(self):
+        workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text()
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        validator = (ROOT / "tests/tools/validate.py").read_text()
+
+        self.assertIn("on:\n  workflow_dispatch:", workflow)
+        self.assertNotIn("  pull_request:", workflow)
+        self.assertIn("github.repository == 'keeperlink/ssh-mcp'", workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("runs-on: ubuntu-24.04", workflow)
+        self.assertIn('test "$latest" = "$GITHUB_SHA:success"', workflow)
+        self.assertIn("gh api", workflow)
+        self.assertIn("cache-from: type=gha,scope=ssh-mcp-ci", workflow)
+        self.assertEqual(workflow.count("docker/build-push-action@"), 2)
+        self.assertEqual(workflow.count("docker/login-action@"), 1)
+        for action in ("actions/checkout", "docker/setup-buildx-action",
+                       "docker/build-push-action", "docker/login-action"):
+            self.assertRegex(workflow, re.escape(action) + r"@[a-f0-9]{40}")
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("load: true", workflow)
+        self.assertIn("push: false", workflow)
+        self.assertIn("push: true", workflow)
+        self.assertIn("sbom: true", workflow)
+        self.assertIn("provenance: mode=max", workflow)
+        self.assertIn("APP_VERSION=0.1", workflow)
+        self.assertIn("BUILD_NUMBER=", workflow)
+        self.assertIn("0.1."+chr(36)+"{{ github.run_number }}", workflow)
+        self.assertIn("keeperlink/ssh-mcp", workflow)
+        self.assertIn("DOCKERHUB_USERNAME", workflow)
+        self.assertIn("DOCKERHUB_TOKEN", workflow)
+        self.assertLess(workflow.index("name: Smoke test"),
+                        workflow.index("name: Login to Docker Hub"))
+        self.assertLess(workflow.index("name: Check release tag"),
+                        workflow.index("name: Login to Docker Hub"))
+        for item in ("--network none", "--read-only", "--cap-drop ALL",
+                     "MCP_SSH_TOOLS_ENABLED=false", "MCP_CIMD_VALIDATE_REMOTE=false",
+                     "Unauthenticated MCP call was accepted", "test -z"):
+            self.assertIn(item, workflow)
+        self.assertNotIn("--privileged", workflow)
+        self.assertIn("COPY --chown=10001:10001 .github/workflows/docker-publish.yml "
+                      "/validation/.github/workflows/docker-publish.yml", dockerfile)
+        self.assertIn('".github/workflows/docker-publish.yml"', validator)
+
     def test_hardened_public_compose_has_no_extra_privileges(self):
         compose = (ROOT / "examples/hardened/compose.yaml").read_text()
         for expected in ("read_only: true", "no-new-privileges:true", "cap_drop:"):

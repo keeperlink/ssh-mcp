@@ -87,3 +87,4 @@ and [Security policy](SECURITY.md) for private vulnerability reporting.
 
 SSH-MCP is licensed under the [Apache License 2.0](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency licensing.
+For maintainers: [Docker Hub publishing](docs/container-publishing.md).
