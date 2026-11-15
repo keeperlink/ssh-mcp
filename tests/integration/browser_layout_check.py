@@ -223,7 +223,14 @@ class Handler(BaseHTTPRequestHandler):
                               ("conversation_id", "conversation_id")):
                 requested = q.get(key, [""])[0]
                 if requested:
-                    filtered = [job for job in filtered if job.get(attr) == requested]
+                    if key == "story_id" and requested.isascii() and requested.isdigit() and len(requested) <= 9:
+                        suffix = "-" + str(int(requested))
+                        filtered = [job for job in filtered
+                                    if str(job.get(attr) or "").endswith(suffix)]
+                    else:
+                        if key == "story_id":
+                            requested = requested.upper()
+                        filtered = [job for job in filtered if job.get(attr) == requested]
             command = q.get("command", [""])[0].lower()
             if command:
                 filtered = [job for job in filtered if command in
