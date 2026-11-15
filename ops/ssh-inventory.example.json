@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "alias": "demo",
+      "address": "ssh.example.net",
+      "port": 22,
+      "username": "operator",
+      "identity_file": "/run/ssh-mcp/identity",
+      "known_hosts_file": "/run/ssh-mcp/known_hosts",
+      "principals": [
+        "ssh-mcp-operator"
+      ],
+      "environment": "non-production",
+      "access": "restricted",
+      "max_parallel": 1,
+      "privileged_access": "none"
+    }
+  ]
+}

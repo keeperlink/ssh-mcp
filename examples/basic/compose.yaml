@@ -1,0 +1,40 @@
+# Minimal SSH-MCP application behind an EXISTING HTTPS proxy on this Linux host.
+# This does not provide public HTTPS; do not expose TCP 8000 to the Internet.
+# Requires Docker Engine >=28.0.0: earlier versions can expose localhost
+# published ports to same-L2 hosts, bypassing the HTTPS reverse proxy.
+name: ssh-mcp-basic
+services:
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ssh-mcp:basic
+    restart: unless-stopped
+    user: "10001:10001"
+    env_file:
+      - "${MCP_PRIVATE_ENV:?Set absolute private env file path}"
+    environment:
+      MCP_BIND_HOST: "0.0.0.0"
+      MCP_BIND_PORT: "8000"
+      # Host proxy reaches the bridge through this specific Docker gateway.
+      FORWARDED_ALLOW_IPS: "${MCP_DOCKER_GATEWAY:?Set bridge gateway IP}"
+    ports:
+      - "127.0.0.1:${MCP_LOCAL_PORT:-8000}:8000"
+    volumes:
+      - mcp-state:/var/lib/ssh-mcp
+      - type: bind
+        source: "${MCP_SSH_CONFIG_DIR:?Set absolute SSH directory path}"
+        target: /run/ssh-mcp
+        read_only: true
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: "${MCP_BRIDGE_SUBNET:?Set unused bridge subnet}"
+          gateway: "${MCP_DOCKER_GATEWAY:?Set bridge gateway IP}"
+
+volumes:
+  mcp-state:

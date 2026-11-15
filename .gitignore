@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+.coverage
+coverage.xml
+.env
+.env.*
+!.env.example
+secrets/
+
+# Local Python packaging output
+build/
+*.egg-info/
+
+# Local persistent container state and private configs
+state/
+runtime/
+private/
+deploy/nonprod/site.env
+deploy/nonprod/service.env
+
+# Tooling caches and local test reports
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+test-results/

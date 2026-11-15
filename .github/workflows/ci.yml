@@ -1,0 +1,161 @@
+name: Python MCP CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  python:
+    name: Python package and installed-wheel coverage
+    # All pushes, pull requests and manual runs use a GitHub-hosted runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 (Node 24)
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0 (Node 24)
+        with:
+          version: "0.13.7"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install and validate with pinned Python 3.12
+        id: offline
+        env:
+          MCP_ISSUER: http://localhost
+          MCP_LOGIN_KEY: synthetic-test-login-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          MCP_TOKEN_SIGNING_SECRET: synthetic-test-signing-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          MCP_CIMD_VALIDATE_REMOTE: 'false'
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), "Python 3.12 runner required"'
+          # Local contributors and GitHub Actions execute the exact same repository-
+          # owned validation entrypoint, including an installed-wheel test.
+          uv venv --seed --python "$(command -v python3)" .venv
+          uv pip install --python .venv/bin/python -r requirements-dev.txt
+          source .venv/bin/activate
+
+          python tests/tools/validate.py
+          python scripts/check_public_docs.py
+          python scripts/check_public_source.py
+          # Run the pinned lab-runner safety checks explicitly as well as
+          # through installed-wheel unit discovery. These offline mocks do
+          # not start Docker, SSH, or modify shared lab state.
+          python -m unittest tests.unit.test_lab_runner -q
+          # The independent Chrome fixture imports app.history from this
+          # checkout; install the project only AFTER wheel isolation was
+          # validated, with dependencies still sourced from pinned inputs.
+          uv pip install --python .venv/bin/python --no-deps -e .
+          # GitHub-hosted runners provide Node for browser JavaScript checks.
+          command -v node
+          node --version
+          node --check app/assets/console.js
+          node --check app/assets/approvals.js
+          uv build --sdist --wheel
+          uv pip check --python .venv/bin/python
+          {
+            echo "## Python MCP CI"
+            echo "Python: $(python --version)"
+            echo "| Gate | Result |"
+            echo "| --- | --- |"
+            echo "| Repo full validator (Ruff, mypy, all Python tests, installed wheel, >=95% combined coverage) | PASS |"
+            echo "| Offline pinned-lab-runner safety tests | PASS |"
+            echo "| Public docs and example security checks | PASS |"
+            echo "| Browser JavaScript syntax | PASS |"
+            echo "| Package build and dependency check | PASS |"
+            echo "| Hardened OCI installed-wheel acceptance | Mandatory separate build gate |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+  tests:
+    name: Python package, contracts, security and coverage
+    needs: [python]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require completed Python validation
+        env:
+          PYTHON_RESULT: ${{ needs.python.result }}
+        run: test "$PYTHON_RESULT" = success
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (Node 24)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 (Node 24)
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0 (Node 24)
+        with:
+          version: "0.13.7"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            requirements-dev.txt
+      - name: Install isolated browser fixture dependencies
+        env:
+          MCP_ISSUER: http://localhost
+          MCP_LOGIN_KEY: synthetic-test-login-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          MCP_TOKEN_SIGNING_SECRET: synthetic-test-signing-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          MCP_CIMD_VALIDATE_REMOTE: 'false'
+        run: |
+          set -euo pipefail
+          uv venv --seed --python "$(command -v python3)" .venv
+          uv pip install --python .venv/bin/python -r requirements-dev.txt
+          uv pip install --python .venv/bin/python --no-deps -e .
+          node --check app/assets/console.js
+          node --check app/assets/approvals.js
+      - name: Verify history pager at minimum splitter width in headless Chrome
+        id: browser
+        env:
+          MCP_ISSUER: http://localhost
+          MCP_LOGIN_KEY: synthetic-test-login-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          MCP_TOKEN_SIGNING_SECRET: synthetic-test-signing-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          MCP_CIMD_VALIDATE_REMOTE: 'false'
+        run: |
+          set -euo pipefail
+          node --check tests/fixtures/browser_layout_fixture.js
+          .venv/bin/python tests/integration/browser_layout_check.py
+
+      - name: Set up Buildx for reusable GitHub Actions layer cache
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4 Node24
+      - name: Build and test single hardened OCI image
+        id: oci
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7 Node24
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          # Build-argument compatibility: APP_VERSION is a prefix, not 0.1.N.
+          build-args: |
+            APP_VERSION=0.1
+            BUILD_NUMBER=231
+          cache-from: type=gha,scope=ssh-mcp-ci
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,scope=ssh-mcp-ci,mode=max' || '' }}
+      - name: Record complete validation outcomes
+        if: always()
+        shell: bash
+        env:
+          OFFLINE_RESULT: ${{ needs.python.result }}
+          BROWSER_RESULT: ${{ steps.browser.outcome }}
+          OCI_RESULT: ${{ steps.oci.outcome }}
+        run: |
+          {
+            echo '## Complete validation results'
+            echo '| Mandatory gate | Outcome |'
+            echo '| --- | --- |'
+            echo "| Python 3.12 offline lint, typing, and package | $OFFLINE_RESULT |"
+            echo "| Browser JS syntax and headless Chrome | $BROWSER_RESULT |"
+            echo "| Hardened OCI installed-wheel tests + coverage >=95% | $OCI_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"

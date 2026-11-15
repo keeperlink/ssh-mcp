@@ -1,0 +1,3 @@
+# Compatibility installer for lab workspaces. The versioned package declares
+# runtime dependencies in pyproject.toml.
+-e .

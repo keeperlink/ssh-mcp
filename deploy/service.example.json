@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "environment": "production",
+  "http": {
+    "allowed_origins": [
+      "https://chatgpt.com"
+    ],
+    "request_timeout_seconds": 10
+  },
+  "oauth": {
+    "issuer": "https://mcp.example.com",
+    "operator_subject": "ssh-mcp-operator",
+    "access_token_ttl_seconds": 900,
+    "authorization_code_ttl_seconds": 300,
+    "client_metadata_url": "https://chatgpt.com/oauth/client.json",
+    "validate_client_metadata": true,
+    "client_metadata_cache_seconds": 3600,
+    "allowed_redirect_uris": [
+      "https://chatgpt.com/connector_platform_oauth_redirect"
+    ],
+    "login_max_failures": 5,
+    "login_window_seconds": 300,
+    "session_ttl_seconds": 86400
+  },
+  "ssh": {
+    "enabled": true,
+    "default_timeout_seconds": 60,
+    "max_timeout_seconds": 900,
+    "max_output_bytes": 262144,
+    "max_argument_bytes": 32768,
+    "max_arguments": 32,
+    "max_concurrent": 4,
+    "max_hosts": 16
+  },
+  "jobs": {
+    "enabled": true,
+    "database": "/var/lib/ssh-mcp/jobs.sqlite",
+    "retention_months": 12,
+    "max_active": 32
+  },
+  "history": {
+    "enabled": true,
+    "retention_months": 12
+  },
+  "metrics": {
+    "enabled": true
+  },
+  "viewer": {
+    "enabled": true,
+    "idle_timeout_seconds": 28800,
+    "absolute_timeout_seconds": 86400
+  }
+}

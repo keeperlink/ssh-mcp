@@ -1,0 +1,49 @@
+# Hardened SSH-MCP application behind an EXISTING same-host HTTPS proxy.
+# This is an alternative to examples/basic/compose.yaml, not an overlay.
+# Requires Docker Engine >=28.0.0 for localhost-published HTTP isolation.
+# Older Engines can expose the port to adjacent-L2 hosts despite 127.0.0.1.
+name: ssh-mcp-hardened
+services:
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ssh-mcp:hardened
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    env_file:
+      - "${MCP_PRIVATE_ENV:?Set absolute private env file path}"
+    environment:
+      MCP_BIND_HOST: "0.0.0.0"
+      MCP_BIND_PORT: "8000"
+      FORWARDED_ALLOW_IPS: "${MCP_DOCKER_GATEWAY:?Set bridge gateway IP}"
+    ports:
+      - "127.0.0.1:${MCP_LOCAL_PORT:-8000}:8000"
+    volumes:
+      - mcp-state:/var/lib/ssh-mcp
+      - type: bind
+        source: "${MCP_SSH_CONFIG_DIR:?Set absolute SSH directory path}"
+        target: /run/ssh-mcp
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    stop_grace_period: 45s
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: "${MCP_BRIDGE_SUBNET:?Set unused bridge subnet}"
+          gateway: "${MCP_DOCKER_GATEWAY:?Set bridge gateway IP}"
+
+volumes:
+  mcp-state:

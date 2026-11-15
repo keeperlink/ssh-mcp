@@ -1,0 +1,28 @@
+{
+    admin off
+}
+
+# Caddy obtains and renews HTTPS certificates for MCP_PUBLIC_HOST.
+{$MCP_PUBLIC_HOST} {
+    # Cap unauthenticated form POST bodies before proxying. Do not cap /mcp
+    # here: authenticated MCP tools can carry bounded binary payloads.
+    @form_posts {
+        method POST
+        path /oauth/* /console/*
+    }
+    request_body @form_posts {
+        max_size 16384
+    }
+
+    @public path / /mcp /mcp/* /console /console/* /oauth/* /.well-known/oauth-*
+    handle @public {
+        reverse_proxy mcp:8000 {
+            # Replace a visitor's untrusted X-Forwarded-For chain.
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+    # Block /ready, /health, /metrics and all other app paths.
+    handle {
+        respond "Not found" 404
+    }
+}

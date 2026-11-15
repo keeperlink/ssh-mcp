@@ -1,0 +1,75 @@
+# Self-hosted SSH-MCP. Keep private files outside the Git worktree.
+name: ssh-mcp-standalone
+services:
+  mcp:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ssh-mcp:standalone
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    env_file:
+      - "${MCP_PRIVATE_ENV:?Set absolute private env file path}"
+    environment:
+      MCP_BIND_HOST: "0.0.0.0"
+      MCP_BIND_PORT: "8000"
+      # Trust forwarding headers only from the dedicated Caddy peer.
+      FORWARDED_ALLOW_IPS: "${MCP_CADDY_IP:?Set exact private Caddy IP}"
+    networks:
+      proxy:
+    volumes:
+      - type: volume
+        source: mcp-state
+        target: /var/lib/ssh-mcp
+      - type: bind
+        source: "${MCP_SSH_CONFIG_DIR:?Set absolute private SSH directory path}"
+        target: /run/ssh-mcp
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    stop_grace_period: 45s
+    # No application port published to the host.
+
+  https:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    depends_on:
+      mcp:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MCP_PUBLIC_HOST: "${MCP_PUBLIC_HOST:?Set public DNS hostname}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    networks:
+      proxy:
+        ipv4_address: "${MCP_CADDY_IP:?Set exact private Caddy IP}"
+
+networks:
+  proxy:
+    # Reserve Caddy's fixed address outside Docker's dynamic allocation pool.
+    # Keep all three values in site.env.example consistent when changing ranges.
+    ipam:
+      config:
+        - subnet: "${MCP_PROXY_SUBNET:?Set unused private subnet}"
+          ip_range: "${MCP_PROXY_DYNAMIC_RANGE:?Set pool excluding Caddy IP}"
+
+volumes:
+  mcp-state:
+  caddy-data:
+  caddy-config:
