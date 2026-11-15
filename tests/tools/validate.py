@@ -52,7 +52,7 @@ def fixture(root: Path) -> Path:
     for source in (
         "scripts/check_coverage.py", "ops/history_db.py",
         "deploy/service.example.json", "examples/basic/compose.yaml", "examples/hardened/compose.yaml",
-        "Dockerfile", "VERSION", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml", ".github/workflows/ci.yml",
+        "Dockerfile", "VERSION", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml", ".github/workflows/ci.yml", ".github/workflows/docker-publish.yml", "docs/container-publishing.md",
     ):
         target = directory / source
         target.parent.mkdir(parents=True, exist_ok=True)

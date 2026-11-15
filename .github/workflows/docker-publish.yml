@@ -1,0 +1,182 @@
+name: Publish Docker Hub image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ssh-mcp-dockerhub-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.repository == 'keeperlink/ssh-mcp' && github.ref == 'refs/heads/main' }}
+    # Configure environment protection to allow ONLY the main branch.
+    environment: dockerhub-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      IMAGE: keeperlink/ssh-mcp
+      VERSION: 0.1.${{ github.run_number }}
+    steps:
+      - name: Require green main CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = keeperlink/ssh-mcp
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=1" --jq '.workflow_runs[0] | [.head_sha, .conclusion] | join(":")')"
+          test "$latest" = "$GITHUB_SHA:success"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build attested OCI archive
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          outputs: type=oci,dest=${{ runner.temp }}/ssh-mcp.oci.tar
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            APP_VERSION=0.1
+            BUILD_NUMBER=${{ github.run_number }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/keeperlink/ssh-mcp
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          cache-from: type=gha,scope=ssh-mcp-ci
+
+      - name: Install OCI copy tool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          skopeo --version
+
+      - name: Verify OCI index and load runnable image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="oci-archive:${RUNNER_TEMP}/ssh-mcp.oci.tar"
+          skopeo inspect --raw "$source" | jq -e '
+            (.manifests | map(select(.platform.os == "linux" and
+              .platform.architecture == "amd64")) | length) == 1
+            and (.manifests | map(select(
+              .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+            )) | length) >= 1
+          ' >/dev/null
+          # Load only the runnable platform; keep the original attested OCI
+          # archive unchanged for both registry tags after smoke testing.
+          skopeo copy "$source" \
+            "docker-archive:${RUNNER_TEMP}/ssh-mcp-smoke.tar:${IMAGE}:${VERSION}"
+          docker load --input "${RUNNER_TEMP}/ssh-mcp-smoke.tar"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker rm -f ssh-mcp-smoke >/dev/null 2>&1 || true' EXIT
+          docker run -d --name ssh-mcp-smoke \
+            --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --pids-limit 128 --memory 512m \
+            --tmpfs /tmp:rw,nosuid,size=16m \
+            --tmpfs /var/lib/ssh-mcp:rw,nosuid,size=64m,uid=10001,gid=10001,mode=0700 \
+            -e MCP_ISSUER=http://localhost \
+            -e MCP_RESOURCE=http://localhost/mcp \
+            -e MCP_ALLOWED_HOSTS=localhost,localhost:8000,127.0.0.1,127.0.0.1:8000 \
+            -e MCP_CIMD_VALIDATE_REMOTE=false \
+            -e MCP_LOGIN_KEY=synthetic-testing-login-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            -e MCP_TOKEN_SIGNING_SECRET=synthetic-testing-signing-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            -e SSH_JOBS_DB=/var/lib/ssh-mcp/jobs.sqlite \
+            -e SSH_JOBS_ENABLED=false \
+            -e HISTORY_VIEWER_ENABLED=false \
+            -e MCP_SSH_TOOLS_ENABLED=false \
+            -e SSH_EXECUTOR_ENABLED=false \
+            "$IMAGE:$VERSION" >/dev/null
+          ready=0
+          for attempt in {1..40}; do
+            if docker exec ssh-mcp-smoke python -c 'from urllib.request import urlopen; assert urlopen("http://127.0.0.1:8000/ready", timeout=2).status == 200' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          test "$ready" -eq 1
+          docker exec -i ssh-mcp-smoke python - <<'PY'
+          from importlib import metadata
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          request = Request(
+              "http://127.0.0.1:8000/mcp",
+              data=b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}',
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              urlopen(request, timeout=3)
+          except HTTPError as exc:
+              assert exc.code in (401, 403), exc.code
+          else:
+              raise AssertionError("Unauthenticated MCP call was accepted")
+          assert metadata.metadata("ssh-mcp")["License-Expression"] == "Apache-2.0"
+          assert Path("/usr/local/share/licenses/ssh-mcp/LICENSE").is_file()
+          assert Path("/usr/local/share/licenses/ssh-mcp/THIRD_PARTY_NOTICES.md").is_file()
+          print("Smoke test passed")
+          PY
+          test "$(docker exec ssh-mcp-smoke id -u)" = 10001
+          test -z "$(docker port ssh-mcp-smoke)"
+
+      - name: Check release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --show-error --output /dev/null \
+            --max-time 20 --write-out '%{http_code}' \
+            "https://hub.docker.com/v2/repositories/$IMAGE/tags/$VERSION")"
+          case "$status" in
+            404) ;;
+            200) echo "Image tag already exists: $IMAGE:$VERSION"; exit 1 ;;
+            *) echo "Cannot verify Docker Hub tag (HTTP $status)"; exit 1 ;;
+          esac
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish tested OCI index
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="oci-archive:${RUNNER_TEMP}/ssh-mcp.oci.tar"
+          expected="sha256:$(skopeo inspect --raw "$source" | sha256sum | cut -d' ' -f1)"
+          for tag in "$VERSION" latest; do
+            skopeo copy --all --preserve-digests \
+              --dest-authfile "$HOME/.docker/config.json" \
+              --digestfile "${RUNNER_TEMP}/${tag}.digest" \
+              "$source" "docker://docker.io/${IMAGE}:${tag}"
+            actual="$(cat "${RUNNER_TEMP}/${tag}.digest")"
+            test "$actual" = "$expected"
+          done
+          echo "digest=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.release.outputs.digest }}
+        run: |
+          echo "Published $IMAGE:$VERSION and $IMAGE:latest ($DIGEST)" >> "$GITHUB_STEP_SUMMARY"
