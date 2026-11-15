@@ -55,6 +55,30 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn("assert tests import only the installed wheel and CLI", validator)
 
 
+    def test_getting_started_runs_published_image_without_source_build(self):
+        guide = (ROOT / "docs/getting-started.md").read_text()
+        compose = (ROOT / "examples/basic/compose.yaml").read_text()
+        self.assertIn("image: ssh-mcp:basic", compose)
+        published = guide.index("docker pull keeperlink/ssh-mcp:0.1.1")
+        tag = guide.index("docker image tag keeperlink/ssh-mcp:0.1.1 ssh-mcp:basic")
+        start = guide.index("up -d --no-build --pull never", tag)
+        source = guide.index("**Alternatively**, to build the image", start)
+        self.assertLess(published, tag)
+        self.assertLess(tag, start)
+        self.assertLess(start, source)
+        self.assertNotIn("compose.yaml build", guide[published:source])
+        self.assertIn("compose.yaml build", guide[source:])
+        self.assertIn("Docker Engine 28.0.0 or newer", guide)
+        self.assertIn("existing HTTPS", guide)
+        self.assertIn(
+            "COPY --chown=10001:10001 docs/getting-started.md "
+            "/validation/docs/getting-started.md",
+            (ROOT / "Dockerfile").read_text(),
+        )
+        self.assertIn('"docs/getting-started.md"',
+                      (ROOT / "tests/tools/validate.py").read_text())
+
+
     def test_dockerhub_publish_requires_reviewed_main_and_smoke_test(self):
         workflow = (ROOT / ".github/workflows/docker-publish.yml").read_text()
         dockerfile = (ROOT / "Dockerfile").read_text()
