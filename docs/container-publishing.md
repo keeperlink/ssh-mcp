@@ -4,11 +4,19 @@ SSH-MCP uses the same manual, test-before-publish approach as
 [request-info-docker](https://github.com/keeperlink/request-info-docker/blob/master/.github/workflows/docker-build.yml).
 
 Before the first release, create the public Docker Hub repository
-`keeperlink/ssh-mcp` and configure these **repository secrets** under
-GitHub Settings → Secrets and variables → Actions:
+`keeperlink/ssh-mcp`. In GitHub **Settings → Environments**, create an
+environment named `dockerhub-publish`. Set **Deployment branches and tags**
+to **Selected branches and tags** and add **only** the branch `main` (no
+wildcards, tags or other branches). Then add two *environment secrets* there:
 
 - `DOCKERHUB_USERNAME` — the Docker Hub account with push access
-- `DOCKERHUB_TOKEN` — a Docker Hub access token with the required push permission
+- `DOCKERHUB_TOKEN` — a Docker Hub access token with push permission
+
+Do **not** use repository-level secrets: those are accessible to other
+branches' workflows. Remove or rotate any earlier repository-level Docker
+Hub credentials after moving them into the restricted environment.
+The environment must be configured before the first dispatch; a workflow
+can otherwise auto-create an unprotected environment.
 
 Do not put credentials in workflow files or build arguments.
 
@@ -16,6 +24,11 @@ To publish, choose **Actions → Publish Docker Hub image → Run workflow** on
 `main`. A successful current `main` CI run is required. The workflow builds
 the final image (including its mandatory installed-wheel tests), smoke-tests
 an isolated container with synthetic credentials, and logs in only afterward.
+
+BuildKit exports one OCI archive with SBOM and provenance. The smoke test
+loads its runnable image from a temporary Docker-format archive. Skopeo
+then copies the unchanged OCI index under both Docker Hub tags, requiring
+matching SHA-256 digests. The workflow never rebuilds the image.
 
 Each manual run publishes `keeperlink/ssh-mcp:0.1.<run-number>` and updates
 `keeperlink/ssh-mcp:latest`. An existing numbered tag cannot be reused by

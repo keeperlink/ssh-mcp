@@ -179,15 +179,27 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn('test "$latest" = "$GITHUB_SHA:success"', workflow)
         self.assertIn("gh api", workflow)
         self.assertIn("cache-from: type=gha,scope=ssh-mcp-ci", workflow)
-        self.assertEqual(workflow.count("docker/build-push-action@"), 2)
+        self.assertEqual(workflow.count("docker/build-push-action@"), 1)
         self.assertEqual(workflow.count("docker/login-action@"), 1)
+        self.assertIn("environment: dockerhub-publish", workflow)
+        self.assertIn("outputs: type=oci,dest=", workflow)
+        self.assertIn("skopeo inspect --raw", workflow)
+        self.assertIn("docker-archive:", workflow)
+        self.assertIn("docker load --input", workflow)
+        self.assertNotIn("docker-daemon:", workflow)
+        self.assertIn("skopeo copy --all --preserve-digests", workflow)
+        self.assertIn('for tag in "$VERSION" latest; do', workflow)
+        self.assertIn('test "$actual" = "$expected"', workflow)
+        self.assertIn('sha256sum', workflow)
+        self.assertIn("Build attested OCI archive", workflow)
+        self.assertIn("Publish tested OCI index", workflow)
+        self.assertNotIn("docker push", workflow)
+        self.assertNotIn("push: true", workflow)
         for action in ("actions/checkout", "docker/setup-buildx-action",
                        "docker/build-push-action", "docker/login-action"):
             self.assertRegex(workflow, re.escape(action) + r"@[a-f0-9]{40}")
         self.assertIn("persist-credentials: false", workflow)
-        self.assertIn("load: true", workflow)
-        self.assertIn("push: false", workflow)
-        self.assertIn("push: true", workflow)
+        self.assertNotIn("load: true", workflow)
         self.assertIn("sbom: true", workflow)
         self.assertIn("provenance: mode=max", workflow)
         self.assertIn("APP_VERSION=0.1", workflow)
@@ -196,8 +208,16 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn("keeperlink/ssh-mcp", workflow)
         self.assertIn("DOCKERHUB_USERNAME", workflow)
         self.assertIn("DOCKERHUB_TOKEN", workflow)
+        guide = (ROOT / "docs/container-publishing.md").read_text()
+        for phrase in ("environment secrets", "Selected branches and tags",
+                       "only", "main", "repository-level secrets", "unprotected environment"):
+            self.assertIn(phrase, guide)
+        self.assertLess(workflow.index("name: Verify OCI index and load runnable image"),
+                        workflow.index("name: Smoke test"))
         self.assertLess(workflow.index("name: Smoke test"),
                         workflow.index("name: Login to Docker Hub"))
+        self.assertLess(workflow.index("name: Login to Docker Hub"),
+                        workflow.index("name: Publish tested OCI index"))
         self.assertLess(workflow.index("name: Check release tag"),
                         workflow.index("name: Login to Docker Hub"))
         for item in ("--network none", "--read-only", "--cap-drop ALL",
@@ -208,6 +228,9 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn("COPY --chown=10001:10001 .github/workflows/docker-publish.yml "
                       "/validation/.github/workflows/docker-publish.yml", dockerfile)
         self.assertIn('".github/workflows/docker-publish.yml"', validator)
+        self.assertIn("COPY --chown=10001:10001 docs/container-publishing.md "
+                      "/validation/docs/container-publishing.md", dockerfile)
+        self.assertIn('"docs/container-publishing.md"', validator)
 
     def test_hardened_public_compose_has_no_extra_privileges(self):
         compose = (ROOT / "examples/hardened/compose.yaml").read_text()
