@@ -4,8 +4,9 @@ Execute only through the separately installed, pinned runner.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_story
+
 import hashlib
-import os
 import time
 
 from client import LabClient
@@ -54,7 +55,7 @@ with LabClient() as client:
         return client.call("apply_patch", {
             "server": "fixture",
             "base_dir": "/home/tester", "reason": "TEST-248 preview acceptance",
-            "story_id": os.environ["SSH_MCP_TEST_STORY"],
+            "story_id": lab_story(),
             "dry_run": preview,
             "atomic": True,
             "patch": "*** Begin Patch\n" + body + "*** End Patch",
@@ -122,7 +123,7 @@ with LabClient() as client:
     def preview_audit_not_write():
         assert batch_id is not None
         wrapper, listing = client.call("list_jobs", {
-            "story_id": os.environ["SSH_MCP_TEST_STORY"], "record_kind": "file",
+            "story_id": lab_story(), "record_kind": "file",
             "limit": 40,
         })
         assert not wrapper.get("isError"), wrapper
@@ -292,5 +293,5 @@ with LabClient() as client:
     check("real_host_authorization_guard", real_host_is_denied)
 
 print(f"SKY248_PR1_SUMMARY passed={passed} failed={failed} "
-      f"story={os.environ.get('SSH_MCP_TEST_STORY','unknown')}", flush=True)
+      f"story={lab_story()}", flush=True)
 raise SystemExit(1 if failed else 0)

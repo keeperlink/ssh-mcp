@@ -49,12 +49,31 @@ def fixture(root: Path) -> Path:
     directory = root / "validation"
     directory.mkdir()
     shutil.copytree(ROOT / "tests", directory / "tests", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    for source in (
+    common = (
         "scripts/check_coverage.py", "ops/history_db.py",
         "deploy/service.example.json", "examples/basic/compose.yaml", "examples/hardened/compose.yaml",
-        "Dockerfile", "VERSION", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml", ".github/workflows/ci.yml", ".github/workflows/docker-publish.yml", "docs/container-publishing.md",
-        "docs/getting-started.md",
-    ):
+        "Dockerfile", "VERSION", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml",
+        ".github/workflows/ci.yml",
+    )
+    # Each producer declares only its additional test-fixture inputs. Missing,
+    # duplicate, redirected or traversal paths fail closed.
+    manifest = ROOT / "tests/tools/fixture-extra.txt"
+    extras: list[str] = []
+    if manifest.exists():
+        for source in manifest.read_text(encoding="utf-8").splitlines():
+            source = source.strip()
+            if not source or source.startswith("#"):
+                continue
+            relative = Path(source)
+            if (relative.is_absolute() or ".." in relative.parts
+                    or not (source.startswith("docs/") or source.startswith(".github/workflows/"))
+                    or source in common or source in extras):
+                raise RuntimeError(f"Invalid installed-wheel fixture asset: {source}")
+            file = ROOT / relative
+            if file.is_symlink() or not file.is_file() or not file.resolve().is_relative_to(ROOT):
+                raise RuntimeError(f"Missing or unsafe installed-wheel fixture asset: {source}")
+            extras.append(source)
+    for source in (*common, *extras):
         target = directory / source
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / source, target)

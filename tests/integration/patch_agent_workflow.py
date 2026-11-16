@@ -4,9 +4,10 @@ Runs with a disposable fixture and the separately reviewed, pinned lab runner.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_story
+
 import hashlib
 import json
-import os
 import time
 import uuid
 
@@ -68,7 +69,7 @@ PATCH = (
     "+Greeting: Welcome, MCP!\n"
     "*** End Patch"
 )
-STORY = os.environ["SSH_MCP_TEST_STORY"]
+STORY = lab_story()
 NAMESPACE = uuid.uuid4().hex[:12]
 state = {"hashes": {}, "preview": None, "apply": None, "ids": {}}
 

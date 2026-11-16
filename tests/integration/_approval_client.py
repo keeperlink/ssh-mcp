@@ -4,6 +4,8 @@ Import only from explicit integration entrypoints, never from the offline suite.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_url
+
 from concurrent.futures import Future
 import os
 import re
@@ -12,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-BASE = os.environ.get("SSH_MCP_TEST_URL", "http://mcp:8000")
+BASE = lab_url()
 CSRF = "__Host-ssh-mcp-console-csrf"
 SESSION = "__Host-ssh-mcp-console"
 ORIGIN = "http://localhost"
