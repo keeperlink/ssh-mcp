@@ -103,6 +103,14 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertEqual(template.count(token), 1)
 
 
+    def test_runtime_base_refreshes_security_packages_for_new_release_builds(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        runtime = dockerfile.split("FROM python:3.14-slim-trixie AS runtime-base", 1)[1]
+        self.assertNotIn("ARG BUILD_DATE", dockerfile)
+        self.assertLess(runtime.index('ARG BUILD_NUMBER=""'),
+                        runtime.index("RUN apt-get update"))
+        self.assertIn("RUN apt-get update && apt-get upgrade -y", runtime)
+
     def test_release_uses_updated_debian_base_and_applies_security_updates(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         for stage in ("dependency-wheels", "application-wheel", "runtime-base"):

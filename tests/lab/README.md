@@ -33,6 +33,10 @@ Follow local host documentation for host identity,
 provisioning and privilege policy; do not embed a real host inventory in
 this reusable project guide. This preflight checks capability, not approval.
 
+Set `REPO_NAME` to the independently reviewed repository slug.
+The preflight verifies that the slug, bare cache and reviewed
+`tests/lab/source.json` agree, without importing untrusted candidate code.
+
 Before staging or executing a runner, independently verify:
 
 - The source cache is a bare repository, its `origin` URL **exactly matches**
@@ -59,18 +63,19 @@ Read-only preflight examples, on the separately approved test host:
 ```sh
 (
   set -euo pipefail
-  cache="$HOME/repos/ssh-mcp.git"
+  REPO_NAME=REVIEWED_REPOSITORY_SLUG
+  cache="$HOME/repos/$REPO_NAME.git"
   test "$(git --git-dir="$cache" rev-parse --is-bare-repository)" = true
   # Use a previously reviewed, already-cached exact runner SHA as the origin
   # trust anchor. Never fetch from a cache whose configured origin is unchecked.
   REFERENCE_SHA=FULL_REVIEWED_CACHED_RUNNER_SHA
-  python3 - "$cache" "$REFERENCE_SHA" <<'PYCODE'
-import ast
+  python3 - "$cache" "$REFERENCE_SHA" "$REPO_NAME" <<'PYCODE'
+import json
 import re
 import subprocess
 import sys
 
-cache, sha = sys.argv[1:]
+cache, sha, repo_name = sys.argv[1:]
 def git(*args):
     result = subprocess.run(["git", "--git-dir=" + cache, *args],
                             capture_output=True, text=True, check=False)
@@ -80,25 +85,19 @@ def git(*args):
 
 if not re.fullmatch(r"[0-9a-f]{40}", sha):
     raise SystemExit("SOURCE_ORIGIN=FAIL")
+if not re.fullmatch(r"[A-Za-z0-9_.-]+", repo_name):
+    raise SystemExit("SOURCE_ORIGIN=FAIL")
 if git("cat-file", "-t", sha) != "commit":
     raise SystemExit("SOURCE_ORIGIN=FAIL")
-# Parse reviewed source as inert data; never import the unverified runner.
 try:
-    source = ast.parse(git("show", f"{sha}:tests/lab/runner.py"))
-except SyntaxError:
+    source = json.loads(git("show", f"{sha}:tests/lab/source.json"))
+    expected = source["origin"]
+except (ValueError, TypeError, KeyError):
     raise SystemExit("SOURCE_ORIGIN=FAIL") from None
-values = [node.value for node in source.body
-          if isinstance(node, ast.Assign)
-          and len(node.targets) == 1
-          and isinstance(node.targets[0], ast.Name)
-          and node.targets[0].id == "ORIGIN"]
-if len(values) != 1:
-    raise SystemExit("SOURCE_ORIGIN=FAIL")
-try:
-    expected = ast.literal_eval(values[0])
-except (SyntaxError, ValueError, TypeError):
-    raise SystemExit("SOURCE_ORIGIN=FAIL") from None
-if not isinstance(expected, str) or git("config", "--get", "remote.origin.url") != expected:
+if (set(source) != {"origin"} or not isinstance(expected, str)
+        or not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", expected)
+        or expected.rsplit("/", 1)[-1].removesuffix(".git") != repo_name
+        or git("config", "--get", "remote.origin.url") != expected):
     raise SystemExit("SOURCE_ORIGIN=FAIL")
 print("SOURCE_ORIGIN=PASS")
 PYCODE
@@ -113,7 +112,7 @@ PYCODE
 
 Supply a **previously reviewed SHA already in the trusted local cache**,
 never a moving branch. The preflight compares the configured source URL to
-that reviewed Git object's `ORIGIN` constant without echoing either URL,
+that reviewed Git object's `tests/lab/source.json` origin without echoing either URL,
 including on failure. If no reviewed SHA is cached, stop and use the private
 trusted-cache bootstrap procedure before fetching. Check listener reachability
 from the **selected lab host**, not from a development peer. Missing prerequisites
@@ -130,9 +129,10 @@ Only use an independently reviewed, merged 40-character SHA.
 
 ```sh
 RUNNER_SHA=FULL_REVIEWED_40_CHARACTER_COMMIT_SHA
+REPO_NAME=REVIEWED_REPOSITORY_SLUG
 (
   set -euo pipefail
-  cache="$HOME/repos/ssh-mcp.git"
+  cache="$HOME/repos/$REPO_NAME.git"
   install="$HOME/tools/ssh-mcp-lab/$RUNNER_SHA"
   test "${#RUNNER_SHA}" -eq 40
   git --git-dir="$cache" fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
@@ -148,7 +148,7 @@ RUNNER_SHA=FULL_REVIEWED_40_CHARACTER_COMMIT_SHA
   test -f "$install/PINNED_COMMIT" && test ! -L "$install/PINNED_COMMIT"
   test "$(cat "$install/PINNED_COMMIT")" = "$RUNNER_SHA"
   test "$(git --git-dir="$cache" cat-file -t "$RUNNER_SHA")" = commit
-  for file in runner.py client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
+  for file in runner.py source.json client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
     test -f "$install/$file" && test ! -L "$install/$file"
     expected=$(git --git-dir="$cache" rev-parse "$RUNNER_SHA:tests/lab/$file")
     actual=$(git hash-object --no-filters "$install/$file")
@@ -160,7 +160,7 @@ RUNNER_SHA=FULL_REVIEWED_40_CHARACTER_COMMIT_SHA
 ```
 
 The shell and Git checks independently verify the approved SHA, pin marker,
-and all five executable/fixture blobs **before** invoking runner Python.
+and all six source/fixture blobs **before** invoking runner Python.
 The runner's `status` command reports state only; it does not validate
 its own pin. Stage and verify a new reviewed pin without changing the
 launcher while an older run is still active.
@@ -173,12 +173,13 @@ the independent SHA/marker/blob check repeated inside that lock:
 
 ```sh
 RUNNER_SHA=FULL_REVIEWED_40_CHARACTER_COMMIT_SHA
+REPO_NAME=REVIEWED_REPOSITORY_SLUG
 (
   set -euo pipefail
   install="$HOME/tools/ssh-mcp-lab/$RUNNER_SHA"
-  state_dir="$HOME/test-results/ssh-mcp"
+  state_dir="$HOME/test-results/$REPO_NAME"
   test -d "$state_dir"
-  cache="$HOME/repos/ssh-mcp.git"
+  cache="$HOME/repos/$REPO_NAME.git"
   mkdir -p "$HOME/bin"
   temp=$(mktemp "$HOME/bin/.ssh-mcp-test.XXXXXX")
   trap 'rm -f "$temp"' EXIT
@@ -193,7 +194,7 @@ RUNNER_SHA=FULL_REVIEWED_40_CHARACTER_COMMIT_SHA
     test -f "$install/PINNED_COMMIT" && test ! -L "$install/PINNED_COMMIT"
     test "$(cat "$install/PINNED_COMMIT")" = "$RUNNER_SHA"
     test "$(git --git-dir="$cache" cat-file -t "$RUNNER_SHA")" = commit
-    for file in runner.py client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
+    for file in runner.py source.json client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
       test -f "$install/$file" && test ! -L "$install/$file"
       expected=$(git --git-dir="$cache" rev-parse "$RUNNER_SHA:tests/lab/$file")
       actual=$(git hash-object --no-filters "$install/$file")
@@ -214,10 +215,11 @@ Record both the previous and new SHA with the acceptance evidence.
 
 ## Setup, execute and clean up
 
-Set `ISSUE_KEY` to an **test identifier in PROJECT-N format accepted by the installed
-runner**. Set `FULL_SHA` to the independently reviewed candidate's
-full 40-character Git commit. For an open PR, supply `--pr PR_NUMBER` so the runner verifies the
-head SHA. For an already merged commit, omit `--pr`.
+Set `ISSUE_KEY` to an approved PROJECT-N test identifier accepted by the
+installed pinned runner. Older versions may accept narrower keys or legacy
+environment variables; upgrade those runners separately before using shared
+tests. Set `FULL_SHA` to the reviewed candidate's full commit SHA.
+For an open PR provide `--pr PR_NUMBER`; omit it after merge.
 
 ```sh
 ssh-mcp-test setup --story ISSUE_KEY --commit FULL_SHA --pr PR_NUMBER
@@ -321,7 +323,7 @@ ssh-mcp-test cleanup --run RUN_ID
 ```
 
 The runner allows only one active run, retains sanitized stage
-results under `~/test-results/ssh-mcp/ISSUE_KEY/RUN_ID/`, and
+results under `~/test-results/REPO_NAME/ISSUE_KEY/RUN_ID/`, and
 uses run-ownership labels to delete **only** its own test containers,
 volumes, network and generated credentials. Ordinary cleanup is
 idempotent. It preserves source caches, built images, source worktrees

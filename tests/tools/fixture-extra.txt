@@ -1,0 +1,4 @@
+# Public OCI publisher contracts require these additional test-only inputs.
+.github/workflows/docker-publish.yml
+docs/container-publishing.md
+docs/getting-started.md

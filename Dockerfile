@@ -16,7 +16,9 @@ COPY app/ ./app/
 RUN python -m pip wheel --disable-pip-version-check --no-cache-dir --no-deps --wheel-dir=/application-wheel .
 
 FROM python:3.14-slim-trixie AS runtime-base
-# Apply stable-security fixes to both the Python base and required SSH libraries.
+# Each new release build number refreshes the runtime-base APT layer.
+# CI also uses no-cache-filters: runtime-base for rebuilt security packages.
+ARG BUILD_NUMBER=""
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -64,10 +66,8 @@ COPY --chown=10001:10001 examples/basic/compose.yaml /validation/examples/basic/
 COPY --chown=10001:10001 examples/hardened/compose.yaml /validation/examples/hardened/compose.yaml
 COPY --chown=10001:10001 Dockerfile VERSION LICENSE THIRD_PARTY_NOTICES.md /validation/
 COPY --chown=10001:10001 pyproject.toml /validation/pyproject.toml
-COPY --chown=10001:10001 .github/workflows/ci.yml /validation/.github/workflows/ci.yml
-COPY --chown=10001:10001 .github/workflows/docker-publish.yml /validation/.github/workflows/docker-publish.yml
-COPY --chown=10001:10001 docs/container-publishing.md /validation/docs/container-publishing.md
-COPY --chown=10001:10001 docs/getting-started.md /validation/docs/getting-started.md
+COPY --chown=10001:10001 .github/workflows/ /validation/.github/workflows/
+COPY --chown=10001:10001 docs/ /validation/docs/
 USER 10001:10001
 WORKDIR /validation
 RUN python -m pip check \

@@ -4,8 +4,9 @@ Execute only through the separately installed, pinned runner.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_story
+
 import json
-import os
 import time
 
 from client import LabClient
@@ -54,7 +55,7 @@ with LabClient() as client:
         patch = "*** Begin Patch\n" + body + "*** End Patch"
         return client.call("apply_patch", {
             "server": "fixture", "reason": "TEST-247 synthetic patch diagnostic",
-            "story_id": os.environ["SSH_MCP_TEST_STORY"],
+            "story_id": lab_story(),
             "base_dir": "/home/tester", "atomic": True,
             "patch": patch, **kwargs,
         })
@@ -211,5 +212,5 @@ with LabClient() as client:
     case("real_host_authorization_guard", no_real_host_access)
 
 print(f"PR3_SUMMARY passed={passed} failed={failed} "
-      f"story={os.environ.get('SSH_MCP_TEST_STORY','unknown')}", flush=True)
+      f"story={lab_story()}", flush=True)
 raise SystemExit(1 if failed else 0)
