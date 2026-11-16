@@ -66,10 +66,8 @@ COPY --chown=10001:10001 examples/basic/compose.yaml /validation/examples/basic/
 COPY --chown=10001:10001 examples/hardened/compose.yaml /validation/examples/hardened/compose.yaml
 COPY --chown=10001:10001 Dockerfile VERSION LICENSE THIRD_PARTY_NOTICES.md /validation/
 COPY --chown=10001:10001 pyproject.toml /validation/pyproject.toml
-COPY --chown=10001:10001 .github/workflows/ci.yml /validation/.github/workflows/ci.yml
-COPY --chown=10001:10001 .github/workflows/docker-publish.yml /validation/.github/workflows/docker-publish.yml
-COPY --chown=10001:10001 docs/container-publishing.md /validation/docs/container-publishing.md
-COPY --chown=10001:10001 docs/getting-started.md /validation/docs/getting-started.md
+COPY --chown=10001:10001 .github/workflows/ /validation/.github/workflows/
+COPY --chown=10001:10001 docs/ /validation/docs/
 USER 10001:10001
 WORKDIR /validation
 RUN python -m pip check \

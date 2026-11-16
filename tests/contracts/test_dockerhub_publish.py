@@ -83,13 +83,12 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn("compose.yaml build", guide[source:])
         self.assertIn("Docker Engine 28.0.0 or newer", guide)
         self.assertIn("existing HTTPS", guide)
-        self.assertIn(
-            "COPY --chown=10001:10001 docs/getting-started.md "
-            "/validation/docs/getting-started.md",
-            (ROOT / "Dockerfile").read_text(),
-        )
-        self.assertIn('"docs/getting-started.md"',
-                      (ROOT / "tests/tools/validate.py").read_text())
+        # The public-only fixture manifest and common Dockerfile make this
+        # safety contract mandatory in the installed wheel and OCI test stage.
+        self.assertIn("COPY --chown=10001:10001 docs/ /validation/docs/",
+                      (ROOT / "Dockerfile").read_text())
+        self.assertIn("docs/getting-started.md",
+                      (ROOT / "tests/tools/fixture-extra.txt").read_text())
 
 
     def test_dockerhub_publish_requires_reviewed_main_and_smoke_test(self):
@@ -166,9 +165,13 @@ class DockerHubPublishingContracts(unittest.TestCase):
                      "Unauthenticated MCP call was accepted", "test -z"):
             self.assertIn(item, workflow)
         self.assertNotIn("--privileged", workflow)
-        self.assertIn("COPY --chown=10001:10001 .github/workflows/docker-publish.yml "
-                      "/validation/.github/workflows/docker-publish.yml", dockerfile)
-        self.assertIn('".github/workflows/docker-publish.yml"', validator)
-        self.assertIn("COPY --chown=10001:10001 docs/container-publishing.md "
-                      "/validation/docs/container-publishing.md", dockerfile)
-        self.assertIn('"docs/container-publishing.md"', validator)
+        # Keep public publisher checks mandatory in both installed-wheel and
+        # OCI runtime tests while the private repository has no publisher flow.
+        self.assertIn("COPY --chown=10001:10001 .github/workflows/ "
+                      "/validation/.github/workflows/", dockerfile)
+        extras = (ROOT / "tests/tools/fixture-extra.txt").read_text()
+        self.assertIn(".github/workflows/docker-publish.yml", extras)
+        self.assertIn("docs/container-publishing.md", extras)
+        self.assertIn("fixture-extra.txt", validator)
+        self.assertIn("python tests/tools/validate.py",
+                      (ROOT / ".github/workflows/ci.yml").read_text())

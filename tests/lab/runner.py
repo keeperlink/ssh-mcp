@@ -24,9 +24,16 @@ import sys
 import time
 from typing import Iterator
 
-ORIGIN = "https://github.com/keeperlink/ssh-mcp.git"
-REPO = ORIGIN.rsplit("/", 1)[-1].removesuffix(".git")
 RUNNER = Path(__file__).resolve().parent
+SOURCE = RUNNER / "source.json"
+# This reviewed file is included in the exact SHA's pinned blob verification.
+# Never accept a candidate PR's runtime-supplied origin or arbitrary repo URL.
+source_config = json.loads(SOURCE.read_text(encoding="utf-8"))
+ORIGIN = source_config.get("origin")
+if (set(source_config) != {"origin"} or not isinstance(ORIGIN, str)
+        or not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", ORIGIN)):
+    raise RuntimeError("Invalid reviewed lab repository origin")
+REPO = ORIGIN.rsplit("/", 1)[-1].removesuffix(".git")
 HOME = Path.home()
 RESULTS = HOME / "test-results" / REPO
 CACHE = HOME / "repos" / (REPO + ".git")
@@ -82,7 +89,7 @@ def trusted_runner_sha() -> str:
         raise LabError("Runner installation lacks a matching reviewed source marker")
     if git("cat-file", "-t", sha) != "commit":
         raise LabError("Pinned runner commit missing from local Git cache")
-    for rel in ("runner.py", "client.py", "smoke.py",
+    for rel in ("runner.py", "source.json", "client.py", "smoke.py",
                 "fixture/Dockerfile", "fixture/entrypoint.sh"):
         expected = git("rev-parse", f"{sha}:tests/lab/{rel}")
         actual = text(["git", "hash-object", "--no-filters", str(RUNNER / rel)])
