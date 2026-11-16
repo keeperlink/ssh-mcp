@@ -258,12 +258,15 @@ class HistoryStore:
                 if re.fullmatch(r"[0-9]{1,9}", value):
                     # Numeric shorthand matches any PROJECT-N, not a
                     # formerly hardcoded organization's issue prefix.
-                    where.append("story_id GLOB ?")
-                    params.append("*-" + str(int(value)))
+                    # Also find native numeric IDs, without losing leading zeros.
+                    where.append("(story_id=? OR story_id GLOB ?)")
+                    params.extend([value, "*-" + str(int(value))])
                     continue
                 if re.fullmatch(r"[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*",
-                                value, flags=re.IGNORECASE):
-                    value = value.upper()
+                                value, flags=re.IGNORECASE | re.ASCII):
+                    where.append("UPPER(story_id)=?")
+                    params.append(value.upper())
+                    continue
             where.append(f"{column}=?")
             params.append(value)
         command = filters.get("command", "").strip()
@@ -738,6 +741,8 @@ def _approval_icon(kind: str) -> str:
 
 
 def _history_page(csrf: str) -> str:
+    story_chars = int(os.getenv("HISTORY_STORY_ID_MAX_CHARS", "16"))
+    story_side = os.getenv("HISTORY_STORY_ID_TRUNCATE_FROM", "end")
     environment_label = {"lab": "LAB", "production": "PROD"}[config.MCP_ENVIRONMENT]
     version_label = (f'<span class="brand-version">v{html.escape(config.MCP_SERVICE_VERSION)}</span>'
                      if config.MCP_SERVICE_VERSION else "")
@@ -817,7 +822,9 @@ def _history_page(csrf: str) -> str:
         '<option>output_limit</option><option>interrupted</option>'
         '<option>partial</option><option>unknown</option></select></label>'
         '</form>'
-        '</section><div class="list-wrap" id="list-wrap"><table class="jobs-table" id="history-table">'
+        '</section><div class="list-wrap" id="list-wrap"><table class="jobs-table" id="history-table" '
+        f'data-story-id-max-chars="{story_chars}" '
+        f'data-story-id-truncate-from="{html.escape(story_side, quote=True)}">'
         '<colgroup><col class="col-time"><col class="col-story"><col class="col-host">'
         '<col class="col-command"><col class="col-mode"><col class="col-status">'
         '<col class="col-duration"></colgroup><thead><tr>'

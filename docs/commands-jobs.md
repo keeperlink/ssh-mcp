@@ -11,6 +11,12 @@ no unaudited execution fallback.
 `execute_command` accepts `server` (approved alias), an argv array,
 required non-sensitive `reason`, optional `story_id`, timeout,
 optional absolute `cwd` and explicit `strict_bash`/`privileged` flags.
+The optional story ID is a string of up to 80 characters, not a Jira-only
+number. Common tracker values such as SKY-308, #123, 12345 and
+owner/repo#123 are accepted; whitespace and control characters are not.
+IDs are retained verbatim in audit storage; only their table display can
+be shortened through the Console configuration.
+
 Prefer direct argv for one executable:
 
 ~~~yaml

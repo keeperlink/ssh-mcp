@@ -148,7 +148,7 @@
 .jobs-table tr[data-id]:hover{background:#f1f7ff}
 .jobs-table tr.selected{background:#e9f3ff}
 .jobs-table tr.selected td:first-child{padding-left:14px}
-.jobs-table .story-id{color:#145ed2;font-weight:750}
+.jobs-table .story-id{color:#145ed2;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{border-radius:999px;padding:5px 9px;font-size:10px;font-weight:750}
 .chip.succeeded{background:#dcf8e4;color:#126a31}
 .chip.running{background:#e1edff;color:#155dd8}
@@ -269,7 +269,7 @@
 .overview .filters .filter-status{grid-column:auto}
 .jobs-table{table-layout:fixed;min-width:760px;width:100%}
 .jobs-table .col-time{width:145px}
-.jobs-table .col-story{width:77px}
+.jobs-table .col-story{width:var(--story-id-column-width,145px)}
 .jobs-table .col-host{width:112px}
 .jobs-table .col-mode{width:62px}
 .jobs-table .col-status{width:105px}

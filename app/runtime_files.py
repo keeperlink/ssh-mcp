@@ -38,6 +38,7 @@ SECTIONS = {
     "metrics": {"enabled"},
     "viewer": {"enabled", "idle_timeout_seconds", "absolute_timeout_seconds"},
 }
+VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from"}
 HARD = {"max_timeout_seconds": 36000, "max_output_bytes": 1048576,
         "max_argument_bytes": 65536, "max_arguments": 64,
         "max_concurrent": 32, "max_hosts": 200, "max_active": 256}
@@ -116,7 +117,9 @@ def _valid_settings(settings: dict[str, Any]) -> None:
     if (set(settings) != required
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
-                set(settings[section]) != keys for section, keys in SECTIONS.items())):
+                not (keys <= set(settings[section]) <= (keys | VIEWER_OPTIONAL)
+                     if section == "viewer" else set(settings[section]) == keys)
+                for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
     if type(settings["environment"]) is not str or settings["environment"] not in {"lab", "production"}:
         raise ValueError("Invalid service environment")
@@ -164,7 +167,9 @@ def _valid_settings(settings: dict[str, Any]) -> None:
             jobs["database"] != "/var/lib/ssh-mcp/jobs.sqlite" or
             not _positive(viewer["idle_timeout_seconds"], 86400) or
             not _positive(viewer["absolute_timeout_seconds"], 604800) or
-            viewer["absolute_timeout_seconds"] <= viewer["idle_timeout_seconds"]):
+            viewer["absolute_timeout_seconds"] <= viewer["idle_timeout_seconds"] or
+            not _positive(viewer.get("story_id_max_chars", 16), 80) or
+            viewer.get("story_id_truncate_from", "end") not in ("start", "end")):
         raise ValueError("Invalid execution or persistence settings")
 
 
@@ -287,5 +292,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "HISTORY_VIEWER_ENABLED": "true",
         "HISTORY_IDLE_TIMEOUT_SECONDS": str(cfg["viewer"]["idle_timeout_seconds"]),
         "HISTORY_ABSOLUTE_TIMEOUT_SECONDS": str(cfg["viewer"]["absolute_timeout_seconds"]),
+        "HISTORY_STORY_ID_MAX_CHARS": str(cfg["viewer"].get("story_id_max_chars", 16)),
+        "HISTORY_STORY_ID_TRUNCATE_FROM": cfg["viewer"].get("story_id_truncate_from", "end"),
         "MCP_METRICS_ENABLED": "true", "MCP_METRICS_TOKEN": secrets["metrics_token"],
     }

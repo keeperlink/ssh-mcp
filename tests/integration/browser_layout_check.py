@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from threading import Thread
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 
 # Make the fixture independent of developer and production environment secrets.
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
@@ -37,6 +38,9 @@ JOBS = [
     }
     for index in range(250)
 ]
+JOBS[3]["story_id"] = "owner/repo#12345678901234567890"
+JOBS[240]["story_id"] = "KA-123"  # Not equal to ASCII KA-123.
+JOBS[241]["story_id"] = "KA-123"
 # Root execution is explicit audit metadata, never inferred from a command
 # containing the word sudo. Include confirmed and unconfirmed retained jobs.
 JOBS[5].update({"privileged": True, "root_started": True, "run_as": "root"})
@@ -100,10 +104,20 @@ LIVE_EVENTS: list[dict[str, object]] = []
 LARGE_OUTPUT = b"x" * (13 * 16384) + b"END_OF_CAPTURE"
 JOBS[3]["output_bytes"] = len(LARGE_OUTPUT)
 FINAL_OUTPUT = b"OUTPUT_AFTER_COMPLETION"
-PAGE = _history_page("synthetic-csrf").replace(
-    "</body>", '<output id="layout-test-result">PENDING</output>'
-    '<script src="/layout_fixture.js" defer></script></body>',
-).encode("utf-8")
+def viewer_page() -> bytes:
+    return _history_page("synthetic-csrf").replace(
+        "</body>", '<output id="layout-test-result">PENDING</output>'
+        '<script src="/layout_fixture.js" defer></script></body>',
+    ).encode("utf-8")
+
+
+PAGE = viewer_page()
+with patch.dict(os.environ, {"HISTORY_STORY_ID_MAX_CHARS": "11",
+                             "HISTORY_STORY_ID_TRUNCATE_FROM": "start"}):
+    PAGE_START = viewer_page()
+with patch.dict(os.environ, {"HISTORY_STORY_ID_MAX_CHARS": "1",
+                             "HISTORY_STORY_ID_TRUNCATE_FROM": "start"}):
+    PAGE_ONE = viewer_page()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,7 +127,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlsplit(self.path)
         if url.path == "/console":
-            self.send(PAGE, "text/html")
+            trim = parse_qs(url.query).get("trim", ["end"])[0]
+            self.send(PAGE_ONE if trim == "one" else
+                      PAGE_START if trim == "start" else PAGE, "text/html")
         elif url.path == "/console/assets/style.css":
             self.send((ROOT / "app/assets/style.css").read_bytes(), "text/css")
         elif url.path == "/console/assets/console.js":
@@ -222,6 +238,8 @@ class Handler(BaseHTTPRequestHandler):
                               ("story_id", "story_id"), ("status", "status"),
                               ("conversation_id", "conversation_id")):
                 requested = q.get(key, [""])[0]
+                if key == "story_id":
+                    requested = requested.strip()
                 if requested:
                     if key == "story_id" and requested.isascii() and requested.isdigit() and len(requested) <= 9:
                         suffix = "-" + str(int(requested))
@@ -229,7 +247,14 @@ class Handler(BaseHTTPRequestHandler):
                                     if str(job.get(attr) or "").endswith(suffix)]
                     else:
                         if key == "story_id":
-                            requested = requested.upper()
+                            import re
+                            if re.fullmatch(r"[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*",
+                                            requested, flags=re.IGNORECASE | re.ASCII):
+                                requested = requested.upper()
+                                filtered = [job for job in filtered if
+                                            str(job.get(attr) or "").isascii() and
+                                            str(job.get(attr) or "").upper() == requested]
+                                continue
                         filtered = [job for job in filtered if job.get(attr) == requested]
             command = q.get("command", [""])[0].lower()
             if command:
@@ -335,7 +360,9 @@ def main() -> None:
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        for profile, window in (("narrow", "900,1050"), ("desktop", "1440,1050")):
+        for profile, window, trim in (("narrow", "900,1050", "end"),
+                                      ("desktop", "1440,1050", "start"),
+                                      ("desktop", "1440,1050", "one")):
             with tempfile.TemporaryDirectory(prefix="sky238-layout-") as user_data:
                 result = subprocess.run([
                     chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
@@ -344,7 +371,7 @@ def main() -> None:
                     "--disable-extensions", f"--window-size={window}",
                     "--virtual-time-budget=15000",
                     f"--user-data-dir={user_data}", "--dump-dom",
-                    f"http://127.0.0.1:{server.server_port}/console?layout={profile}",
+                    f"http://127.0.0.1:{server.server_port}/console?layout={profile}&trim={trim}",
                 ], text=True, capture_output=True, timeout=65, check=False)
             if (result.returncode or
                     f'<output id="layout-test-result">PASS {profile}</output>'
@@ -357,7 +384,7 @@ def main() -> None:
                     f"result={marker.group(1) if marker else 'not-reached'}, "
                     f"Chrome stderr tail={result.stderr[-700:]}"
                 )
-            print(f"PASS: {profile} mixed command/file metadata, filters, "
+            print(f"PASS: {profile} ({trim}) mixed command/file metadata, filters, "
                   "pagination, keyboard, refresh, read-only controls")
             if LIVE_STATE["inserted"]:
                 JOBS.remove(LIVE_JOB)

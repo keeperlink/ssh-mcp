@@ -59,6 +59,7 @@ Never mount two service instances to the same database.
 | `SSH_JOBS_ENABLED`, `SSH_JOBS_DB` | Durable, auditable SSH execution with a persistent SQLite path |
 | `SSH_JOBS_RETENTION_MONTHS` | Calendar-month audit retention, 3 in sample |
 | `HISTORY_VIEWER_ENABLED` | Enable the separate password-protected `/console` |
+| `HISTORY_STORY_ID_MAX_CHARS`, `HISTORY_STORY_ID_TRUNCATE_FROM` | Optional console table display settings (16, end by default); managed installations set them via viewer.story_id_max_chars and viewer.story_id_truncate_from in signed service.json |
 | `MCP_METRICS_ENABLED` | Disabled in example; enabling needs a distinct 32+ char `MCP_METRICS_TOKEN` |
 | `MCP_CONVERSATION_HEADER_NAME` | Optional dedicated workflow header; default `X-OpenAI-Session` |
 | `WEB_CONCURRENCY` / `UVICORN_WORKERS` | Both must be 1; grants and approval queue are in-process |

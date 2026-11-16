@@ -33,7 +33,7 @@ class ExecuteCommandRequest(StrictRequest):
     argv: list[ArgItem] = Field(min_length=1, max_length=config.SSH_MAX_ARGUMENTS)
     timeout_seconds: int = Field(default=config.SSH_DEFAULT_TIMEOUT_SECONDS, ge=1, le=config.SSH_MAX_TIMEOUT_SECONDS, strict=True)
     reason: str = Field(min_length=1, max_length=200)
-    story_id: str | None = Field(default=None, max_length=32, pattern=r"^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$")
+    story_id: str | None = Field(default=None, min_length=1, max_length=80, pattern=r"^[^\s\x00-\x1F\x7F-\x9F]+$")
     cwd: str | None = Field(default=None, min_length=1, max_length=4096, strict=True)
     success_exit_codes: list[int] = Field(default_factory=lambda: [0], min_length=1, max_length=16)
     strict_bash: bool = Field(default=False, strict=True)
@@ -103,8 +103,8 @@ class ExecuteCommandsRequest(StrictRequest):
     timeout_seconds: int = Field(default=config.SSH_DEFAULT_TIMEOUT_SECONDS, ge=1,
                                   le=min(900, config.SSH_MAX_TIMEOUT_SECONDS), strict=True)
     reason: str = Field(min_length=1, max_length=200)
-    story_id: str | None = Field(default=None, max_length=32,
-                                 pattern=r"^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$")
+    story_id: str | None = Field(default=None, min_length=1, max_length=80,
+                                 pattern=r"^[^\s\x00-\x1F\x7F-\x9F]+$")
     cwd: str | None = Field(default=None, min_length=1, max_length=4096, strict=True)
     strict_bash: bool = Field(default=False, strict=True)
     stop_on_error: bool = Field(default=True, strict=True)
@@ -213,8 +213,8 @@ class FileOperationRequest(StrictRequest):
     server: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
     path: str = Field(min_length=1, max_length=4096)
     reason: str = Field(min_length=1, max_length=200)
-    story_id: str | None = Field(default=None, max_length=32,
-                                 pattern=r"^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$")
+    story_id: str | None = Field(default=None, min_length=1, max_length=80,
+                                 pattern=r"^[^\s\x00-\x1F\x7F-\x9F]+$")
     base_dir: str | None = Field(default=None, max_length=4096)
     operation_id: str | None = Field(default=None, min_length=8, max_length=120,
                                      pattern=r"^[A-Za-z0-9_-]+$")

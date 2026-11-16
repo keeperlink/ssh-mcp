@@ -130,6 +130,8 @@ class SignedConfigurationTests(unittest.TestCase):
         self.assertEqual(result["MCP_OPERATOR_SUBJECT"], "ssh-mcp-operator")
         self.assertEqual(result["MCP_LOGIN_KEY"], fixture_secret()["oauth_login_key"])
         self.assertEqual(result["SSH_MAX_TIMEOUT_SECONDS"], "900")
+        self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "16")
+        self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "end")
         self.assertNotIn("SSH_FILE_SOURCE_ALLOWED_HOSTS", result)
         self.assertEqual(result["SSH_OUTPUT_LIMIT_BYTES"], "262144")
         self.assertEqual(result["SSH_MAX_ARGUMENT_BYTES"], "32768")
@@ -307,6 +309,23 @@ assert "Timeout max is 36000 seconds." in next(
         with self.assertRaises(ValueError):
             self.prepare()
 
+    def test_legacy_viewer_config_uses_defaults_and_custom_values(self):
+        config = json.loads(json.dumps(self.settings))
+        config["viewer"].pop("story_id_max_chars")
+        config["viewer"].pop("story_id_truncate_from")
+        self.write(self.config, config)
+        result = self.prepare()
+        self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "16")
+        self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "end")
+        config["viewer"].update({"story_id_max_chars": 9,
+                                 "story_id_truncate_from": "start"})
+        self.write(self.config, config)
+        self.target = self.root / "custom-viewer-target"
+        self.target.mkdir(mode=0o700)
+        result = self.prepare()
+        self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "9")
+        self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "start")
+
     def test_fail_closed_service_schema_and_security_allowlists(self):
         changes = (
 
@@ -335,6 +354,10 @@ assert "Timeout max is 36000 seconds." in next(
             ("metrics", "enabled", False),
             ("viewer", "idle_timeout_seconds", 90000),
             ("viewer", "absolute_timeout_seconds", 100),
+            ("viewer", "story_id_max_chars", 0),
+            ("viewer", "story_id_max_chars", 81),
+            ("viewer", "story_id_max_chars", True),
+            ("viewer", "story_id_truncate_from", "middle"),
         )
         for section, field, value in changes:
             with self.subTest(section=section, field=field):

@@ -25,6 +25,7 @@ from app.contracts import (
     JobSummary,
     ListJobsRequest,
     ListServersRequest,
+    ReadFileRequest,
     contract_document,
     validate_request,
 )
@@ -241,6 +242,32 @@ class ContractTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValidationError):
                     ExecuteCommandRequest.model_validate(invalid)
+
+    def test_tracker_independent_story_ids(self):
+        requests = (
+            (ExecuteCommandRequest, {"server": "demo-sandbox", "argv": ["uptime"],
+                                     "reason": "Synthetic test"}),
+            (ExecuteCommandsRequest, {"server": "demo-sandbox",
+                                      "commands": [{"argv": ["uptime"]}],
+                                      "reason": "Synthetic test"}),
+            (ReadFileRequest, {"server": "demo-sandbox", "path": "test.txt",
+                               "reason": "Synthetic test"}),
+        )
+        supported = ("SKY-308", "#123", "12345", "owner/repo#123",
+                     "issue:workspace/ref-123", "x" * 80, "KA-123", "ıA-123")
+        invalid = ("", "x" * 81, "two words", "a\nb", "a\tb", "a\x00b",
+                   "a\x1fb", "a\x7fb", "a\x80b", "a\x81b", "a\x8fb", "a\x9fb")
+        for request_type, base in requests:
+            for story in supported:
+                with self.subTest(request=request_type.__name__, story=story):
+                    self.assertEqual(request_type.model_validate(
+                        {**base, "story_id": story}).story_id, story)
+            for story in invalid:
+                with self.subTest(request=request_type.__name__, invalid=story):
+                    with self.assertRaises(ValidationError):
+                        request_type.model_validate({**base, "story_id": story})
+            with self.assertRaises(ValidationError):
+                request_type.model_validate({**base, "story_id": 12345})
 
     def test_pr1_cwd_strict_bash_and_accepted_exit_contracts(self):
         args = {"server": "demo-sandbox", "argv": ["bash", "-lc", "false"],
