@@ -389,7 +389,7 @@ class JobSummary(BaseModel):
     command_sha256: str | None = None
     privileged: bool = False
     # Requested identity; root_started separately confirms wrapper startup.
-    run_as: Literal["gateway", "root"] = "gateway"
+    run_as: str | None = None
     root_started: bool | None = None
     failure_kind: str | None = None
     approval_status: str | None = None
@@ -582,7 +582,7 @@ class ExecuteCommandsResponse(BaseModel):
     effective_cwd: str | None = None
     strict_bash: bool | None = None
     privileged: bool | None = None
-    run_as: Literal["gateway", "root"] | None = None
+    run_as: str | None = None
     stop_on_error: bool | None = None
     timeout_seconds: int | None = None
     total_steps: int | None = None
@@ -612,7 +612,7 @@ class BatchListItem(BaseModel):
     conversation_id: str | None = None
     status: BatchStatus
     privileged: bool = False
-    run_as: Literal["gateway", "root"] = "gateway"
+    run_as: str | None = None
     total_steps: int = Field(ge=1, le=5)
     created_at: float
 

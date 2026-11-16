@@ -35,6 +35,7 @@ class FakeExecutor:
     """No SSH/network/host side effects; stream only synthetic output."""
 
     def __init__(self):
+        self.username = "mcp-agent"
         self.calls: list[str] = []
         self.cwd_calls = 0
         self.delay = asyncio.Event()
@@ -210,9 +211,12 @@ class BatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from app.history import HistoryStore
 
         cmd = request(argv=[["echo", "first"], ["echo", "second"]])
-        waiting = self.batch.store.create("alice", cmd, pending_approval=True)
+        waiting = self.batch.store.create(
+            "alice", cmd, pending_approval=True, username="mcp-agent",
+        )
         before = self.batch.get("alice", waiting)
         self.assertEqual(before["status"], "awaiting_approval")
+        self.assertEqual(before["run_as"], "mcp-agent")
         self.assertEqual(before["total_steps"], 2)
         self.assertTrue(all(s["status"] == "not_attempted" for s in before["steps"]))
 
@@ -221,14 +225,16 @@ class BatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                          denied=True)
         denied = self.batch.get("alice", waiting)
         self.assertEqual(denied["status"], "denied")
+        self.assertEqual(denied["run_as"], "mcp-agent")
         self.assertEqual(denied["approval_status"], "denied_revoked")
         self.assertEqual(denied["total_steps"], 2)
         self.assertIsNone(denied["next_cursor"])
         self.assertFalse(denied["has_more"])
         self.assertTrue(all(not s["attempted"] for s in denied["steps"]))
         self.assertEqual(self.fake.calls, [])
-        self.assertEqual(HistoryStore(self.store).detail("batch_" + waiting)
-                         ["approval_status"], "denied_revoked")
+        denied_history = HistoryStore(self.store).detail("batch_" + waiting)
+        self.assertEqual(denied_history["approval_status"], "denied_revoked")
+        self.assertEqual(denied_history["run_as"], "mcp-agent")
 
         pending_restart = self.batch.store.create(
             "alice", request(argv=[["echo", "never"]]), pending_approval=True,

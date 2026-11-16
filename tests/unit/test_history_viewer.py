@@ -137,7 +137,7 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertTrue(self.history.detail(root)["privileged"])
         self.assertTrue(self.history.detail(root)["root_started"])
         self.assertEqual(self.history.detail(root)["run_as"], "root")
-        self.assertEqual(self.history.detail(ordinary)["run_as"], "gateway")
+        self.assertIsNone(self.history.detail(ordinary)["run_as"])
         reopened = HistoryStore(JobStore(self.path))
         self.assertEqual(reopened.list({"privileged": "true"})["filtered_total"], 2)
         self.assertEqual(reopened.detail(root)["run_as"], "root")

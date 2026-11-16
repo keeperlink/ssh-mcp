@@ -124,6 +124,7 @@ class JobStore:
                     argv_count INTEGER NOT NULL,
                     command_sha256 TEXT NOT NULL,
                     privileged INTEGER NOT NULL DEFAULT 0 CHECK(privileged IN (0,1)),
+                    ssh_username TEXT,
                     root_started INTEGER CHECK(root_started IN (0,1)),
                     failure_kind TEXT NOT NULL DEFAULT 'none',
                     approval_status INTEGER,
@@ -189,6 +190,7 @@ class JobStore:
                 ("effective_cwd", "TEXT"),
                 ("conversation_id", "TEXT"),
                 ("privileged", "INTEGER NOT NULL DEFAULT 0"),
+                ("ssh_username", "TEXT"),
                 ("root_started", "INTEGER"),
                 ("failure_kind", "TEXT NOT NULL DEFAULT 'none'"),
                 ("approval_status", "INTEGER"),
@@ -289,7 +291,7 @@ class JobStore:
             return removed.rowcount + file_removed.rowcount + batch_removed
 
     def create(self, actor: str, request: ExecuteCommandRequest, *, mode: str = "async",
-               pending_approval: bool = False) -> str:
+               pending_approval: bool = False, username: str | None = None) -> str:
         if mode not in {"sync", "async"}:
             raise ValueError("Invalid execution mode")
         job_id = secrets.token_urlsafe(18)
@@ -300,11 +302,11 @@ class JobStore:
         with self._connect() as db:
             db.execute(
                 """INSERT INTO jobs
-                (id,actor,server,command,argv_count,command_sha256,privileged,status,created_at,updated_at,
-                 mode,story_id,conversation_id,request_json,approval_status)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (id,actor,server,command,argv_count,command_sha256,privileged,ssh_username,
+                 status,created_at,updated_at,mode,story_id,conversation_id,request_json,approval_status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, actor, request.server, _safe_command(request.argv),
-                 len(request.argv), fingerprint, int(request.privileged),
+                 len(request.argv), fingerprint, int(request.privileged), username,
                  "awaiting_approval" if pending_approval else "queued",
                  now, now, mode, request.story_id,
                  conversation_id_context.get(),
@@ -583,7 +585,7 @@ class JobStore:
             "command": row["command"], "argv_count": row["argv_count"],
             "command_sha256": row["command_sha256"],
             "privileged": bool(row["privileged"]),
-            "run_as": "root" if row["privileged"] else "gateway",
+            "run_as": "root" if row["privileged"] else row["ssh_username"],
             "root_started": (None if row["root_started"] is None
                              else bool(row["root_started"])),
             "failure_kind": row["failure_kind"],
@@ -696,6 +698,14 @@ class JobManager:
         # Synchronous MCP/batch tasks need a cancellation handle too.
         self._sync_tasks: dict[str, asyncio.Task[object]] = {}
 
+    def _signed_username(self, actor: str, server: str) -> str | None:
+        # Production executors return a validated HostSpec from signed inventory.
+        # Minimal test doubles may not expose that interface; never invent a user.
+        lookup = getattr(self.executor, "authorized_host", None)
+        if lookup is None:
+            return None
+        return getattr(lookup(actor, server), "username", None)
+
     def submit(self, actor: str, request: ExecuteCommandRequest, *,
                admitted_root: bool = False,
                precreated_id: str | None = None) -> dict[str, Any]:
@@ -711,7 +721,9 @@ class JobManager:
                 self.store.reject_unscheduled(precreated_id, str(exc))
             raise
         self.store.prune()
-        job_id = precreated_id or self.store.create(actor, request)
+        job_id = precreated_id or self.store.create(
+            actor, request, username=self._signed_username(actor, request.server),
+        )
         task = asyncio.create_task(self._run(
             job_id, actor, request, admitted_root=admitted_root,
         ))
@@ -735,7 +747,10 @@ class JobManager:
         if request.server not in self.executor.list_servers(actor):
             raise SSHDenied("SSH host or principal is not authorized")
         self.store.prune()
-        job_id = precreated_id or self.store.create(actor, request, mode="sync")
+        job_id = precreated_id or self.store.create(
+            actor, request, mode="sync",
+            username=self._signed_username(actor, request.server),
+        )
         current = asyncio.current_task()
         assert current is not None
         self._sync_tasks[job_id] = current

@@ -119,10 +119,11 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
         "updated_at", "ended_at",
     } <= batch_columns
     batch_code = "approval_status" if "approval_status" in batch_columns else "NULL"
+    batch_username = "ssh_username" if "ssh_username" in batch_columns else "NULL"
     batch_sql = f"""
           UNION ALL
           SELECT 'batch_'||id,actor,server,'execute_commands',total_steps,'',
-                 privileged,0,failure_kind,
+                 privileged,{batch_username},0,failure_kind,
                  CASE WHEN status='rejected' THEN 'failed' ELSE status END,
                  created_at,updated_at,
                  NULL,ended_at,NULL,NULL,NULL,NULL,
@@ -160,7 +161,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
     db.executescript("""
         CREATE VIEW history_events AS
           SELECT id,actor,server,command,argv_count,command_sha256,privileged,
-                 root_started,failure_kind,status,created_at,updated_at,
+                 ssh_username,root_started,failure_kind,status,created_at,updated_at,
                  started_at,ended_at,exit_code,exit_accepted,effective_cwd,
                  elapsed_seconds,error,output_bytes,cancel_requested,mode,
                  story_id,conversation_id,request_json,
@@ -169,7 +170,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  approval_status
           FROM jobs
           UNION ALL
-          SELECT 'file_'||id,actor,server,operation_kind,0,'',0,NULL,NULL,status,
+          SELECT 'file_'||id,actor,server,operation_kind,0,'',0,NULL,NULL,NULL,status,
                  created_at,updated_at,
                  CASE WHEN status IN ('awaiting_approval','queued','denied')
                            OR (status='failed' AND error_code IN
