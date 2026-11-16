@@ -105,17 +105,45 @@ class ReleaseImageTests(unittest.TestCase):
 
     def test_runtime_base_refreshes_security_packages_for_new_release_builds(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
-        runtime = dockerfile.split("FROM python:3.12-slim-trixie AS runtime-base", 1)[1]
+        runtime = dockerfile.split("FROM python:3.14-slim-trixie AS runtime-base", 1)[1]
         self.assertNotIn("ARG BUILD_DATE", dockerfile)
         self.assertLess(runtime.index('ARG BUILD_NUMBER=""'),
                         runtime.index("RUN apt-get update"))
         self.assertIn("RUN apt-get update && apt-get upgrade -y", runtime)
 
+    def test_release_uses_updated_debian_base_and_applies_security_updates(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        for stage in ("dependency-wheels", "application-wheel", "runtime-base"):
+            self.assertIn(f"FROM python:3.14-slim-trixie AS {stage}", dockerfile)
+        self.assertEqual(dockerfile.count("FROM python:3.14-slim-trixie AS"), 3)
+        self.assertNotIn("python:3.14-slim-bookworm", dockerfile)
+        self.assertIn("RUN apt-get update && apt-get upgrade -y", dockerfile)
+        self.assertIn("apt-get install -y --no-install-recommends openssh-client ca-certificates",
+                      dockerfile)
+        self.assertIn("rm -rf /var/lib/apt/lists/*", dockerfile)
+
+    def test_python_314_only_runtime_and_ci_contract(self):
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        self.assertEqual(project["project"]["requires-python"], ">=3.14")
+        self.assertEqual(project["tool"]["ruff"]["target-version"], "py314")
+        self.assertEqual(project["tool"]["mypy"]["python_version"], "3.14")
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertEqual(dockerfile.count("FROM python:3.14-slim-trixie AS"), 3)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        # Keep this name stable: main branch protection requires this exact context.
+        self.assertIn("name: Python package and installed-wheel coverage", ci)
+        self.assertNotIn("name: Python 3.14 package and installed-wheel coverage", ci)
+        self.assertEqual(ci.count("python-version: '3.14'"), 2)
+        self.assertNotIn("matrix.python-version", ci)
+        self.assertNotIn("python-version: '3.12'", ci)
+        validator = (ROOT / "tests/tools/validate.py").read_text()
+        self.assertIn("sys.version_info[:2] != (3, 14)", validator)
+
     def test_dependency_layers_do_not_depend_on_app_source(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
-        dependencies = dockerfile.split("FROM python:3.12-slim-trixie AS application-wheel")[0]
-        app_wheel = dockerfile.split("FROM python:3.12-slim-trixie AS application-wheel")[1]
-        base = dockerfile.split("FROM python:3.12-slim-trixie AS runtime-base")[1]
+        dependencies = dockerfile.split("FROM python:3.14-slim-trixie AS application-wheel")[0]
+        app_wheel = dockerfile.split("FROM python:3.14-slim-trixie AS application-wheel")[1]
+        base = dockerfile.split("FROM python:3.14-slim-trixie AS runtime-base")[1]
         self.assertIn("AS dependency-wheels", dependencies)
         self.assertIn("COPY pyproject.toml", dependencies)
         self.assertNotIn("COPY app/", dependencies)

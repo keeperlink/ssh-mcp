@@ -164,7 +164,8 @@ with LabClient() as client:
         body = (update("pr3-early.txt", "old", "updated")
                 + update("pr3-stale.txt", "missing", "changed")
                 + update("pr3-later.txt", "untouched", "changed"))
-        w, value = apply(body)
+        # Intentionally non-atomic: earlier files remain applied on later failure.
+        w, value = apply(body, atomic=False)
         assert w.get("isError") and value["status"] == "partial", value
         result = value["result"]
         assert result["partial"] is True, result

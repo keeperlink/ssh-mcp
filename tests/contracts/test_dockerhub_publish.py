@@ -10,9 +10,9 @@ class DockerHubPublishingContracts(unittest.TestCase):
     def test_release_uses_updated_debian_base_and_applies_security_updates(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         for stage in ("dependency-wheels", "application-wheel", "runtime-base"):
-            self.assertIn(f"FROM python:3.12-slim-trixie AS {stage}", dockerfile)
-        self.assertEqual(dockerfile.count("FROM python:3.12-slim-trixie AS"), 3)
-        self.assertNotIn("python:3.12-slim-bookworm", dockerfile)
+            self.assertIn(f"FROM python:3.14-slim-trixie AS {stage}", dockerfile)
+        self.assertEqual(dockerfile.count("FROM python:3.14-slim-trixie AS"), 3)
+        self.assertNotIn("python:3.14-slim-bookworm", dockerfile)
         self.assertIn("RUN apt-get update && apt-get upgrade -y", dockerfile)
         self.assertIn("apt-get install -y --no-install-recommends openssh-client ca-certificates",
                       dockerfile)

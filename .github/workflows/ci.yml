@@ -13,7 +13,7 @@ concurrency:
 jobs:
   python:
     name: Python package and installed-wheel coverage
-    # All pushes, pull requests and manual runs use a GitHub-hosted runner.
+    # Python 3.14 is the sole supported interpreter.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -22,7 +22,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 (Node 24)
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0 (Node 24)
         with:
           version: "0.13.7"
@@ -30,7 +30,7 @@ jobs:
           cache-dependency-glob: |
             pyproject.toml
             requirements-dev.txt
-      - name: Install and validate with pinned Python 3.12
+      - name: Install and validate with pinned Python 3.14
         id: offline
         env:
           MCP_ISSUER: http://localhost
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 --version
-          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12), "Python 3.12 runner required"'
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 14), "Python 3.14 runner required"'
           # Local contributors and GitHub Actions execute the exact same repository-
           # owned validation entrypoint, including an installed-wheel test.
           uv venv --seed --python "$(command -v python3)" .venv
@@ -95,7 +95,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6 (Node 24)
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0 (Node 24)
         with:
           version: "0.13.7"
@@ -157,7 +157,7 @@ jobs:
             echo '## Complete validation results'
             echo '| Mandatory gate | Outcome |'
             echo '| --- | --- |'
-            echo "| Python 3.12 offline lint, typing, and package | $OFFLINE_RESULT |"
+            echo "| Python 3.14 offline lint, typing, and package | $OFFLINE_RESULT |"
             echo "| Browser JS syntax and headless Chrome | $BROWSER_RESULT |"
             echo "| Hardened OCI installed-wheel tests + coverage >=95% | $OCI_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
