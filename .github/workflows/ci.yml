@@ -137,6 +137,7 @@ jobs:
           context: .
           file: Dockerfile
           pull: true  # Resolve current official Python/Debian security base on every build.
+          no-cache-filters: runtime-base  # Force Debian security upgrades on every build.
           push: false
           # Build-argument compatibility: APP_VERSION is a prefix, not 0.1.N.
           build-args: |

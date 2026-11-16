@@ -41,7 +41,10 @@ The public image builds with **Python 3.12 / Debian 13 (Trixie)** in each
 Python build stage, rather than the earlier Debian 12 Bookworm base. Its
 runtime layer installs current Debian security updates and the SSH client
 from the selected distribution. Both CI and manual publication resolve
-the latest official Python base image, even when Buildx caching is enabled.
+the latest official Python base image. Both builds also invalidate the
+runtime-base stage cache, ensuring the Debian package update and upgrade
+and SSH package installation execute even if the Python base digest is
+unchanged. Dependency and application wheel stages may retain their cache.
 
 After each release, scan the **actual published immutable image digest**
 with Docker Scout or another vulnerability scanner and compare it with

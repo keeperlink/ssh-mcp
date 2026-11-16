@@ -45,6 +45,7 @@ jobs:
           context: .
           file: Dockerfile
           pull: true  # Do not publish from a stale cached security base.
+          no-cache-filters: runtime-base  # Force Debian security upgrades on every build.
           platforms: linux/amd64
           outputs: type=oci,dest=${{ runner.temp }}/ssh-mcp.oci.tar
           sbom: true
