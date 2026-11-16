@@ -576,7 +576,7 @@
         appendMeta(meta, "Failure kind", job.failure_kind);
       appendMeta(meta, "Run as", job.privileged === true
         ? (job.status === "denied" ? "root requested · not executed" : "root")
-        : "gateway");
+        : (job.run_as || "Not recorded"));
       if (job.privileged === true) {
         // root_started means the fixed privileged wrapper emitted its
         // startup marker, not that the requested command completed or even

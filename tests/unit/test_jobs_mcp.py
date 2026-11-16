@@ -28,6 +28,7 @@ CLIENT = "https://chatgpt.com/oauth/client.json"
 
 class FakeSSH:
     access = "always-granted"
+    username = "mcp-agent"
     def list_servers(self, actor):
         return ["demo-node-b"] if actor == "ssh-mcp-operator" else []
 
@@ -395,6 +396,7 @@ class JobHTTPTests(unittest.TestCase):
         self.assertFalse(submitted.get("isError"), submitted)
         job = json.loads(submitted["content"][0]["text"])["job"]
         self.assertEqual(job["server"], "demo-node-b")
+        self.assertEqual(job["run_as"], "mcp-agent")
         self.assertIn(job["status"], ("queued", "running", "succeeded"))
         job_id = job["id"]
 
@@ -409,6 +411,7 @@ class JobHTTPTests(unittest.TestCase):
             time.sleep(.01)
         self.assertEqual(completed["status"], "succeeded", completed)
         self.assertEqual(completed["exit_code"], 0)
+        self.assertEqual(completed["run_as"], "mcp-agent")
         self.assertEqual(completed["command"], "hostname")
         self.assertEqual(completed["output_bytes"], 10)
 
@@ -433,6 +436,7 @@ class JobHTTPTests(unittest.TestCase):
         listing = self.tool("list_jobs", {"limit": 5})
         rows = json.loads(listing["content"][0]["text"])["jobs"]
         self.assertEqual(rows[0]["id"], job_id)
+        self.assertEqual(rows[0]["run_as"], "mcp-agent")
         cancel = self.tool("cancel_job", {"job_id": job_id, "reason": "verify completed"})
         self.assertFalse(json.loads(cancel["content"][0]["text"])["cancellation_requested"])
 
@@ -690,6 +694,7 @@ class JobHTTPTests(unittest.TestCase):
         self.assertEqual(stored["mode"], "sync")
         self.assertEqual(stored["story_id"], "TEST-209")
         self.assertEqual(stored["status"], "succeeded")
+        self.assertEqual(stored["run_as"], "mcp-agent")
         output = self.tool("get_job_output", {"job_id": payload["job_id"]})
         blocks = json.loads(output["content"][0]["text"])["chunks"]
         self.assertEqual([chunk["stream"] for chunk in blocks], ["stdout", "stderr"])

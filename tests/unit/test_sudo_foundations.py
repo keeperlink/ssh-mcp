@@ -81,7 +81,9 @@ class DurablePrivilegeAudit(unittest.TestCase):
     def test_job_and_batch_metadata_survive_restart_and_history(self):
         privileged = command(True)
         job_id = self.store.create("alice", privileged, mode="sync")
-        regular_id = self.store.create("alice", command(), mode="sync")
+        regular_id = self.store.create(
+            "alice", command(), mode="sync", username="gateway",
+        )
         self.assertTrue(self.store.begin(job_id))
         self.store.finish(job_id, "transport_error", exit_code=255)
         batches = BatchStore(self.store)
@@ -110,6 +112,40 @@ class DurablePrivilegeAudit(unittest.TestCase):
         self.assertEqual(summary["status"], "interrupted")
         self.assertIs(restored_batch.list("alice")["batches"][0]["privileged"], True)
 
+    def test_signed_nondefault_username_survives_restart_and_root_requested(self):
+        from app.history import HistoryStore
+
+        ordinary_id = self.store.create(
+            "alice", command(), mode="sync", username="mcp-agent",
+            pending_approval=True,
+        )
+        root_id = self.store.create(
+            "alice", command(True), username="mcp-agent",
+            pending_approval=True,
+        )
+        batches = BatchStore(self.store)
+        ordinary_batch = batches.create(
+            "alice", batch(), username="mcp-agent", pending_approval=True,
+        )
+        elevated_batch = batches.create(
+            "alice", batch(True), username="mcp-agent", pending_approval=True,
+        )
+        reopened = JobStore(self.path)
+        self.assertEqual(reopened.get("alice", ordinary_id)["run_as"], "mcp-agent")
+        self.assertEqual(reopened.get("alice", root_id)["run_as"], "root")
+        history = HistoryStore(reopened)
+        self.assertEqual(history.detail(ordinary_id)["run_as"], "mcp-agent")
+        self.assertEqual(history.detail(root_id)["run_as"], "root")
+        restored = BatchStore(reopened)
+        self.assertEqual(restored.get("alice", ordinary_batch)["run_as"], "mcp-agent")
+        self.assertEqual(restored.list("alice")["batches"][1]["run_as"], "mcp-agent")
+        self.assertEqual(restored.get("alice", elevated_batch)["run_as"], "root")
+        # All are pending before the restart, so the batch parent appears in
+        # unified history after recovery even without a child command.
+        self.assertEqual(history.detail("batch_" + ordinary_batch)["run_as"],
+                         "mcp-agent")
+        self.assertEqual(history.detail("batch_" + elevated_batch)["run_as"], "root")
+
     def test_additive_migration_of_legacy_job_and_batch_rows(self):
         original = self.store.create("alice", command())
         batches = BatchStore(self.store)
@@ -118,13 +154,15 @@ class DurablePrivilegeAudit(unittest.TestCase):
             db.execute("DROP VIEW IF EXISTS history_events")
             db.execute("ALTER TABLE jobs DROP COLUMN privileged")
             db.execute("ALTER TABLE jobs DROP COLUMN root_started")
+            db.execute("ALTER TABLE jobs DROP COLUMN ssh_username")
             db.execute("ALTER TABLE command_batches DROP COLUMN privileged")
+            db.execute("ALTER TABLE command_batches DROP COLUMN ssh_username")
         upgraded = JobStore(self.path)
         self.assertIs(upgraded.get("alice", original)["privileged"], False)
-        self.assertEqual(HistoryStore(upgraded).detail(original)["run_as"], "gateway")
-        self.assertIs(BatchStore(upgraded).get(
-            "alice", original_batch,
-        )["privileged"], False)
+        self.assertIsNone(HistoryStore(upgraded).detail(original)["run_as"])
+        legacy_batch = BatchStore(upgraded).get("alice", original_batch)
+        self.assertIs(legacy_batch["privileged"], False)
+        self.assertIsNone(legacy_batch["run_as"])
 
     def test_unadmitted_root_does_not_submit_jobs_or_batches(self):
         class FakeExecutor:

@@ -57,6 +57,7 @@ class BatchStore:
                     effective_cwd TEXT,
                     strict_bash INTEGER NOT NULL,
                     privileged INTEGER NOT NULL DEFAULT 0 CHECK(privileged IN (0,1)),
+                    ssh_username TEXT,
                     approval_status INTEGER,
                     stop_on_error INTEGER NOT NULL,
                     timeout_seconds INTEGER NOT NULL,
@@ -94,6 +95,8 @@ class BatchStore:
                 db.execute("ALTER TABLE command_batches ADD COLUMN conversation_id TEXT")
             if "privileged" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN privileged INTEGER NOT NULL DEFAULT 0")
+            if "ssh_username" not in existing:
+                db.execute("ALTER TABLE command_batches ADD COLUMN ssh_username TEXT")
             # Startup recovery never runs work again. A remote command might
             # have completed without the process recording acknowledgement.
             now = time.time()
@@ -170,7 +173,7 @@ class BatchStore:
             )
 
     def create(self, actor: str, request: ExecuteCommandsRequest, *,
-               pending_approval: bool = False) -> str:
+               pending_approval: bool = False, username: str | None = None) -> str:
         batch_id = secrets.token_urlsafe(18)
         now = time.time()
         with self.jobs._connect() as db:
@@ -178,12 +181,12 @@ class BatchStore:
             db.execute(
                 """INSERT INTO command_batches(
                     id,actor,server,story_id,conversation_id,reason,requested_cwd,
-                    strict_bash,privileged,stop_on_error,timeout_seconds,status,
+                    strict_bash,privileged,ssh_username,stop_on_error,timeout_seconds,status,
                     created_at,updated_at,total_steps,approval_status
-                ) VALUES(?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (batch_id, actor, request.server, request.story_id,
                  conversation_id_context.get(), request.reason,
-                 request.cwd, int(request.strict_bash), int(request.privileged),
+                 request.cwd, int(request.strict_bash), int(request.privileged), username,
                  int(request.stop_on_error),
                  request.timeout_seconds,
                  "awaiting_approval" if pending_approval else "queued",
@@ -423,7 +426,7 @@ class BatchStore:
             "effective_cwd": batch["effective_cwd"],
             "strict_bash": bool(batch["strict_bash"]),
             "privileged": bool(batch["privileged"]),
-            "run_as": "root" if batch["privileged"] else "gateway",
+            "run_as": "root" if batch["privileged"] else batch["ssh_username"],
             "stop_on_error": bool(batch["stop_on_error"]),
             "timeout_seconds": batch["timeout_seconds"],
             "total_steps": total, "steps": steps,
@@ -437,7 +440,7 @@ class BatchStore:
             raise ValueError("Invalid batch pagination")
         with self.jobs._connect() as db:
             rows = db.execute(
-                """SELECT id,server,story_id,conversation_id,status,total_steps,created_at,privileged
+                """SELECT id,server,story_id,conversation_id,status,total_steps,created_at,privileged,ssh_username
                    FROM command_batches WHERE actor=? ORDER BY created_at DESC,id DESC
                    LIMIT ? OFFSET ?""",
                 (actor, limit + 1, cursor),
@@ -449,7 +452,7 @@ class BatchStore:
                 "conversation_id": row["conversation_id"],
                 "status": row["status"],
                 "privileged": bool(row["privileged"]),
-                "run_as": "root" if row["privileged"] else "gateway",
+                "run_as": "root" if row["privileged"] else row["ssh_username"],
                 "total_steps": row["total_steps"], "created_at": row["created_at"],
             } for row in rows[:limit]],
             "next_cursor": cursor + limit if len(rows) > limit else None,
@@ -473,7 +476,7 @@ class BatchManager:
         try:
             if request.privileged and not admitted_root:
                 raise SSHDenied("Privileged execution is not enabled")
-            self.executor.authorized_host(actor, request.server)
+            host = self.executor.authorized_host(actor, request.server)
             if len(self._tasks) >= self.jobs.max_active:
                 raise RuntimeError("Too many active batches")
         except (SSHDenied, RuntimeError) as exc:
@@ -482,7 +485,9 @@ class BatchManager:
                 self.store.reject_unscheduled(precreated_id, reason)
             raise
         self.store.prune()
-        batch_id = precreated_id or self.store.create(actor, request)
+        batch_id = precreated_id or self.store.create(
+            actor, request, username=getattr(host, "username", None),
+        )
         task = asyncio.create_task(self._run(
             actor, batch_id, request, admitted_root=admitted_root,
         ))

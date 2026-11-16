@@ -32,6 +32,7 @@ CONVERSATION = "v1/pr2-synthetic-A"
 class FakeRestrictedSSH:
     access = "restricted"
     privileged_access = "restricted"
+    username = "mcp-agent"
 
     def __init__(self):
         self.calls = 0
@@ -338,6 +339,9 @@ class MCPApprovalHTTPTests(unittest.TestCase):
     def test_held_mcp_call_executes_only_after_grant_and_denial_never_executes(self):
         thread, box, request_id = self._start_call()
         self.assertEqual(self.executor.calls, 0)
+        waiting = self.client.get("/console/api/jobs?time_range=all").json()["jobs"][0]
+        self.assertEqual(waiting["status"], "awaiting_approval")
+        self.assertEqual(waiting["run_as"], "mcp-agent")
         self.assertEqual(self._decision(request_id, "grant").status_code, 200)
         reply = self._result(thread, box)
         self.assertFalse(reply.get("isError"), reply)
@@ -346,6 +350,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         self.assertEqual(self.executor.calls, 1)
         job = self.client.get("/console/api/jobs?time_range=all").json()["jobs"][0]
         self.assertEqual(job["conversation_id"], CONVERSATION)
+        self.assertEqual(job["run_as"], "mcp-agent")
         self.assertEqual(self.manager.snapshot()["active_grants"], [])
 
         thread, box, request_id = self._start_call()

@@ -477,11 +477,12 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     audit_id = jobs.store.create(
                         token.subject, command_request,
                         mode="async" if params.name == "submit_job" else "sync",
-                        pending_approval=True,
+                        pending_approval=True, username=host.username,
                     )
                 elif batch_request is not None and batches is not None:
                     audit_id = batches.store.create(
                         token.subject, batch_request, pending_approval=True,
+                        username=host.username,
                     )
                 elif file_request is not None and files is not None:
                     file_kind = {

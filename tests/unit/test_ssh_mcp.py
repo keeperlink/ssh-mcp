@@ -35,6 +35,7 @@ class FakeExecutor:
         self.calls = []
         self.access = "always-granted"
         self.privileged_access = "none"
+        self.username = "gateway"
         self._sudo_passwords = {}
 
     def list_servers(self, principal):
