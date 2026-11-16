@@ -90,11 +90,11 @@ real HTTPS/SSH acceptance.
 
 ## Contributing and security
 
-See [Public contributing guide](https://github.com/keeperlink/ssh-mcp/blob/main/CONTRIBUTING.md) for local validation and pull requests,
-and [Public security policy](https://github.com/keeperlink/ssh-mcp/blob/main/SECURITY.md) for private vulnerability reporting.
+See [Contributing](CONTRIBUTING.md) for local validation and pull requests,
+and [Security policy](SECURITY.md) for private vulnerability reporting.
 
 ## License
 
 SSH-MCP is licensed under the [Apache License 2.0](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency licensing.
-For maintainers: [Docker Hub publishing](https://github.com/keeperlink/ssh-mcp/blob/main/docs/container-publishing.md).
+For maintainers: [Docker Hub publishing](docs/container-publishing.md).
