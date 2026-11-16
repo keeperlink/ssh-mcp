@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   python:
-    name: Python 3.14 package and installed-wheel coverage
+    name: Python package and installed-wheel coverage
     # Python 3.14 is the sole supported interpreter.
     runs-on: ubuntu-24.04
     timeout-minutes: 15

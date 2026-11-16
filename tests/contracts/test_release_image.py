@@ -122,6 +122,9 @@ class ReleaseImageTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertEqual(dockerfile.count("FROM python:3.14-slim-trixie AS"), 3)
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        # Keep this name stable: main branch protection requires this exact context.
+        self.assertIn("name: Python package and installed-wheel coverage", ci)
+        self.assertNotIn("name: Python 3.14 package and installed-wheel coverage", ci)
         self.assertEqual(ci.count("python-version: '3.14'"), 2)
         self.assertNotIn("matrix.python-version", ci)
         self.assertNotIn("python-version: '3.12'", ci)
