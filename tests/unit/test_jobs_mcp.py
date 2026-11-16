@@ -700,7 +700,7 @@ class JobHTTPTests(unittest.TestCase):
         self.assertEqual([chunk["stream"] for chunk in blocks], ["stdout", "stderr"])
         rejected = self.tool("execute_command", {
             "server": "demo-node-b", "argv": ["id"],
-            "reason": "bad story", "story_id": "bad-id",
+            "reason": "bad story", "story_id": "invalid story id",
         })
         self.assertTrue(rejected.get("isError"))
 
