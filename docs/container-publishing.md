@@ -27,8 +27,16 @@ an isolated container with synthetic credentials, and logs in only afterward.
 
 BuildKit exports one OCI archive with SBOM and provenance. The smoke test
 loads its runnable image from a temporary Docker-format archive. Skopeo
-then copies the unchanged OCI index under both Docker Hub tags, requiring
-matching SHA-256 digests. The workflow never rebuilds the image.
+publishes the unchanged OCI index once under the immutable versioned tag.
+Buildx then copies that registry index to the latest tag without rebuilding
+or changing its media type. Both remote tags are verified against the
+original attested OCI digest.
+
+If publication fails after the versioned tag is created but before latest
+is updated, the versioned image remains valid. Do not rerun the same
+workflow: the immutable tag-existence check will reject that version.
+Reconcile both tags and use a separately reviewed recovery or a new manual
+publication run rather than overwrite the existing numbered release.
 
 Each manual run publishes `keeperlink/ssh-mcp:0.1.<run-number>` and updates
 `keeperlink/ssh-mcp:latest`. An existing numbered tag cannot be reused by

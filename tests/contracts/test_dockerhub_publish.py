@@ -106,9 +106,20 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn("docker-archive:", workflow)
         self.assertIn("docker load --input", workflow)
         self.assertNotIn("docker-daemon:", workflow)
-        self.assertIn("skopeo copy --all --preserve-digests", workflow)
+        # Copy the OCI source only once; retag from the published index
+        # rather than copying an OCI index over an existing latest tag.
+        self.assertEqual(workflow.count("skopeo copy --all --preserve-digests"), 1)
+        self.assertIn('"$source" "docker://docker.io/${IMAGE}:${VERSION}"', workflow)
+        self.assertIn("docker buildx imagetools create", workflow)
+        self.assertIn('--tag "docker.io/${IMAGE}:latest"', workflow)
+        self.assertIn('"docker.io/${IMAGE}:${VERSION}"', workflow)
         self.assertIn('for tag in "$VERSION" latest; do', workflow)
+        self.assertIn("docker buildx imagetools inspect --raw", workflow)
         self.assertIn('test "$actual" = "$expected"', workflow)
+        self.assertLess(workflow.index("skopeo copy --all --preserve-digests"),
+                        workflow.index("docker buildx imagetools create"))
+        self.assertLess(workflow.index("docker buildx imagetools create"),
+                        workflow.index('for tag in "$VERSION" latest; do'))
         self.assertIn('sha256sum', workflow)
         self.assertIn("Build attested OCI archive", workflow)
         self.assertIn("Publish tested OCI index", workflow)
