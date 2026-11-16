@@ -167,12 +167,22 @@ jobs:
           set -euo pipefail
           source="oci-archive:${RUNNER_TEMP}/ssh-mcp.oci.tar"
           expected="sha256:$(skopeo inspect --raw "$source" | sha256sum | cut -d' ' -f1)"
+          # Publish the attested OCI index only once, to its immutable tag.
+          skopeo copy --all --preserve-digests \
+            --dest-authfile "$HOME/.docker/config.json" \
+            --digestfile "${RUNNER_TEMP}/${VERSION}.digest" \
+            "$source" "docker://docker.io/${IMAGE}:${VERSION}"
+          test "$(cat "${RUNNER_TEMP}/${VERSION}.digest")" = "$expected"
+
+          # Buildx copies an existing single OCI index without converting it.
+          # This retains its original digest and the SBOM/provenance manifests.
+          docker buildx imagetools create \
+            --tag "docker.io/${IMAGE}:latest" \
+            "docker.io/${IMAGE}:${VERSION}"
+
+          # Verify the actual registry bytes for both tags, not only output.
           for tag in "$VERSION" latest; do
-            skopeo copy --all --preserve-digests \
-              --dest-authfile "$HOME/.docker/config.json" \
-              --digestfile "${RUNNER_TEMP}/${tag}.digest" \
-              "$source" "docker://docker.io/${IMAGE}:${tag}"
-            actual="$(cat "${RUNNER_TEMP}/${tag}.digest")"
+            actual="sha256:$(docker buildx imagetools inspect --raw "docker.io/${IMAGE}:${tag}" | sha256sum | cut -d' ' -f1)"
             test "$actual" = "$expected"
           done
           echo "digest=$expected" >> "$GITHUB_OUTPUT"
