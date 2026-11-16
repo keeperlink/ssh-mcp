@@ -79,6 +79,19 @@ class ApprovalDialogMarkupTests(unittest.TestCase):
         self.assertIn('type="button" class="approval-grant">Grant</button>', page)
 
 
+class StoryIdViewerConfigTests(unittest.TestCase):
+    def test_table_attributes_follow_config_without_changing_detail_values(self):
+        with patch.dict(os.environ, {"HISTORY_STORY_ID_MAX_CHARS": "9",
+                                     "HISTORY_STORY_ID_TRUNCATE_FROM": "start"}):
+            page = _history_page("test")
+        self.assertIn('data-story-id-max-chars="9"', page)
+        self.assertIn('data-story-id-truncate-from="start"', page)
+        js = (ASSETS / "console.js").read_text()
+        self.assertIn("const tableStoryId = (id)", js)
+        self.assertIn('td.setAttribute("title", job.story_id)', js)
+        self.assertIn('["Story ID", job.story_id || "—"]', js)
+
+
 class GrantBubbleLayoutTests(unittest.TestCase):
     def test_long_grants_use_rounded_hours_and_header_remaining_width(self):
         """The header strip must expand leftward toward the History title."""
@@ -426,6 +439,23 @@ class HistoryStoreTests(unittest.TestCase):
                           self.history.list({"story_id": "other-243"})["jobs"]],
                          [second])
 
+    def test_generic_issue_ids_are_stored_and_filterable_as_strings(self):
+        issue_ids = ("#123", "12345", "00012", "owner/repo#123",
+                     "other:opaque/issues/" + "x" * 60)
+        for story in issue_ids:
+            job_id = self.save(story_id=story)
+            rows = self.history.list({"story_id": story})["jobs"]
+            self.assertEqual([row["id"] for row in rows], [job_id])
+            self.assertEqual(rows[0]["story_id"], story)
+        # The existing short search must match both TEST-243 and native 243.
+        lower = self.save(story_id="eng-123")
+        self.assertEqual([row["id"] for row in
+                          self.history.list({"story_id": "ENG-123"})["jobs"]], [lower])
+        numeric = self.save(story_id="243")
+        prefixed = self.save(story_id="TEST-243")
+        matches = self.history.list({"story_id": "243"})["jobs"]
+        self.assertEqual({row["id"] for row in matches}, {numeric, prefixed})
+
     def test_invalid_queries_are_rejected(self):
         for query in (
             {"status": "nonsense"}, {"mode": "pretend"}, {"story_id": "x" * 100},
@@ -672,6 +702,8 @@ class BrowserTests(unittest.TestCase):
         page = self.client.get("/console")
         self.assertEqual(page.status_code, 200)
         self.assertIn("SSH-MCP Operator Console", page.text)
+        self.assertIn('data-story-id-max-chars="16"', page.text)
+        self.assertIn('data-story-id-truncate-from="end"', page.text)
         self.assertNotIn("SSH Command History", page.text)
         self.assertNotIn("brand-separator", page.text)
         self.assertIn('<h1 class="visually-hidden">', page.text)
@@ -1001,8 +1033,8 @@ class BrowserTests(unittest.TestCase):
             'ssh-mcp-console-time-format', 'localStorage.getItem("ssh-mcp-console-time-format")',
             'loadRegisteredHosts()', 'new Option("All hosts", "")',
             'updateCommandClear()', '$("clear-command").addEventListener("click"',
-            'data.story_id = String(Number(story))',
-            'jobStory.endsWith("-" + f.story_id)',
+            'data.story_id = story;',
+            'jobStory.endsWith("-" + String(Number(f.story_id)))',
             'const next = Math.max(1, Math.min(state.pageCount, target))',
             'new ResizeObserver(onResize).observe(listWrap)',
             '$("rows-per-page").addEventListener("change"',

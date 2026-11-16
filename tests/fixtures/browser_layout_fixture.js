@@ -64,6 +64,20 @@
         name + " outside footer bounds");
     }
   }
+  function verifyStoryIdTruncation() {
+    const full = "owner/repo#12345678901234567890";
+    const table = document.getElementById("history-table");
+    const max = Number(table.dataset.storyIdMaxChars);
+    const side = table.dataset.storyIdTruncateFrom;
+    const expected = side === "start"
+      ? "…" + Array.from(full).slice(-(max - 1)).join("")
+      : Array.from(full).slice(0, max - 1).join("") + "…";
+    const cell = document.querySelector('#job-rows tr[data-id="synthetic-3"] td.story-id');
+    assert(cell, "Long generic ID row missing");
+    assert(cell.textContent === expected && cell.textContent.length === max,
+      "Table did not truncate from configured side within character budget");
+    assert(cell.title === full, "Table tooltip must preserve the full issue ID");
+  }
   function fileDetailsAreReadOnly() {
     assert(document.getElementById("detail-title").textContent === "File operation details",
       "File operation must show file-specific detail");
@@ -867,6 +881,7 @@
     }, "configured pane width");
     await pause(160);
     assertVisibleControls();
+    verifyStoryIdTruncation();
     await checkMixedHistoryAndKeyboard();
     await checkConversationClickAndClear();
     await checkDetailIsolationAndErrors();

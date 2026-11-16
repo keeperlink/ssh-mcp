@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from threading import Thread
 from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 
 # Make the fixture independent of developer and production environment secrets.
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
@@ -37,6 +38,7 @@ JOBS = [
     }
     for index in range(250)
 ]
+JOBS[3]["story_id"] = "owner/repo#12345678901234567890"
 # Root execution is explicit audit metadata, never inferred from a command
 # containing the word sudo. Include confirmed and unconfirmed retained jobs.
 JOBS[5].update({"privileged": True, "root_started": True, "run_as": "root"})
@@ -100,10 +102,17 @@ LIVE_EVENTS: list[dict[str, object]] = []
 LARGE_OUTPUT = b"x" * (13 * 16384) + b"END_OF_CAPTURE"
 JOBS[3]["output_bytes"] = len(LARGE_OUTPUT)
 FINAL_OUTPUT = b"OUTPUT_AFTER_COMPLETION"
-PAGE = _history_page("synthetic-csrf").replace(
-    "</body>", '<output id="layout-test-result">PENDING</output>'
-    '<script src="/layout_fixture.js" defer></script></body>',
-).encode("utf-8")
+def viewer_page() -> bytes:
+    return _history_page("synthetic-csrf").replace(
+        "</body>", '<output id="layout-test-result">PENDING</output>'
+        '<script src="/layout_fixture.js" defer></script></body>',
+    ).encode("utf-8")
+
+
+PAGE = viewer_page()
+with patch.dict(os.environ, {"HISTORY_STORY_ID_MAX_CHARS": "11",
+                             "HISTORY_STORY_ID_TRUNCATE_FROM": "start"}):
+    PAGE_START = viewer_page()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -113,7 +122,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         url = urlsplit(self.path)
         if url.path == "/console":
-            self.send(PAGE, "text/html")
+            self.send(PAGE_START if parse_qs(url.query).get("trim") == ["start"]
+                      else PAGE, "text/html")
         elif url.path == "/console/assets/style.css":
             self.send((ROOT / "app/assets/style.css").read_bytes(), "text/css")
         elif url.path == "/console/assets/console.js":
@@ -344,7 +354,8 @@ def main() -> None:
                     "--disable-extensions", f"--window-size={window}",
                     "--virtual-time-budget=15000",
                     f"--user-data-dir={user_data}", "--dump-dom",
-                    f"http://127.0.0.1:{server.server_port}/console?layout={profile}",
+                    f"http://127.0.0.1:{server.server_port}/console?layout={profile}&trim="
+                    f"{'start' if profile == 'desktop' else 'end'}",
                 ], text=True, capture_output=True, timeout=65, check=False)
             if (result.returncode or
                     f'<output id="layout-test-result">PASS {profile}</output>'

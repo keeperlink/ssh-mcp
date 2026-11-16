@@ -13,6 +13,18 @@
     requestJson: false, responseJson: false, privilegedOnly: false,
     cancelling: new Set()
   };
+  const historyTable = $("history-table");
+  const storyMaxChars = Number(historyTable.dataset.storyIdMaxChars || 16);
+  const storyTruncateFrom = historyTable.dataset.storyIdTruncateFrom || "end";
+  historyTable.style.setProperty("--story-id-column-width", (storyMaxChars + 3) + "ch");
+  const tableStoryId = (id) => {
+    if (!id) return "—";
+    const chars = Array.from(id);
+    if (chars.length <= storyMaxChars) return id;
+    return storyTruncateFrom === "start"
+      ? "…" + chars.slice(-(storyMaxChars - 1)).join("")
+      : chars.slice(0, storyMaxChars - 1).join("") + "…";
+  };
   const rowBody = $("job-rows");
   const listWrap = $("list-wrap");
   const tooltip = $("command-tooltip");
@@ -113,7 +125,7 @@
     if (state.privilegedOnly) data.privileged = "true";
     data.conversation_id = String(data.conversation_id || "").trim();
     const story = String(data.story_id || "").trim();
-    if (/^[0-9]{1,9}$/.test(story)) data.story_id = String(Number(story));
+    if (/^[0-9]{1,9}$/.test(story)) data.story_id = story;
     else if (/^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$/i.test(story))
       data.story_id = story.toUpperCase();
     return Object.fromEntries(Object.entries(data).filter(([, value]) => Boolean(value)));
@@ -126,8 +138,10 @@
     if (f.story_id) {
       const jobStory = String(job.story_id || "");
       if (/^[0-9]{1,9}$/.test(f.story_id)) {
-        if (!jobStory.endsWith("-" + f.story_id)) return false;
-      } else if (jobStory !== f.story_id) return false;
+        if (jobStory !== f.story_id && !jobStory.endsWith("-" + String(Number(f.story_id))))
+          return false;
+      } else if (/^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$/i.test(f.story_id)
+        ? jobStory.toUpperCase() !== f.story_id : jobStory !== f.story_id) return false;
     }
     if (f.conversation_id && job.conversation_id !== f.conversation_id) return false;
     if (f.status && job.status !== f.status) return false;
@@ -209,13 +223,14 @@
     if (!["queued", "running"].includes(job.status)) state.cancelling.delete(job.id);
     row.replaceChildren();
     const cells = [
-      formatTableTime(job.created_at), job.story_id || "—", job.server,
+      formatTableTime(job.created_at), tableStoryId(job.story_id), job.server,
       (job.command_preview || job.command || "—").split(/\r?\n/, 1)[0],
       modeName(job.mode), statusLabel(job.status), duration(job.elapsed_seconds)
     ];
     cells.forEach((value, index) => {
       const td = make("td", index < 4 || index === 6 ? value : undefined,
         index === 3 ? "mono" : index === 1 && job.story_id ? "story-id" : "");
+      if (index === 1 && job.story_id) td.setAttribute("title", job.story_id);
       if (index === 3) {
         td.classList.add("command-cell");
         if (job.record_kind !== "file" && job.privileged === true) {

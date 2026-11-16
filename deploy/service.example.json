@@ -48,6 +48,8 @@
   "viewer": {
     "enabled": true,
     "idle_timeout_seconds": 28800,
-    "absolute_timeout_seconds": 86400
+    "absolute_timeout_seconds": 86400,
+    "story_id_max_chars": 16,
+    "story_id_truncate_from": "end"
   }
 }
