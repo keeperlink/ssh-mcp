@@ -4,10 +4,11 @@ Execute only through the separately installed, pinned lab runner.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_story
+
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-import os
 import time
 from urllib.parse import quote
 
@@ -100,7 +101,7 @@ def run_unrestricted(token: str, mode: str) -> None:
 
     result, data = call(token, conversation, "execute_commands", {
         "server": "fixture", "privileged": True, "reason": "isolated privileged batch",
-        "story_id": os.environ["SSH_MCP_TEST_STORY"], "commands": [{"argv": ["id", "-un"]},
+        "story_id": lab_story(), "commands": [{"argv": ["id", "-un"]},
                                              {"argv": ["id", "-un"]}],
     })
     assert not result.get("isError") and data and data["status"] == "succeeded"
@@ -183,7 +184,7 @@ def main() -> None:
     parser.add_argument("--mode", required=True,
                         choices=("none", "auto", "sudo-only", "combined"))
     mode = parser.parse_args().mode
-    assert os.environ.get("SSH_MCP_TEST_STORY"), "Run via the isolated lab test runner"
+    assert lab_story(), "Run via the isolated lab test runner"
     with LabClient() as bootstrap:
         bootstrap.authorize()
         assert bootstrap.token

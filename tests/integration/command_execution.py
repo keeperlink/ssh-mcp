@@ -4,7 +4,8 @@ Executed through the separately installed, pinned runner; no real host access.
 """
 from __future__ import annotations
 
-import os
+from tests.integration._lab_env import lab_story
+
 import time
 
 from client import LabClient
@@ -242,6 +243,6 @@ with LabClient() as client:
 
     case("real_host_denied", unauthorized_real_host)
 
-print(f"PR1_SUMMARY passed={passed} failed={failed} story={os.environ.get('SSH_MCP_TEST_STORY','unknown')}",
+print(f"PR1_SUMMARY passed={passed} failed={failed} story={lab_story()}",
       flush=True)
 raise SystemExit(1 if failed else 0)

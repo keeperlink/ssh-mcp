@@ -4,9 +4,10 @@ Execute only through the separately installed, pinned runner.
 """
 from __future__ import annotations
 
+from tests.integration._lab_env import lab_story
+
 import base64
 import json
-import os
 import time
 
 from client import LabClient
@@ -41,7 +42,7 @@ with LabClient() as c:
         return c.call("execute_commands", {
             "server": "fixture", "commands": commands,
             "reason": "TEST-247: isolated batch acceptance",
-            "story_id": os.environ["SSH_MCP_TEST_STORY"], **opts,
+            "story_id": lab_story(), **opts,
         })
 
     def absent(path):
@@ -191,7 +192,7 @@ with LabClient() as c:
         r, b = c.call("execute_commands", {
             "server": "demo-fixture", "commands": [step(["id", "-un"])],
             "reason": "TEST-247 synthetic denied host",
-            "story_id": os.environ["SSH_MCP_TEST_STORY"],
+            "story_id": lab_story(),
         })
         assert r.get("isError"), r
         return "unapproved_host_denied"
@@ -199,5 +200,5 @@ with LabClient() as c:
     check("real_host_not_authorized", unauthorized_host)
 
 print(f"PR2_SUMMARY passed={passed} failed={failed} "
-      f"story={os.environ.get('SSH_MCP_TEST_STORY','unknown')}", flush=True)
+      f"story={lab_story()}", flush=True)
 raise SystemExit(1 if failed else 0)

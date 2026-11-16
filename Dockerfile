@@ -16,7 +16,9 @@ COPY app/ ./app/
 RUN python -m pip wheel --disable-pip-version-check --no-cache-dir --no-deps --wheel-dir=/application-wheel .
 
 FROM python:3.12-slim-trixie AS runtime-base
-# Apply stable-security fixes to both the Python base and required SSH libraries.
+# Each new release build number refreshes the runtime-base APT layer.
+# CI also uses no-cache-filters: runtime-base for rebuilt security packages.
+ARG BUILD_NUMBER=""
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends openssh-client ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

@@ -19,10 +19,13 @@ _approval_client.py is an **undiscoverable shared integration helper**, not an e
 
 ## Example isolated lab run
 
-After approving a specific reviewed full commit SHA, invoke the independently installed ssh-mcp-test runner on the approved lab. Replace FULL_REVIEWED_COMMIT_SHA and RUN_ID with the actual reviewed commit and setup result:
+After approving a specific reviewed full commit SHA, set APPROVED_STORY_KEY to
+a valid approved identifier accepted by the separately installed runner.
+Invoke that pinned runner on the approved lab. Replace FULL_REVIEWED_COMMIT_SHA
+and RUN_ID with the reviewed commit and setup result:
 
 ~~~
-ssh-mcp-test setup --story TEST-297 --commit FULL_REVIEWED_COMMIT_SHA
+ssh-mcp-test setup --story "$APPROVED_STORY_KEY" --commit FULL_REVIEWED_COMMIT_SHA
 ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/command_execution.py
 ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/command_batches.py
 ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/patch_preview.py
