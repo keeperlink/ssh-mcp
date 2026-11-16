@@ -35,6 +35,25 @@ Each manual run publishes `keeperlink/ssh-mcp:0.1.<run-number>` and updates
 the workflow. Releases currently target `linux/amd64`; add other platforms
 only after validating them.
 
+## Security-maintained base images
+
+The public image builds with **Python 3.12 / Debian 13 (Trixie)** in each
+Python build stage, rather than the earlier Debian 12 Bookworm base. Its
+runtime layer installs current Debian security updates and the SSH client
+from the selected distribution. Both CI and manual publication resolve
+the latest official Python base image. Both builds also invalidate the
+runtime-base stage cache, ensuring the Debian package update and upgrade
+and SSH package installation execute even if the Python base digest is
+unchanged. Dependency and application wheel stages may retain their cache.
+
+After each release, scan the **actual published immutable image digest**
+with Docker Scout or another vulnerability scanner and compare it with
+the previous release. Review fixable high/critical findings and check Debian's
+security tracker before treating a scanner result as mitigated. Moving to
+Trixie does **not** resolve every SQLite, Kerberos, or other outstanding CVE;
+do not claim zero vulnerabilities based only on a successful Docker build.
+Image publication remains manual and subject to successful main-branch CI.
+
 The published image includes the Apache-2.0 license and third-party notices,
 OCI source/revision/version labels, SBOM, and BuildKit provenance attestations.
 Use the versioned tag or resolved digest for deployments, and keep a known-good
