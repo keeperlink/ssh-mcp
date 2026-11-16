@@ -4,7 +4,7 @@
 Run with `python tests/tools/validate.py` for all gates, or use --mode
 lint/unit. Installs a local wheel into a temporary target and tests it
 outside the source checkout, reproducing the mandatory OCI test layout.
-Requires a tested Python 3.12 or 3.14 environment prepared from requirements-dev.txt.
+Requires a Python 3.14 environment prepared from requirements-dev.txt.
 """
 from __future__ import annotations
 
@@ -135,8 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("all", "lint", "unit"), default="all")
     args = parser.parse_args(argv)
-    if sys.version_info[:2] not in ((3, 12), (3, 14)):
-        print("FAIL: full validator requires Python 3.12 or 3.14", file=sys.stderr)
+    if sys.version_info[:2] != (3, 14):
+        print("FAIL: full validator requires Python 3.14", file=sys.stderr)
         return 1
     env = offline_environment(os.environ)
     checks = 0

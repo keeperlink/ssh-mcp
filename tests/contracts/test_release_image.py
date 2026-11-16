@@ -114,21 +114,19 @@ class ReleaseImageTests(unittest.TestCase):
                       dockerfile)
         self.assertIn("rm -rf /var/lib/apt/lists/*", dockerfile)
 
-    def test_python_314_primary_runtime_preserves_python_312_library_support(self):
+    def test_python_314_only_runtime_and_ci_contract(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        self.assertEqual(project["project"]["requires-python"], ">=3.12")
-        # Both targets stay at the lowest supported Python syntax/API level.
-        self.assertEqual(project["tool"]["ruff"]["target-version"], "py312")
-        self.assertEqual(project["tool"]["mypy"]["python_version"], "3.12")
+        self.assertEqual(project["project"]["requires-python"], ">=3.14")
+        self.assertEqual(project["tool"]["ruff"]["target-version"], "py314")
+        self.assertEqual(project["tool"]["mypy"]["python_version"], "3.14")
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertEqual(dockerfile.count("FROM python:3.14-slim-trixie AS"), 3)
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("python-version: ['3.12', '3.14']", ci)
-        self.assertEqual(ci.count("python-version: " + chr(36) +
-                                  "{{ matrix.python-version }}"), 1)
-        self.assertIn("python-version: '3.14'", ci)
+        self.assertEqual(ci.count("python-version: '3.14'"), 2)
+        self.assertNotIn("matrix.python-version", ci)
+        self.assertNotIn("python-version: '3.12'", ci)
         validator = (ROOT / "tests/tools/validate.py").read_text()
-        self.assertIn("((3, 12), (3, 14))", validator)
+        self.assertIn("sys.version_info[:2] != (3, 14)", validator)
 
     def test_dependency_layers_do_not_depend_on_app_source(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
