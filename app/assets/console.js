@@ -21,6 +21,7 @@
     if (!id) return "—";
     const chars = Array.from(id);
     if (chars.length <= storyMaxChars) return id;
+    if (storyMaxChars === 1) return "…";
     return storyTruncateFrom === "start"
       ? "…" + chars.slice(-(storyMaxChars - 1)).join("")
       : chars.slice(0, storyMaxChars - 1).join("") + "…";
@@ -125,8 +126,8 @@
     if (state.privilegedOnly) data.privileged = "true";
     data.conversation_id = String(data.conversation_id || "").trim();
     const story = String(data.story_id || "").trim();
-    if (/^[0-9]{1,9}$/.test(story)) data.story_id = story;
-    else if (/^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$/i.test(story))
+    data.story_id = story;
+    if (/^[A-Za-z][A-Za-z0-9]{1,12}-[1-9][0-9]*$/.test(story))
       data.story_id = story.toUpperCase();
     return Object.fromEntries(Object.entries(data).filter(([, value]) => Boolean(value)));
   };
@@ -140,8 +141,9 @@
       if (/^[0-9]{1,9}$/.test(f.story_id)) {
         if (jobStory !== f.story_id && !jobStory.endsWith("-" + String(Number(f.story_id))))
           return false;
-      } else if (/^[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*$/i.test(f.story_id)
-        ? jobStory.toUpperCase() !== f.story_id : jobStory !== f.story_id) return false;
+      } else if (/^[A-Za-z][A-Za-z0-9]{1,12}-[1-9][0-9]*$/.test(f.story_id)
+        ? !/^[A-Za-z][A-Za-z0-9]{1,12}-[1-9][0-9]*$/.test(jobStory)
+          || jobStory.toUpperCase() !== f.story_id : jobStory !== f.story_id) return false;
     }
     if (f.conversation_id && job.conversation_id !== f.conversation_id) return false;
     if (f.status && job.status !== f.status) return false;

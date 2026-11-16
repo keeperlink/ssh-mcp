@@ -451,6 +451,17 @@ class HistoryStoreTests(unittest.TestCase):
         lower = self.save(story_id="eng-123")
         self.assertEqual([row["id"] for row in
                           self.history.list({"story_id": "ENG-123"})["jobs"]], [lower])
+        # Unicode lookalikes are generic opaque IDs, not ASCII project keys.
+        # Python Unicode re.IGNORECASE accepts these as [A-Z]; SQLite's
+        # UPPER() handles ASCII only, so preserve exact UTF-8 matching.
+        for unicode_id, ascii_id in (("KA-123", "KA-123"),
+                                     ("ıA-123", "IA-123")):
+            unicode_job = self.save(story_id=unicode_id)
+            ascii_job = self.save(story_id=ascii_id)
+            self.assertEqual([x["id"] for x in self.history.list(
+                {"story_id": unicode_id})["jobs"]], [unicode_job])
+            self.assertEqual([x["id"] for x in self.history.list(
+                {"story_id": ascii_id})["jobs"]], [ascii_job])
         numeric = self.save(story_id="243")
         prefixed = self.save(story_id="TEST-243")
         matches = self.history.list({"story_id": "243"})["jobs"]

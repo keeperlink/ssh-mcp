@@ -254,8 +254,9 @@ class ContractTests(unittest.TestCase):
                                "reason": "Synthetic test"}),
         )
         supported = ("SKY-308", "#123", "12345", "owner/repo#123",
-                     "issue:workspace/ref-123", "x" * 80)
-        invalid = ("", "x" * 81, "two words", "a\nb", "a\tb", "a\x00b")
+                     "issue:workspace/ref-123", "x" * 80, "KA-123", "ıA-123")
+        invalid = ("", "x" * 81, "two words", "a\nb", "a\tb", "a\x00b",
+                   "a\x1fb", "a\x7fb", "a\x80b", "a\x81b", "a\x8fb", "a\x9fb")
         for request_type, base in requests:
             for story in supported:
                 with self.subTest(request=request_type.__name__, story=story):

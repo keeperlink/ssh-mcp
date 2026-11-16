@@ -263,7 +263,7 @@ class HistoryStore:
                     params.extend([value, "*-" + str(int(value))])
                     continue
                 if re.fullmatch(r"[A-Z][A-Z0-9]{1,12}-[1-9][0-9]*",
-                                value, flags=re.IGNORECASE):
+                                value, flags=re.IGNORECASE | re.ASCII):
                     where.append("UPPER(story_id)=?")
                     params.append(value.upper())
                     continue

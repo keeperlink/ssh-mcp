@@ -69,7 +69,7 @@
     const table = document.getElementById("history-table");
     const max = Number(table.dataset.storyIdMaxChars);
     const side = table.dataset.storyIdTruncateFrom;
-    const expected = side === "start"
+    const expected = max === 1 ? "…" : side === "start"
       ? "…" + Array.from(full).slice(-(max - 1)).join("")
       : Array.from(full).slice(0, max - 1).join("") + "…";
     const cell = document.querySelector('#job-rows tr[data-id="synthetic-3"] td.story-id');
@@ -189,6 +189,47 @@
     assert(Number(localStorage.getItem("ssh-mcp-console-split")) === after,
       "Keyboard splitter setting did not persist");
     await pause(120);
+  }
+  async function checkUnicodeStoryFilters() {
+    const story = document.getElementById("filters").elements.namedItem("story_id");
+    for (const [value, jobId] of [["KA-123", "synthetic-240"],
+                                 ["KA-123", "synthetic-241"],
+                                 ["ka-123", "synthetic-241"]]) {
+      story.value = value;
+      story.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitFor(() => document.getElementById("page-summary").textContent ===
+        "Showing 1–1 of 1" && document.querySelectorAll("#job-rows tr").length === 1
+        && document.querySelector('#job-rows tr[data-id="' + jobId + '"]'),
+      "Unicode/ASCII issue ID filter unexpectedly folded " + value);
+    }
+    // Preserve the typed whitespace for editing but send a trimmed generic ID
+    // to the API. A mismatched live filter caused each poll to reload the list.
+    const padded = "  owner/repo#12345678901234567890  ";
+    story.value = padded;
+    story.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent ===
+      "Showing 1–1 of 1" && document.querySelectorAll("#job-rows tr").length === 1
+      && document.querySelector('#job-rows tr[data-id="synthetic-3"]'),
+    "padded generic issue ID filter");
+    assert(story.value === padded && JSON.parse(
+      localStorage.getItem("ssh-mcp-console-filters")).story_id === padded,
+    "The entered generic issue ID must remain verbatim in the form and preferences");
+    const originalFetch = window.fetch;
+    let reloaded = 0;
+    window.fetch = (...args) => {
+      if (String(args[0]).startsWith("/console/api/jobs?")) reloaded++;
+      return originalFetch(...args);
+    };
+    try {
+      await pause(2200);
+      assert(reloaded === 0, "Untrimmed live filter is reloading History every poll");
+    } finally {
+      window.fetch = originalFetch;
+    }
+    story.value = "";
+    story.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent
+      .includes("of 250"), "clear Unicode issue ID filter");
   }
   async function checkFiltersAndLiveRefresh() {
     const form = document.getElementById("filters");
@@ -882,6 +923,7 @@
     await pause(160);
     assertVisibleControls();
     verifyStoryIdTruncation();
+    await checkUnicodeStoryFilters();
     await checkMixedHistoryAndKeyboard();
     await checkConversationClickAndClear();
     await checkDetailIsolationAndErrors();
