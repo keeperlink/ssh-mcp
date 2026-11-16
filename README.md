@@ -5,6 +5,14 @@ server for audited SSH commands, bounded file operations and operator-controlled
 access. OAuth-protected clients select explicitly allowed SSH hosts; the
 service uses pinned host keys and the remote account's existing permissions.
 
+## Operator Console and approvals
+
+![Operator Console job history and time-limited privileged-command approval dialog side by side](docs/images/operator-console-and-approvals.png)
+
+[View Operator Console full size](docs/images/operator-console-demo.png) · [View approval dialog full size](docs/images/operator-approval-demo.png)
+
+*Illustrative demo screenshots with synthetic hosts, commands, identifiers, and history counts. No live credentials or infrastructure details are shown.*
+
 This project is licensed under Apache-2.0. To deploy, follow the
 [getting started guide](docs/getting-started.md) and configure a trusted HTTPS
 reverse proxy, OAuth and a dedicated SSH account. A prebuilt Linux AMD64 image
