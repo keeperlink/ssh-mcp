@@ -103,11 +103,22 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertEqual(template.count(token), 1)
 
 
+    def test_release_uses_updated_debian_base_and_applies_security_updates(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        for stage in ("dependency-wheels", "application-wheel", "runtime-base"):
+            self.assertIn(f"FROM python:3.12-slim-trixie AS {stage}", dockerfile)
+        self.assertEqual(dockerfile.count("FROM python:3.12-slim-trixie AS"), 3)
+        self.assertNotIn("python:3.12-slim-bookworm", dockerfile)
+        self.assertIn("RUN apt-get update && apt-get upgrade -y", dockerfile)
+        self.assertIn("apt-get install -y --no-install-recommends openssh-client ca-certificates",
+                      dockerfile)
+        self.assertIn("rm -rf /var/lib/apt/lists/*", dockerfile)
+
     def test_dependency_layers_do_not_depend_on_app_source(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
-        dependencies = dockerfile.split("FROM python:3.12-slim-bookworm AS application-wheel")[0]
-        app_wheel = dockerfile.split("FROM python:3.12-slim-bookworm AS application-wheel")[1]
-        base = dockerfile.split("FROM python:3.12-slim-bookworm AS runtime-base")[1]
+        dependencies = dockerfile.split("FROM python:3.12-slim-trixie AS application-wheel")[0]
+        app_wheel = dockerfile.split("FROM python:3.12-slim-trixie AS application-wheel")[1]
+        base = dockerfile.split("FROM python:3.12-slim-trixie AS runtime-base")[1]
         self.assertIn("AS dependency-wheels", dependencies)
         self.assertIn("COPY pyproject.toml", dependencies)
         self.assertNotIn("COPY app/", dependencies)
