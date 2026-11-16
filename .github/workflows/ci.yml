@@ -49,6 +49,7 @@ jobs:
 
           python tests/tools/validate.py
           python scripts/check_public_docs.py
+          python tests/tools/check_credential_patterns.py
           python scripts/check_public_source.py
           # Run the pinned lab-runner safety checks explicitly as well as
           # through installed-wheel unit discovery. These offline mocks do

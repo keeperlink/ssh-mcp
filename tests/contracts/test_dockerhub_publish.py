@@ -60,6 +60,7 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn("python -m unittest tests.unit.test_lab_runner -q", workflow)
         self.assertIn("python scripts/check_public_docs.py", workflow)
         self.assertIn("python scripts/check_public_source.py", workflow)
+        self.assertIn("python tests/tools/check_credential_patterns.py", workflow)
         self.assertIn("node --check", workflow)
         self.assertIn("uv build --sdist --wheel", workflow)
         validator = (ROOT / "tests/tools/validate.py").read_text()
