@@ -83,7 +83,7 @@ For upgrades from earlier installations, preserve the persistent database,
 signed policy and SSH host-key trust. Read [Upgrade compatibility](docs/upgrade-compatibility.md)
 before changing image or state paths.
 
-Development uses Python 3.12; repository validation checks Ruff, strict
+Development uses Python 3.14 (3.12 remains CI-tested); validation checks Ruff, strict
 mypy, installed-wheel tests, at least 95% combined coverage and a hardened
 OCI image. Offline checks do not substitute for separately authorized
 real HTTPS/SSH acceptance.

@@ -45,7 +45,7 @@ only after validating them.
 
 ## Security-maintained base images
 
-The public image builds with **Python 3.12 / Debian 13 (Trixie)** in each
+The public image builds with **Python 3.14 / Debian 13 (Trixie)** in each
 Python build stage, rather than the earlier Debian 12 Bookworm base. Its
 runtime layer installs current Debian security updates and the SSH client
 from the selected distribution. Both CI and manual publication resolve

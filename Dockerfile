@@ -2,20 +2,20 @@
 # Cache runtime dependencies independently of app source changes.
 # pyproject.toml is the ONLY dependency source of truth; avoid maintaining
 # another requirements file that could diverge from the shipped wheel.
-FROM python:3.12-slim-trixie AS dependency-wheels
+FROM python:3.14-slim-trixie AS dependency-wheels
 WORKDIR /src
 COPY pyproject.toml ./
 RUN python -c "import tomllib; from pathlib import Path; data=tomllib.loads(Path('pyproject.toml').read_text()); Path('/runtime-requirements.txt').write_text(chr(10).join(data['project']['dependencies']) + chr(10))" \
     && python -m pip wheel --disable-pip-version-check --no-cache-dir --wheel-dir=/dependency-wheels -r /runtime-requirements.txt
 
 # App-only wheel build: changing app/* does not invalidate dependency wheels.
-FROM python:3.12-slim-trixie AS application-wheel
+FROM python:3.14-slim-trixie AS application-wheel
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY app/ ./app/
 RUN python -m pip wheel --disable-pip-version-check --no-cache-dir --no-deps --wheel-dir=/application-wheel .
 
-FROM python:3.12-slim-trixie AS runtime-base
+FROM python:3.14-slim-trixie AS runtime-base
 # Apply stable-security fixes to both the Python base and required SSH libraries.
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends openssh-client ca-certificates \

@@ -41,6 +41,8 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 app = ["assets/*.css", "assets/*.js"]
 
+# Keep static checks at the declared minimum Python 3.12 compatibility floor.
+# The deployed Docker image and primary CI interpreter use Python 3.14.
 [tool.ruff]
 target-version = "py312"
 line-length = 110

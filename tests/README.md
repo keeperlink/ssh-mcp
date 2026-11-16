@@ -21,7 +21,7 @@ The suite separates offline unit and contract checks from explicit integration t
 
 ## Offline validation
 
-From a reviewed unprivileged development checkout with the pinned Python 3.12 environment:
+From a reviewed unprivileged development checkout with the pinned Python 3.14 environment:
 
 ~~~
 python tests/tools/run_unit_tests.py
