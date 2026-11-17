@@ -58,19 +58,18 @@ _AUTH_CODES: dict[str, "StoredAuthorizationCode"] = {}
 _AUTH_CODES_LOCK = asyncio.Lock()
 _LOGIN_FAILURES: dict[str, deque[float]] = defaultdict(deque)
 _LOGIN_FAILURES_LOCK = asyncio.Lock()
-# Mutable list is owned by the MCP transport and populated only after an
-# authenticated operator authorizes a validated client's callback.
-_TRANSPORT_ALLOWED_ORIGINS: list[str] | None = None
+class ActiveOrigins(list[str]):
+    """MCP Origin membership follows live authorized sessions, not stale cache."""
 
-
-def register_transport_origins(origins: list[str]) -> None:
-    global _TRANSPORT_ALLOWED_ORIGINS
-    _TRANSPORT_ALLOWED_ORIGINS = origins
-
-
-def admit_authorized_origin(origin: str) -> None:
-    if _TRANSPORT_ALLOWED_ORIGINS is not None and origin not in _TRANSPORT_ALLOWED_ORIGINS:
-        _TRANSPORT_ALLOWED_ORIGINS.append(origin)
+    def __contains__(self, origin: object) -> bool:
+        if super().__contains__(origin):
+            return True  # Explicitly configured origins retain their existing policy.
+        if not isinstance(origin, str):
+            return False
+        try:
+            return origin in session_store().active_origins()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return False  # Failure to inspect session state never grants access.
 
 
 
@@ -754,7 +753,6 @@ async def oauth_token(request: Request) -> JSONResponse:
         )
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         return _oauth_error("server_error", "OAuth session store unavailable", status_code=503)
-    admit_authorized_origin(redirect_origin(redirect_uri))
     return _json_no_store({
         "access_token": access_token,
         "token_type": "Bearer",

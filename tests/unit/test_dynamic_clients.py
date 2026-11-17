@@ -66,9 +66,7 @@ class DynamicOAuthTests(unittest.TestCase):
         oauth._CIMD_REGISTRY = ClientMetadataRegistry()
         oauth._AUTH_CODES.clear()
         oauth._LOGIN_FAILURES.clear()
-        self.origins = []
-        oauth.register_transport_origins(self.origins)
-        self.addCleanup(lambda: oauth.register_transport_origins(None))
+        self.origins = oauth.ActiveOrigins([])
         app = FastAPI()
         app.include_router(oauth.router)
         manager = TestClient(app)
@@ -113,8 +111,10 @@ class DynamicOAuthTests(unittest.TestCase):
         first = self.grant(a)
         second = self.grant(b)
         self.assertNotEqual(first["access_token"], second["access_token"])
-        self.assertEqual(set(self.origins), {"https://alpha.example", "https://beta.example"})
-        self.assertEqual(set(SessionStore(self.db).active_origins()), set(self.origins))
+        self.assertIn("https://alpha.example", self.origins)
+        self.assertIn("https://beta.example", self.origins)
+        self.assertEqual(set(SessionStore(self.db).active_origins()),
+                         {"https://alpha.example", "https://beta.example"})
         cross = self.client.post("/oauth/token", data={
             "grant_type": "refresh_token", "refresh_token": first["refresh_token"],
             "client_id": b,
@@ -245,6 +245,15 @@ class DynamicOAuthTests(unittest.TestCase):
         _verify_metadata(client, CLIENTS[client][1], doc)
         for change in (
             {"token_endpoint_auth_methods_supported": []},
+            {"token_endpoint_auth_methods_supported": "none"},
+            {"token_endpoint_auth_methods_supported": 5},
+            {"token_endpoint_auth_methods_supported": [None]},
+            {"token_endpoint_auth_methods_supported": ["client_secret_basic"]},
+            {"token_endpoint_auth_method": None},
+            {"token_endpoint_auth_method": ["none"]},
+            {"token_endpoint_auth_method": 7},
+            {"token_endpoint_auth_method": "none",
+             "token_endpoint_auth_methods_supported": ["client_secret_basic"]},
             {"response_types": []},
             {"response_types": "code"},
             {"grant_types": []},
@@ -256,6 +265,111 @@ class DynamicOAuthTests(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises(ValueError):
                     _verify_metadata(client, CLIENTS[client][1], {**doc, **change})
+
+    def test_origin_policy_tracks_revocation_expiry_and_shared_clients(self):
+        from app.oauth_sessions import SessionStore
+        store = SessionStore(self.db)
+        a, b = CLIENTS
+        origin = "https://alpha.example"
+        static = oauth.ActiveOrigins(["https://static.example"])
+        self.grant(a)
+        first = store.list_sessions()[0]["id"]
+        self.grant(a)
+        second = next(item["id"] for item in store.list_sessions()
+                      if item["id"] != first)
+        self.grant(b)
+        self.assertIn(origin, self.origins)
+        self.assertIn(origin, static)
+        self.assertIn("https://static.example", static)
+        self.assertEqual(store.revoke(first), 1)
+        self.assertIn(origin, self.origins)  # Another active session survives.
+        self.assertEqual(store.revoke(second), 1)
+        self.assertNotIn(origin, self.origins)
+        self.assertIn("https://beta.example", self.origins)
+        self.assertIn("https://static.example", static)
+        with store._connect() as db:
+            db.execute("UPDATE oauth_sessions SET expires_at=? WHERE client_id=?",
+                       (0, b))
+        self.assertNotIn("https://beta.example", self.origins)
+        self.assertNotIn(origin, static)
+
+    def test_metadata_fetch_does_not_block_cached_unrelated_client(self):
+        import time
+        registry = ClientMetadataRegistry()
+        a, b = CLIENTS
+        registry._cache[b] = (time.monotonic() + 60, metadata(b))
+
+        async def slow_metadata(client_id, timeout):
+            await asyncio.sleep(60)
+            return metadata(client_id)
+
+        async def check():
+            with patch("app.client_metadata._fetch_metadata", side_effect=slow_metadata):
+                slow = asyncio.create_task(registry.validate(
+                    a, CLIENTS[a][1], timeout=0.05, cache_ttl=60,
+                ))
+                try:
+                    cached = await asyncio.wait_for(registry.validate(
+                        b, CLIENTS[b][1], timeout=1, cache_ttl=60,
+                    ), timeout=0.3)
+                    self.assertEqual(cached["client_id"], b)
+                    with self.assertRaisesRegex(ValueError, "timed out"):
+                        await asyncio.wait_for(slow, timeout=2)
+                finally:
+                    if not slow.done():
+                        slow.cancel()
+                        await asyncio.gather(slow, return_exceptions=True)
+
+        asyncio.run(check())
+
+    def test_ipv6_zone_authority_cannot_enter_oauth_csp(self):
+        from app.client_metadata import redirect_origin
+        from app.oauth import _security_headers
+        self.assertEqual(redirect_origin("https://EXAMPLE.org:443/cb"),
+                         "https://example.org")
+        self.assertEqual(redirect_origin("https://[2001:0db8::0001]:443/cb"),
+                         "https://[2001:db8::1]")
+        for bad in (
+            "https://[fe80::1%25eth0]/callback",
+            "https://[fe80::1%eth0]/callback",
+            "https://[::1%25lo0]:8443/callback",
+            "https://%65xample.org/cb",
+            "https://example.org\\@evil.invalid/cb",
+        ):
+            with self.subTest(url=bad):
+                with self.assertRaises(ValueError):
+                    _security_headers(bad)
+                with self.assertRaises(ValueError):
+                    redirect_origin(bad)
+
+    def test_client_scoped_service_status_counters(self):
+        import time
+        from types import SimpleNamespace
+        from app.jobs import JobStore
+        from app.contracts import ExecuteCommandRequest
+        from app.operational import service_status
+
+        store = JobStore(self.db, retention_months=12)
+        a, b = CLIENTS
+        actors = [oauth.client_audit_actor(client_id) for client_id in (a, b)]
+        for index, actor in enumerate(actors):
+            for n in range(index + 1):
+                store.create(actor, ExecuteCommandRequest(
+                    server="synthetic", argv=["id", "-u"], reason="test status",
+                ), mode="sync")
+        all_status = service_status(SimpleNamespace(store=store),
+                                    started_monotonic=time.monotonic())
+        first_status = service_status(SimpleNamespace(store=store),
+                                      started_monotonic=time.monotonic(),
+                                      actor=actors[0])
+        second_status = service_status(SimpleNamespace(store=store),
+                                       started_monotonic=time.monotonic(),
+                                       actor=actors[1])
+        self.assertEqual(all_status["storage"]["retained_jobs"], 3)
+        self.assertEqual(first_status["storage"]["retained_jobs"], 1)
+        self.assertEqual(second_status["storage"]["retained_jobs"], 2)
+        self.assertEqual(first_status["jobs"]["queued"], 1)
+        self.assertEqual(second_status["jobs"]["queued"], 2)
 
     def test_private_metadata_address_rejected(self):
         from app import client_metadata

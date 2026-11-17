@@ -33,7 +33,10 @@ def _parts(value: str, *, metadata: bool = False) -> SplitResult:
         port = parts.port
     except ValueError as exc:
         raise ValueError("Invalid OAuth URL") from exc
-    if not hostname or parts.username is not None or parts.password is not None or parts.fragment:
+    if (not hostname or parts.username is not None or parts.password is not None
+            or parts.fragment or "%" in parts.netloc or "\\" in parts.netloc):
+        # Zone-scoped IPv6 literals and escaped/ambiguous authorities must not
+        # enter the browser CSP or the MCP transport Origin allowlist.
         raise ValueError("Invalid OAuth URL")
     if not parts.path.startswith("/") or not _CLIENT_PATH.fullmatch(parts.path):
         raise ValueError("Invalid OAuth URL")
@@ -62,7 +65,15 @@ def _parts(value: str, *, metadata: bool = False) -> SplitResult:
 
 def redirect_origin(value: str) -> str:
     parts = _parts(value)
-    return f"{parts.scheme}://{parts.netloc}"
+    assert parts.hostname is not None
+    try:
+        parsed = ipaddress.ip_address(parts.hostname)
+        host = f"[{parsed.compressed}]" if parsed.version == 6 else str(parsed)
+    except ValueError:
+        host = parts.hostname.lower()
+    default_port = 443 if parts.scheme == "https" else 80
+    port = f":{parts.port}" if parts.port is not None and parts.port != default_port else ""
+    return f"{parts.scheme}://{host}{port}"
 
 
 async def _public_address(hostname: str, port: int) -> str:
@@ -134,11 +145,15 @@ def _verify_metadata(client_id: str, redirect_uri: str, document: dict[str, Any]
     if not isinstance(grant_types, list) or "authorization_code" not in grant_types:
         raise ValueError("CIMD does not support the authorization_code grant")
     # RFC 7591 uses the singular key; accept the legacy array variant too.
-    method = document.get("token_endpoint_auth_method")
-    if method is not None:
-        if method != "none":
-            raise ValueError("CIMD requires unsupported client authentication")
-    elif "none" not in document.get("token_endpoint_auth_methods_supported", ["none"]):
+    # Reject malformed or inconsistent declarations, never Python substring
+    # matches on strings or TypeError from untrusted JSON values.
+    method = document.get("token_endpoint_auth_method", "none")
+    methods = document.get("token_endpoint_auth_methods_supported", ["none"])
+    if not isinstance(method, str) or method != "none":
+        raise ValueError("CIMD requires unsupported client authentication")
+    if (not isinstance(methods, list)
+            or not all(isinstance(item, str) for item in methods)
+            or method not in methods):
         raise ValueError("CIMD requires unsupported client authentication")
 
 
@@ -148,20 +163,32 @@ class ClientMetadataRegistry:
     def __init__(self) -> None:
         self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        self._fetch_slots = asyncio.Semaphore(6)
 
     async def validate(self, client_id: str, redirect_uri: str,
                        *, timeout: float, cache_ttl: int) -> dict[str, Any]:
         _parts(client_id, metadata=True)
         redirect_origin(redirect_uri)
         async with self._lock:
-            now = time.monotonic()
             cached = self._cache.get(client_id)
-            if cached and cached[0] > now:
-                document = cached[1]
-            else:
-                document = await _fetch_metadata(client_id, timeout)
-                if len(self._cache) >= MAX_CACHE_CLIENTS:
-                    self._cache.pop(next(iter(self._cache)))
-                self._cache[client_id] = (now + min(max(cache_ttl, 1), 3600), document)
-            _verify_metadata(client_id, redirect_uri, document)
-            return document
+            if cached and cached[0] > time.monotonic():
+                _verify_metadata(client_id, redirect_uri, cached[1])
+                return cached[1]
+
+        # Never hold the shared cache lock during DNS or network I/O. A total
+        # deadline also bounds providers that send one byte per read timeout.
+        try:
+            async with asyncio.timeout(min(max(timeout, 1.0), 10.0)):
+                async with self._fetch_slots:
+                    document = await _fetch_metadata(client_id, timeout)
+        except TimeoutError as exc:
+            raise ValueError("OAuth client metadata discovery timed out") from exc
+
+        _verify_metadata(client_id, redirect_uri, document)
+        async with self._lock:
+            if len(self._cache) >= MAX_CACHE_CLIENTS and client_id not in self._cache:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[client_id] = (
+                time.monotonic() + min(max(cache_ttl, 1), 3600), document,
+            )
+        return document

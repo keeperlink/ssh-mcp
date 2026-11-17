@@ -47,8 +47,7 @@ from .file_transfer import BinaryTransferService
 from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
 from .history import HistoryStore
 from .operational import service_status, service_version
-from .oauth import (OAuthTokenVerifier, _supported_scopes, client_audit_actor,
-                    register_transport_origins, session_store)
+from .oauth import OAuthTokenVerifier, _supported_scopes, client_audit_actor, ActiveOrigins
 from .ssh_executor import SSHDenied, SSHExecutor
 
 LOGGER = logging.getLogger(__name__)
@@ -707,7 +706,9 @@ def create_mcp_server(*, job_registry: dict | None = None,
                                                  limit=query.limit))
                 if params.name == "get_status":
                     ListServersRequest.model_validate(arguments)
-                    return _result(service_status(jobs, started_monotonic=started_monotonic))
+                    return _result(service_status(
+                        jobs, started_monotonic=started_monotonic, actor=actor,
+                    ))
                 if params.name == "get_job":
                     query = GetJobRequest.model_validate(arguments)
                     item = history.detail(query.job_id)
@@ -831,20 +832,14 @@ def create_mcp_server(*, job_registry: dict | None = None,
         required_scopes=_supported_scopes(),
         validate_token_resource=True,
     )
-    # Existing signed Origins stay valid. Additional Origin values come only
-    # from previously approved, still-active OAuth sessions and validated
-    # redirects after successful interactive authorization.
-    origins = list(MCP_ALLOWED_ORIGINS)
-    try:
-        origins.extend(item for item in session_store().active_origins() if item not in origins)
-    except RuntimeError:
-        pass  # OAuth-only synthetic test setup without a session store.
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=MCP_ALLOWED_HOSTS,
-        allowed_origins=origins,
+        allowed_origins=MCP_ALLOWED_ORIGINS,
     )
-    register_transport_origins(security.allowed_origins)
+    # Retain signed static Origins while dynamically checking live OAuth
+    # sessions for other authorized clients, including revocation and expiry.
+    security.allowed_origins = ActiveOrigins(security.allowed_origins)
     mcp_app = server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,

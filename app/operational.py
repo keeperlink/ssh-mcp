@@ -26,7 +26,8 @@ def service_version() -> str:
         return "unknown"
 
 
-def service_status(jobs: JobManager | None, *, started_monotonic: float) -> dict[str, Any]:
+def service_status(jobs: JobManager | None, *, started_monotonic: float,
+                   actor: str | None = None) -> dict[str, Any]:
     """Check local OAuth/audit stores; report degradation without leaking paths."""
     oauth_ready = False
     audit_ready = jobs is None
@@ -43,15 +44,19 @@ def service_status(jobs: JobManager | None, *, started_monotonic: float) -> dict
     if jobs is not None:
         try:
             with jobs.store._connect() as db:
+                where = " WHERE actor=?" if actor is not None else ""
+                bind = (actor,) if actor is not None else ()
                 counts = {
                     str(row["status"]): int(row["total"])
                     for row in db.execute(
-                        "SELECT status,COUNT(*) AS total FROM jobs GROUP BY status"
+                        "SELECT status,COUNT(*) AS total FROM jobs"
+                        + where + " GROUP BY status", bind,
                     )
                 }
                 recent = dict(db.execute(
                     "SELECT status,COUNT(*) AS total FROM jobs "
-                    "WHERE ended_at>=? GROUP BY status", (time.time() - 86400,)
+                    "WHERE ended_at>=?" + (" AND actor=?" if actor is not None else "")
+                    + " GROUP BY status", (time.time() - 86400, *bind),
                 ).fetchall())
             retained = sum(counts.values())
             failures_recent = sum(recent.get(s, 0) for s in FAILURE_STATES)
