@@ -16,9 +16,10 @@ For the separate Caddy example, `MCP_PROXY_SUBNET` and
 from Caddy's fixed `MCP_CADDY_IP`. Never trust an entire proxy
 subnet or `*` by default.
 
-The OAuth authorization browser page currently supports ChatGPT
-callback origins; a different OAuth client metadata URL alone does
-not extend its CSP. Environment-file startup does not require
+The OAuth authorization page supports any HTTPS CIMD client whose
+metadata and requested callback pass validation and whose consent is
+approved by the operator. Its CSP permits only the verified callback
+origin for that authorization request, not an arbitrary client origin. Environment-file startup does not require
 internal signing or deployment manifests. Preserve separately
 managed production configurations.
 
@@ -46,10 +47,10 @@ Never mount two service instances to the same database.
 | --- | --- |
 | `MCP_ISSUER` | Public HTTPS origin, without path/trailing slash; resource equals issuer + `/mcp` |
 | `MCP_ALLOWED_HOSTS` | Explicit public host plus private localhost health checks |
-| `MCP_ALLOWED_ORIGINS` | Restrict allowed MCP/HTTP origins to the configured client |
-| `MCP_CIMD_CLIENT_ID` | One HTTPS OAuth client metadata URL per deployment |
-| `MCP_ALLOWED_REDIRECT_URIS` | Exact callback URI allowlist for that client |
-| `MCP_CIMD_VALIDATE_REMOTE` | Keep `true` to validate client metadata |
+| `MCP_ALLOWED_ORIGINS` | Initial trusted HTTP Origins; active consented clients add exact approved callback origins, which persist in OAuth sessions |
+| `MCP_CIMD_CLIENT_ID` | Configured legacy client identity (default ChatGPT), preserving its existing audit actor; **not** a client allowlist in online mode |
+| `MCP_ALLOWED_REDIRECT_URIS` | Existing single-client fallback for offline/synthetic mode; not a limit for newly discovered online clients |
+| `MCP_CIMD_VALIDATE_REMOTE` | Keep `true` for dynamic HTTPS CIMD discovery; disabling enforces the single configured legacy client |
 | `MCP_LOGIN_KEY` | Independent 32+ char OAuth login credential |
 | `MCP_TOKEN_SIGNING_SECRET` | Different 32+ char JWT signing secret |
 | `HISTORY_VIEWER_PASSWORD` | Different 16+ char operator-console password |
@@ -113,11 +114,12 @@ URL with remote verification enabled, explicit nonempty HTTPS
 redirect/CORS-origin allowlists, and the fixed `ssh-mcp-operator` subject.
 Wildcard, malformed or comma-containing callback URLs are rejected
 before any SSH identity is written. Commas are reserved as delimiters
-in the environment-variable allowlist representation. The issuer,
-metadata client and redirect origins are **not restricted to
-any project-specific domains**. This does not provide multiple
-simultaneous OAuth clients, and the login-page browser CSP still
-permits only ChatGPT callback origins (see [OAuth clients](oauth-clients.md)).
+in the environment-variable allowlist representation. The issuer and initial configuration contain **no project-specific
+domain restriction**. Online dynamic CIMD validation accepts multiple
+simultaneously authorized clients; the browser CSP follows the exact
+verified redirect on each authorization request. The configured
+single-client values remain for compatibility, not as an allowlist
+(see [OAuth clients](oauth-clients.md)).
 Do not use signed managed startup mode with public Compose examples.
 
 For production, the issuer and subject are security boundaries:

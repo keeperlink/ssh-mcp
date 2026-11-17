@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
-import httpx
 import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -25,6 +24,7 @@ from mcp.server.auth.provider import AccessToken
 
 from . import config
 from .oauth_sessions import SessionStore
+from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
 from .form_body import read_bounded_body
 from .config import (
     MCP_ACCESS_TOKEN_TTL,
@@ -53,12 +53,25 @@ _SCOPE_SET = frozenset(MCP_SCOPES)
 def _supported_scopes() -> list[str]:
     return [*MCP_SCOPES, *([config.MCP_SSH_SCOPE] if config.MCP_SSH_TOOLS_ENABLED else [])]
 _AUTHORIZE_AUDIENCE = f"{MCP_ISSUER}/oauth/authorize"
-_CIMD_CACHE: tuple[float, dict[str, Any]] | None = None
-_CIMD_LOCK = asyncio.Lock()
+_CIMD_REGISTRY = ClientMetadataRegistry()
 _AUTH_CODES: dict[str, "StoredAuthorizationCode"] = {}
 _AUTH_CODES_LOCK = asyncio.Lock()
 _LOGIN_FAILURES: dict[str, deque[float]] = defaultdict(deque)
 _LOGIN_FAILURES_LOCK = asyncio.Lock()
+class ActiveOrigins(list[str]):
+    """MCP Origin membership follows live authorized sessions, not stale cache."""
+
+    def __contains__(self, origin: object) -> bool:
+        if super().__contains__(origin):
+            return True  # Explicitly configured origins retain their existing policy.
+        if not isinstance(origin, str):
+            return False
+        try:
+            return origin in session_store().active_origins()
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return False  # Failure to inspect session state never grants access.
+
+
 
 
 @dataclass(slots=True)
@@ -76,13 +89,16 @@ def _now() -> int:
     return int(time.time())
 
 
-def _security_headers() -> dict[str, str]:
+def _security_headers(validated_redirect_uri: str | None = None) -> dict[str, str]:
+    # Only a redirect previously verified against the client's metadata may
+    # reach this call. Unknown/invalid requests retain same-origin-only CSP.
+    origin = f" {redirect_origin(validated_redirect_uri)}" if validated_redirect_uri else ""
     return {
         "Cache-Control": "no-store",
         "Pragma": "no-cache",
         "Content-Security-Policy": (
             "default-src 'none'; style-src 'unsafe-inline'; "
-            "form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'"
+            f"form-action 'self'{origin}; frame-ancestors 'none'; base-uri 'none'"
         ),
         "X-Frame-Options": "DENY",
         "Referrer-Policy": "no-referrer",
@@ -154,51 +170,23 @@ def _normalize_scopes(scope_text: str | None) -> list[str]:
     return scopes
 
 
-async def _validate_cimd(client_id: str, redirect_uri: str) -> None:
-    if client_id != MCP_CIMD_CLIENT_ID:
-        raise ValueError("Unrecognized OAuth client_id")
-    if redirect_uri not in MCP_ALLOWED_REDIRECT_URIS:
-        raise ValueError("OAuth redirect_uri is not allowlisted")
+async def _validate_cimd(client_id: str, redirect_uri: str) -> dict[str, Any]:
     if not MCP_CIMD_VALIDATE_REMOTE:
-        return
+        # Existing synthetic/offline fixtures and explicitly configured
+        # single-client deployments retain their fail-closed allowlist.
+        if client_id != MCP_CIMD_CLIENT_ID:
+            raise ValueError("Unrecognized OAuth client_id")
+        if redirect_uri not in MCP_ALLOWED_REDIRECT_URIS:
+            raise ValueError("OAuth redirect_uri is not allowlisted")
+        _parts(client_id, metadata=True)
+        redirect_origin(redirect_uri)
+        return {"client_id": client_id, "client_name": "Configured MCP client",
+                "redirect_uris": [redirect_uri]}
 
-    global _CIMD_CACHE
-    async with _CIMD_LOCK:
-        now = time.monotonic()
-        if _CIMD_CACHE and _CIMD_CACHE[0] > now:
-            document = _CIMD_CACHE[1]
-        else:
-            try:
-                async with httpx.AsyncClient(
-                    timeout=min(REQUEST_TIMEOUT, 10.0),
-                    follow_redirects=False,
-                ) as client:
-                    response = await client.get(
-                        MCP_CIMD_CLIENT_ID,
-                        headers={"Accept": "application/json"},
-                    )
-                response.raise_for_status()
-                document = response.json()
-            except Exception as exc:
-                raise ValueError("Unable to validate MCP client metadata") from exc
-            if not isinstance(document, dict):
-                raise ValueError("Invalid MCP client metadata document")
-            _CIMD_CACHE = (now + MCP_CIMD_CACHE_TTL, document)
-
-    if document.get("client_id") != client_id:
-        raise ValueError("CIMD client_id mismatch")
-    redirect_uris = document.get("redirect_uris")
-    if not isinstance(redirect_uris, list) or redirect_uri not in redirect_uris:
-        raise ValueError("CIMD does not allow this redirect_uri")
-    response_types = document.get("response_types", [])
-    grant_types = document.get("grant_types", [])
-    auth_methods = document.get("token_endpoint_auth_methods_supported", [])
-    if "code" not in response_types:
-        raise ValueError("CIMD does not support authorization code responses")
-    if "authorization_code" not in grant_types:
-        raise ValueError("CIMD does not support the authorization_code grant")
-    if "none" not in auth_methods:
-        raise ValueError("CIMD does not support public-client token exchange")
+    return await _CIMD_REGISTRY.validate(
+        client_id, redirect_uri, timeout=REQUEST_TIMEOUT,
+        cache_ttl=MCP_CIMD_CACHE_TTL,
+    )
 
 
 def _make_authorization_request_token(
@@ -398,6 +386,18 @@ def issue_access_token(
     return token, expires_at
 
 
+def client_audit_actor(client_id: str) -> str:
+    """Partition MCP-visible audit by OAuth client without changing SSH grants.
+
+    Legacy configured ChatGPT/standalone operator retains its existing rows.
+    The signed host inventory always authorizes the base operator principal.
+    """
+    if client_id == MCP_CIMD_CLIENT_ID:
+        return config.MCP_OPERATOR_SUBJECT
+    digest = hashlib.sha256(client_id.encode("utf-8")).hexdigest()
+    return f"{config.MCP_OPERATOR_SUBJECT}@{digest}"
+
+
 class OAuthTokenVerifier:
     """Verify SSH-MCP OAuth access tokens for the MCP SDK bearer middleware."""
 
@@ -493,7 +493,7 @@ async def oauth_authorize_get(request: Request) -> Response:
 
     # Validate the redirect target before ever redirecting errors to it.
     try:
-        await _validate_cimd(client_id, redirect_uri)
+        client_metadata = await _validate_cimd(client_id, redirect_uri)
     except ValueError as exc:
         return HTMLResponse(
             f"<h1>Invalid OAuth request</h1><p>{html.escape(str(exc))}</p>",
@@ -530,6 +530,10 @@ async def oauth_authorize_get(request: Request) -> Response:
     )
 
     scope_items = "".join(f"<li>{html.escape(scope)}</li>" for scope in scopes)
+    # Metadata is client-declared, not a brand-identity attestation.
+    client_name = html.escape(str(client_metadata.get("client_name", "Unknown client")))
+    client_address = html.escape(client_id)
+    callback_address = html.escape(redirect_uri)
     lifetime_labels = ("1 hour", "8 hours", "24 hours", "7 days", "30 days")
     lifetime_options = "".join(
         f'<option value="{seconds}"'
@@ -553,6 +557,10 @@ async def oauth_authorize_get(request: Request) -> Response:
 <body>
   <h1>SSH-MCP Authorization</h1>
   <p>Enter the private MCP login key to authorize this MCP client.</p>
+  <p>Requesting client: <strong>{client_name}</strong></p>
+  <p class="note">Verified metadata URL: {client_address}</p>
+  <p class="note">Authorization callback: {callback_address}</p>
+  <p class="note">The displayed name is supplied by the client, not independently verified.</p>
   <form method="post" action="/oauth/authorize" autocomplete="off">
     <input type="hidden" name="request_token" value="{html.escape(request_token, quote=True)}">
     <label for="mcp_login_key">MCP login key</label>
@@ -566,11 +574,12 @@ async def oauth_authorize_get(request: Request) -> Response:
     existing access tokens may remain valid for up to 15 minutes.</p>
     <p class="note">Requested permissions:</p>
     <ul>{scope_items}</ul>
-    <button type="submit">Authorize</button>
+    <button type="submit" name="decision" value="grant">Authorize this client</button>
+    <button type="submit" name="decision" value="deny" formnovalidate>Cancel</button>
   </form>
 </body>
 </html>"""
-    return HTMLResponse(page, headers=_security_headers())
+    return HTMLResponse(page, headers=_security_headers(redirect_uri))
 
 
 @router.post("/oauth/authorize")
@@ -606,6 +615,13 @@ async def oauth_authorize_post(request: Request) -> Response:
             headers=_security_headers(),
         )
 
+    if form.get("decision") == "deny":
+        return _authorization_error_redirect(
+            redirect_uri, str(state) if state is not None else None,
+            "access_denied", "The operator declined authorization",
+        )
+    if form.get("decision", "grant") != "grant":
+        return _oauth_error("invalid_request", "Invalid authorization decision")
     required_key = MCP_LOGIN_KEY
     if not required_key or not secrets.compare_digest(supplied_key, required_key):
         await _record_login_failure(client_ip)
@@ -646,7 +662,9 @@ async def oauth_token(request: Request) -> JSONResponse:
         scope = form.get("scope") if "scope" in form else None
         if not token or len(token) > 256 or not client_id:
             return _oauth_error("invalid_request", "Missing or invalid refresh grant fields")
-        if client_id != MCP_CIMD_CLIENT_ID:
+        try:
+            _parts(client_id, metadata=True)
+        except ValueError:
             return _oauth_error("invalid_client", "OAuth client validation failed", status_code=401)
         if resource != MCP_RESOURCE:
             return _oauth_error("invalid_grant", "OAuth resource no longer allowed")
@@ -727,6 +745,7 @@ async def oauth_token(request: Request) -> JSONResponse:
             resource=item.resource,
             expires_at=item.session_expires_at,
             signing_key_id=_signing_key_id(),
+            redirect_origin=redirect_origin(redirect_uri),
         )
         access_token, expires_at = issue_access_token(
             client_id, item.scopes, session_id=session_id,

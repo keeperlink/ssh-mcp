@@ -56,8 +56,23 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS oauth_refresh_session
                     ON oauth_refresh(session_id);
             """)
+        # Safe, additive migration for OAuth clients authorized before this
+        # release. Old ChatGPT sessions retain their existing signed origins.
+        with self._connect() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(oauth_sessions)")}
+            if "redirect_origin" not in columns:
+                db.execute("ALTER TABLE oauth_sessions ADD COLUMN redirect_origin TEXT")
         if prune_on_init:
             self.prune()
+
+    def active_origins(self) -> list[str]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT DISTINCT redirect_origin FROM oauth_sessions "
+                "WHERE redirect_origin IS NOT NULL AND revoked_at IS NULL AND expires_at>?",
+                (int(time.time()),),
+            ).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None,
@@ -76,7 +91,8 @@ class SessionStore:
             ).rowcount
 
     def issue(self, *, client_id: str, subject: str, scopes: str, resource: str,
-              expires_at: int, signing_key_id: str) -> tuple[str, str]:
+              expires_at: int, signing_key_id: str,
+              redirect_origin: str | None = None) -> tuple[str, str]:
         now = int(time.time())
         if expires_at <= now:
             raise ValueError("OAuth session already expired")
@@ -86,10 +102,10 @@ class SessionStore:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
                 """INSERT INTO oauth_sessions
-                   (id,client_id,subject,scopes,resource,expires_at,created_at,signing_key_id)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                   (id,client_id,subject,scopes,resource,expires_at,created_at,signing_key_id,redirect_origin)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 (session_id, client_id, subject, scopes, resource, expires_at,
-                 now, signing_key_id),
+                 now, signing_key_id, redirect_origin),
             )
             db.execute(
                 "INSERT INTO oauth_refresh(token_hash,session_id,created_at) VALUES(?,?,?)",

@@ -153,10 +153,11 @@ and that health/metrics are not exposed publicly.
 
 ## 4. Authorize an MCP client and test a harmless command
 
-For the current supported browser flow, use ChatGPT's client metadata
-and redirect allowlist from the private env template. Connect the
-client to `https://YOUR_DOMAIN/mcp` with scopes `mcp.access`
-and `ssh.execute`. The OAuth authorization page accepts
+The example preconfigures ChatGPT for compatibility, but other HTTPS
+CIMD-compatible clients can connect to the same `https://YOUR_DOMAIN/mcp`
+without pre-registration. Request scopes `mcp.access` and
+`ssh.execute` as appropriate. Verify the client metadata URL and
+callback on the consent screen before authorizing. The OAuth page accepts
 `MCP_LOGIN_KEY`; the Operator Console at
 `https://YOUR_DOMAIN/console` uses the independent
 `HISTORY_VIEWER_PASSWORD`.
@@ -164,9 +165,9 @@ and `ssh.execute`. The OAuth authorization page accepts
 The sample SSH host requires a conversation ID in the configured
 header (default `X-OpenAI-Session`) plus an operator approval.
 A client without that header cannot execute on the restricted host;
-do not weaken the gate as a convenience. Non-ChatGPT browser callback
-origins need a separately validated CSP change; see
-[OAuth clients](oauth-clients.md).
+do not weaken the gate as a convenience. OAuth callback CSP origins are
+derived from validated client metadata, not an unrestricted wildcard.
+See [OAuth clients](oauth-clients.md).
 
 Before connecting sensitive systems, verify a harmless command, denied
 authorization, mismatched host-key rejection, audit persistence and

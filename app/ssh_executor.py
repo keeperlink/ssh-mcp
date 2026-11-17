@@ -627,16 +627,25 @@ class SSHExecutor:
                 raise SSHDenied("Protected sudo secret configuration is invalid") from None
         return cls(hosts, enabled=True, sudo_passwords=raw)
 
+    @staticmethod
+    def _inventory_principal(principal: str) -> str:
+        # OAuth client-specific audit actors are minted internally from
+        # validated client IDs. They do not create extra signed SSH principals.
+        base = config.MCP_OPERATOR_SUBJECT
+        if principal == base or re.fullmatch(re.escape(base) + r"@[a-f0-9]{64}", principal):
+            return base
+        return principal
+
     def list_servers(self, principal: str) -> list[str]:
         if not self._enabled or not principal:
             return []
-        return sorted(host.alias for host in self._hosts.values() if principal in host.principals)
+        return sorted(host.alias for host in self._hosts.values() if self._inventory_principal(principal) in host.principals)
 
     def authorized_host(self, principal: str, server: str) -> HostSpec:
         if not self._enabled:
             raise SSHDenied("SSH execution is disabled")
         host = self._hosts.get(server)
-        if not host or not principal or principal not in host.principals:
+        if not host or not principal or self._inventory_principal(principal) not in host.principals:
             raise SSHDenied("SSH target or principal is not authorized")
         _check_file(host.identity_file, private=True)
         _check_file(host.known_hosts_file, private=False)

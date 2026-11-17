@@ -732,7 +732,7 @@ class JobHTTPTests(unittest.TestCase):
         self.assertEqual(captured["argv"], ["sh", "-c", "echo synthetic-command"])
         self.assertEqual(captured["reason"], "synthetic-reason")
 
-    def test_cross_actor_history_filters_pagination_and_status(self):
+    def test_client_scoped_history_filters_pagination_and_status(self):
         from app.contracts import ExecuteCommandRequest
         from app.file_audit import FileAudit
         from app.jobs import JobStore
@@ -745,14 +745,14 @@ class JobHTTPTests(unittest.TestCase):
                 argv=["echo", f"test-{index}"], reason=f"historical reason {index}",
                 story_id="TEST-243" if index < 5 else "TEST-191",
             )
-            job_id = store.create("former-actor", req, mode="sync")
+            job_id = store.create(config.MCP_OPERATOR_SUBJECT, req, mode="sync")
             store.begin(job_id)
             store.append(job_id, "stdout", f"data-{index}".encode("utf-8"))
             store.finish(job_id, "failed" if index < 5 else "succeeded", elapsed=0.5)
             archived.append(job_id)
 
         file_audit = FileAudit(store)
-        file_key = file_audit.start("former-actor", "ssh-mcp-retired",
+        file_key = file_audit.start(config.MCP_OPERATOR_SUBJECT, "ssh-mcp-retired",
                                     "inspect", "/private/archive.log", "TEST-243")
         file_audit.finish(file_key, "succeeded", byte_count=12)
 
@@ -820,8 +820,8 @@ class JobHTTPTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(payload["chunks"][0]["data_base64"]), b"ta-")
         self.assertTrue(payload["truncated"])
         typed_round_trip("get_job_output", payload)
-        self.assertTrue(self.tool("cancel_job", {
-            "job_id": archived[0], "reason": "not my job",
+        self.assertFalse(self.tool("cancel_job", {
+            "job_id": archived[0], "reason": "terminal owned job",
         }).get("isError"))
 
         files = self.tool("list_jobs", {"mode": "file"})
@@ -891,11 +891,7 @@ class JobHTTPTests(unittest.TestCase):
                 ("get_status", {}),
             ):
                 result = self.tool(name, params)
-                if name == "list_servers":
-                    self.assertEqual(json.loads(result["content"][0]["text"]),
-                                     {"servers": [], "history_hosts": []})
-                else:
-                    self.assertTrue(result.get("isError"), (name, result))
+                self.assertTrue(result.get("isError"), (name, result))
 
         self.assertTrue(self.tool("get_job_stats", {
             "group_by": "not-safe",

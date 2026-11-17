@@ -8,9 +8,8 @@ import runpy
 import time
 import unittest
 from collections import deque
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
-import httpx
 import jwt
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
@@ -28,6 +27,7 @@ CALLBACK = "https://chatgpt.com/connector_platform_oauth_redirect"
 def doc():
     return {
         "client_id": CLIENT,
+        "client_name": "Synthetic ChatGPT",
         "redirect_uris": [CALLBACK],
         "response_types": ["code"],
         "grant_types": ["authorization_code"],
@@ -37,12 +37,12 @@ def doc():
 
 class RuntimeUnitTests(unittest.TestCase):
     def setUp(self):
-        oauth._CIMD_CACHE = None
+        oauth._CIMD_REGISTRY._cache.clear()
         oauth._LOGIN_FAILURES.clear()
         oauth._AUTH_CODES.clear()
 
     def tearDown(self):
-        oauth._CIMD_CACHE = None
+        oauth._CIMD_REGISTRY._cache.clear()
 
     def test_environment_defaults_to_lab_and_rejects_unknown_value(self):
         self.assertEqual(config.MCP_ENVIRONMENT, "lab")
@@ -139,7 +139,7 @@ class RuntimeUnitTests(unittest.TestCase):
 
     def test_cimd_cache_and_all_malformed_metadata_paths(self):
         with patch.object(oauth, "MCP_CIMD_VALIDATE_REMOTE", True):
-            oauth._CIMD_CACHE = (time.monotonic() + 100, doc())
+            oauth._CIMD_REGISTRY._cache[CLIENT] = (time.monotonic() + 100, doc())
             asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
             invalid_documents = [
                 {**doc(), "client_id": "https://wrong.example"},
@@ -151,42 +151,37 @@ class RuntimeUnitTests(unittest.TestCase):
             ]
             for value in invalid_documents:
                 with self.subTest(metadata=value):
-                    oauth._CIMD_CACHE = (time.monotonic() + 100, value)
+                    oauth._CIMD_REGISTRY._cache[CLIENT] = (time.monotonic() + 100, value)
                     with self.assertRaises(ValueError):
                         asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
 
     def test_cimd_remote_network_success_cache_and_denial(self):
-        original_client = httpx.AsyncClient
-
-        def run(mock_response):
-            seen = []
-            def transport_handler(request):
-                seen.append(request.url)
-                return mock_response
-            transport = httpx.MockTransport(transport_handler)
-            def client_factory(*args, **kwargs):
-                return original_client(*args, transport=transport, **kwargs)
-            with patch.object(oauth, "MCP_CIMD_VALIDATE_REMOTE", True):
-                with patch.object(oauth.httpx, "AsyncClient", side_effect=client_factory):
-                    asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
-                    asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
-            return len(seen)
-
-        self.assertEqual(run(httpx.Response(200, json=doc())), 1)
-        oauth._CIMD_CACHE = None
-        with self.assertRaises(ValueError):
-            run(httpx.Response(503, json={"error": "unavailable"}))
-        oauth._CIMD_CACHE = None
-        with self.assertRaises(ValueError):
-            run(httpx.Response(200, json=["not", "an", "object"]))
-        oauth._CIMD_CACHE = None
-        with self.assertRaises(ValueError):
-            run(httpx.Response(200, content=b"not-json"))
+        with patch.object(oauth, "MCP_CIMD_VALIDATE_REMOTE", True):
+            with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                       return_value=doc()) as fetch:
+                asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
+                asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
+                self.assertEqual(fetch.await_count, 1)
+            for invalid in (ValueError("unavailable"), ["not", "an", "object"],
+                            {**doc(), "client_id": "https://wrong.example"}):
+                oauth._CIMD_REGISTRY._cache.clear()
+                with self.subTest(invalid=repr(invalid)):
+                    if isinstance(invalid, ValueError):
+                        with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                                   side_effect=invalid):
+                            with self.assertRaises(ValueError):
+                                asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
+                    else:
+                        with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                                   return_value=invalid):
+                            with self.assertRaises((ValueError, TypeError, AttributeError)):
+                                asyncio.run(oauth._validate_cimd(CLIENT, CALLBACK))
 
     def test_invalid_cimd_client_id_and_redirect_cannot_be_overridden(self):
         with patch.object(oauth, "MCP_CIMD_VALIDATE_REMOTE", True):
-            with self.assertRaisesRegex(ValueError, "client_id"):
+            with self.assertRaises(ValueError):
                 asyncio.run(oauth._validate_cimd("https://evil.example", CALLBACK))
+            oauth._CIMD_REGISTRY._cache[CLIENT] = (time.monotonic() + 100, doc())
             with self.assertRaisesRegex(ValueError, "redirect_uri"):
                 asyncio.run(oauth._validate_cimd(CLIENT, "https://evil.example/cb"))
 

@@ -31,6 +31,8 @@ tag or an immutable digest for reproducible deployments.
   with scoped and expiring access grants.
 - Display history, approvals and cancellation in the password-protected
   **Operator Console** (`/console`).
+- Connect multiple dynamically discovered OAuth CIMD clients without a
+  predefined client allowlist, retaining separate operator authorization.
 
 SSH-MCP is **not a remote shell sandbox**. Authorize only dedicated
 least-privilege accounts on hosts you explicitly trust.
