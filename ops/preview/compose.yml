@@ -1,0 +1,85 @@
+# Temporary nonproduction preview. NEVER run alongside the original service.
+# Values are derived by lab_preview.py from the selected original container.
+services:
+  preview:
+    container_name: ${SSH_MCP_PREVIEW_NAME:?}
+    image: ${SSH_MCP_PREVIEW_IMAGE:?Run lab_preview.py start on the approved test host}
+    restart: "no"
+    labels:
+      org.ssh-mcp.preview.original: "${SSH_MCP_PREVIEW_ORIGINAL_ID:?}"
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 536870912
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    ports:
+      - "${SSH_MCP_PREVIEW_BIND_IP:?}:${SSH_MCP_PREVIEW_BIND_PORT:?}:8000"
+    working_dir: /var/lib/ssh-mcp
+    environment:
+      MCP_BIND_HOST: "0.0.0.0"
+      MCP_BIND_PORT: "8000"
+      SSH_JOBS_DB: /var/lib/ssh-mcp/jobs.sqlite
+      MCP_CONFIG_FILE: /etc/ssh-mcp/service.json
+      MCP_INVENTORY_FILE: /etc/ssh-mcp/inventory.json
+      MCP_KNOWN_HOSTS_FILE: /etc/ssh-mcp/known_hosts
+      MCP_SECRETS_FILE: /run/secrets/ssh-mcp-secrets
+      PYTHONPATH: /opt/ssh-mcp-helper
+      SSH_MCP_PREVIEW_TRACE: ${SSH_MCP_PREVIEW_TRACE:?}
+      SSH_MCP_PREVIEW_SOURCE_MODE: ${SSH_MCP_PREVIEW_SOURCE_MODE:?}
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_SOURCE:?}/app
+        target: /opt/ssh-mcp-preview/app
+        read_only: true
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_SOURCE:?}/ops/preview
+        target: /opt/ssh-mcp-helper
+        read_only: true
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_CONFIG:?}
+        target: /etc/ssh-mcp/service.json
+        read_only: true
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_INVENTORY:?}
+        target: /etc/ssh-mcp/inventory.json
+        read_only: true
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_KNOWN_HOSTS:?}
+        target: /etc/ssh-mcp/known_hosts
+        read_only: true
+      - type: bind
+        source: ${SSH_MCP_PREVIEW_SECRETS:?}
+        target: /run/secrets/ssh-mcp-secrets
+        read_only: true
+      - type: volume
+        source: state
+        target: /var/lib/ssh-mcp
+    tmpfs:
+      - "/tmp:rw,nosuid,nodev,noexec,size=16m"
+      - "/run/ssh-mcp:rw,nosuid,nodev,noexec,size=1m,uid=10001,gid=10001,mode=0700"
+    stop_grace_period: 45s
+    command: ["python", "/opt/ssh-mcp-helper/launch.py"]
+    networks:
+      ingress:
+        aliases: ["${SSH_MCP_PREVIEW_ALIAS:?}"]
+      transit:
+        aliases: ["${SSH_MCP_PREVIEW_ALIAS:?}"]
+volumes:
+  state:
+    external: true
+    name: ${SSH_MCP_PREVIEW_STATE_VOLUME:?}
+networks:
+  ingress:
+    external: true
+    name: ${SSH_MCP_PREVIEW_INGRESS:?}
+  transit:
+    external: true
+    name: ${SSH_MCP_PREVIEW_TRANSIT:?}

@@ -173,9 +173,9 @@ def main(argv: list[str] | None = None) -> int:
                 env=env)
             checks += 3
         if args.mode != "lint":
-            # Development-lock tests require tooling distributions unavailable
-            # in the deliberately minimal hardened runtime-test image.
-            run("development dependency-lock regression tests",
+            # Source-only tooling tests require the checkout and development
+            # dependencies unavailable in the minimal runtime-test image.
+            run("development dependency-lock and source-tool regression tests",
                 [sys.executable, "-m", "unittest", "discover", "-s",
                  "scripts", "-p", "test_*.py", "-q"], env=env)
             with tempfile.TemporaryDirectory(prefix="sky235-validation-") as folder:
