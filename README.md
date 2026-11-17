@@ -87,6 +87,9 @@ Development requires Python 3.14; validation checks Ruff, strict
 mypy, installed-wheel tests, at least 95% combined coverage and a hardened
 OCI image. Offline checks do not substitute for separately authorized
 real HTTPS/SSH acceptance.
+The shared [validation profile](tests/validation-profile.json) declares the
+reviewed Python-package contract used by external development tooling;
+[the validator](tests/tools/validate.py) remains the executable check.
 
 ## Contributing and security
 
