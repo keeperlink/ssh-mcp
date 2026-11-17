@@ -15,15 +15,36 @@ conversation_id_context: ContextVar[str | None] = ContextVar("conversation_id", 
 
 
 def conversation_id_from_headers(headers: Mapping[str, str] | None) -> str | None:
-    """Return a bounded opaque correlation ID, never an authorization identity."""
-    if headers is None:
-        return None
-    value = headers.get(config.MCP_CONVERSATION_HEADER_NAME.lower())
-    if value is None:
-        return None
-    if not _CONVERSATION.fullmatch(value):
-        raise ValueError("Invalid conversation header")
-    return value
+    """Read the configured provider header and optional neutral workflow header."""
+    return conversation_id_from_request(headers)
+
+
+def conversation_id_from_request(
+    headers: Mapping[str, str] | None, metadata: Mapping[str, object] | None = None,
+) -> str | None:
+    """Validate all supplied correlation sources; never resolve ambiguous IDs."""
+    values: list[str] = []
+
+    def add(value: object) -> None:
+        if not isinstance(value, str) or not _CONVERSATION.fullmatch(value):
+            raise ValueError("Invalid conversation identifier")
+        values.append(value)
+
+    if headers is not None:
+        for name in dict.fromkeys((
+            config.MCP_CONVERSATION_HEADER_NAME.lower(), "x-ssh-mcp-conversation",
+        )):
+            if name in headers:
+                add(headers[name])
+    if metadata is not None and "x-codex-turn-metadata" in metadata:
+        turn = metadata["x-codex-turn-metadata"]
+        if not isinstance(turn, dict):
+            raise ValueError("Invalid Codex conversation metadata")
+        if "thread_id" in turn:
+            add(turn["thread_id"])
+    if len(set(values)) > 1:
+        raise ValueError("Conflicting conversation identifiers")
+    return values[0] if values else None
 
 
 async def require_host_access(
@@ -33,7 +54,7 @@ async def require_host_access(
     reason: str = "", summary: str | Callable[[], str] = "",
     steps: Callable[[], list[dict[str, str | bool]]] | None = None,
     disconnected: Callable[[], Awaitable[bool]] | None = None,
-    privileged: bool = False,
+    privileged: bool = False, client_id: str | None = None,
 ) -> ApprovalCode:
     """One entry gate for every host-reaching MCP method.
 
@@ -49,13 +70,13 @@ async def require_host_access(
     host_required = host.access == "restricted"
     root_required = privileged and host.privileged_access == "restricted"
     if host_required or root_required:
-        if not session_id or not conversation_id:
-            raise SSHDenied("Restricted host requires authenticated conversation")
+        if not session_id:
+            raise SSHDenied("Restricted host requires authenticated OAuth session")
         if approvals is None:
             raise SSHDenied("Restricted host requires operator approval")
         return await approvals.require(
-            (session_id, conversation_id, server),
-            tool=tool, reason=reason,
+            (session_id, conversation_id or "", server),
+            tool=tool, reason=reason, client_id=client_id,
             summary=summary,
             steps=steps,
             disconnected=disconnected,

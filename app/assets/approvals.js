@@ -158,7 +158,10 @@
       if (layer.hidden) previousFocus = document.activeElement;
       $("approval-host").textContent = request.host || "Unknown";
       const number = conversationNumber(request.conversation_id);
-      $("approval-conversation").textContent = number ? "Conversation #" + number : "Unknown";
+      $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
+      $("approval-client").textContent = request.client_id || "MCP client";
+      const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
+      $("approval-duration-warning").hidden = timedAllowed;
       $("approval-tool").textContent = request.tool || "Operation";
       $("approval-reason").textContent = request.reason || "Not specified";
       const root = request.requires_root === true;
@@ -169,7 +172,7 @@
         ? (request.requires_host
           ? "Approve SSH host access and root execution for this exact request."
           : "Approve execution as root for this exact request.")
-          + " A timed grant also authorizes subsequent root requests in this conversation and host."
+          + (timedAllowed ? " A timed grant also authorizes subsequent root requests in this conversation and host." : "")
         : "An agent is waiting for your approval. Access will not be granted automatically.";
       renderPreview(request);
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
@@ -296,8 +299,9 @@
     $("approval-grant").disabled = state.busy || seconds === 0;
     $("approval-deny").disabled = state.busy;
     $("approval-close").disabled = state.busy;
+    const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
     for (const control of layer.querySelectorAll('input[name="approval-duration"]'))
-      control.disabled = state.busy || seconds === 0;
+      control.disabled = state.busy || seconds === 0 || (!timedAllowed && control.value !== "once");
   }
   function tick() {
     for (const [id, request] of state.pending) {

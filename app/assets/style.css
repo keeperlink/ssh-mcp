@@ -483,6 +483,11 @@
   border-radius:6px;padding:7px 9px;font-weight:600;font-size:12px;cursor:pointer}
 .approval-duration-options label:has(input:checked){background:#e7f2e8}
 .approval-duration-options input{accent-color:#178a4d;width:17px;height:17px;margin:0;cursor:pointer}
+.approval-duration-options label:has(input:disabled){opacity:.5;cursor:not-allowed}
+.approval-duration-options input:disabled{cursor:not-allowed}
+.approval-duration-warning{font-size:12px;color:#9a4b18;font-weight:600;margin:7px 0 0;line-height:1.35}
+.approval-duration-warning[hidden]{display:none}
+#approval-client{overflow-wrap:anywhere}
 .approval-actions button{height:39px;min-width:108px;border-radius:7px;font-weight:800;border:1px solid transparent}
 .approval-deny{color:#643222;background:#fff;border-color:#b98c7b!important}
 .approval-deny:hover{background:#fbece8}

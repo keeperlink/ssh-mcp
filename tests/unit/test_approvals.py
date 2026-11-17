@@ -958,6 +958,25 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SSHDenied):
             await task
 
+    async def test_no_conversation_allows_only_exact_request_including_root(self):
+        from app.approval_status import ApprovalCode
+        key = (KEY[0], "", KEY[2])
+        first, first_id = await self._root_pending(key=key)
+        second, second_id = await self._root_pending(key=key)
+        pending = self.manager.pending[first_id].public()
+        self.assertIsNone(pending["conversation_id"])
+        self.assertFalse(pending["timed_grants_allowed"])
+        for duration in ("5m", "15m", "1h", "8h", "16h"):
+            self.assertFalse(self.manager.decide(first_id, grant=True, duration=duration))
+        self.assertEqual(self.manager.snapshot()["active_grants"], [])
+        self.assertTrue(self.manager.decide(first_id, grant=True))
+        self.assertEqual(await first, ApprovalCode.APPROVED_EXPLICIT)
+        self.assertFalse(second.done())
+        self.assertTrue(self.manager.decide(second_id, grant=False))
+        with self.assertRaises(SSHDenied):
+            await second
+        self.assertEqual(self.manager.snapshot()["active_grants"], [])
+
     async def test_pr1_gate_preserves_signed_host_and_missing_identity_denial(self):
         class Executor:
             def authorized_host(self, actor, server):
@@ -965,7 +984,7 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
                     raise SSHDenied("Not in signed inventory")
                 return type("Host", (), {"access": "restricted"})()
         executor = Executor()
-        for sid, conversation in ((None, KEY[1]), (KEY[0], None)):
+        for sid, conversation in ((None, KEY[1]), (None, None)):
             with self.assertRaises(SSHDenied):
                 await require_host_access(
                     executor, "ssh-mcp-operator", "demo-node2",

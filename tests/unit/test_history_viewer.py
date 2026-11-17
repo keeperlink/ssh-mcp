@@ -72,6 +72,9 @@ class ApprovalDialogMarkupTests(unittest.TestCase):
         self.assertIn('id="approval-steps"', page)
         self.assertIn('id="approval-summary"', page)
         self.assertIn('id="approval-durations"', page)
+        self.assertIn('id="approval-duration-warning"', page)
+        self.assertIn('Timed grants are disabled because this client did not provide a conversation ID.', page)
+        self.assertIn('id="approval-client"', page)
         self.assertNotIn('<select id="approval-duration"', page)
         for value in ("once", "5m", "15m", "1h", "8h", "16h"):
             self.assertIn(f'name="approval-duration" value="{value}"', page)

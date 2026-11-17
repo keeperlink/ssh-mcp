@@ -130,29 +130,35 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         return csrf
 
     def _rpc(self, *, conversation=CONVERSATION, tool="execute_command",
-             arguments=None):
-        response = self.client.post("/mcp", headers={
+             arguments=None, header="X-OpenAI-Session", metadata=None):
+        headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json, text/event-stream",
             "Host": "localhost",
-            "X-OpenAI-Session": conversation,
-        }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                 "params": {"name": tool, "arguments": arguments or {
-                     "server": "demo-node2", "argv": ["hostname"],
-                     "reason": "TEST-263 offline MCP operator approval test",
-                 }}})
+        }
+        if conversation is not None and header is not None:
+            headers[header] = conversation
+        params = {"name": tool, "arguments": arguments or {
+            "server": "demo-node2", "argv": ["hostname"],
+            "reason": "TEST-263 offline MCP operator approval test",
+        }}
+        if metadata is not None:
+            params["_meta"] = metadata
+        response = self.client.post("/mcp", headers=headers, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params,
+        })
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("error", response.json())
         return response.json()["result"]
 
     def _start_call(self, *, conversation=CONVERSATION, tool="execute_command",
-                    arguments=None):
+                    arguments=None, header="X-OpenAI-Session", metadata=None):
         box = {}
 
         def execute():
             try:
                 box["result"] = self._rpc(conversation=conversation, tool=tool,
-                                          arguments=arguments)
+                                          arguments=arguments, header=header, metadata=metadata)
             except BaseException as exc:
                 box["exception"] = exc
 
@@ -187,6 +193,53 @@ class MCPApprovalHTTPTests(unittest.TestCase):
             "reason": "TEST-267 synthetic operator root approval", "privileged": True,
             "cwd": "/root/synthetic", "timeout_seconds": 30,
         }
+
+    def test_headerless_client_can_approve_once_but_not_create_timed_grant(self):
+        for privileged in (False, True):
+            with self.subTest(privileged=privileged):
+                thread, box, request_id = self._start_call(
+                    conversation=None, arguments=self._root_arguments() if privileged else None,
+                )
+                pending = self.manager.pending[request_id].public()
+                self.assertIsNone(pending["conversation_id"])
+                self.assertEqual(pending["client_id"], CLIENT)
+                self.assertFalse(pending["timed_grants_allowed"])
+                self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 404)
+                self.assertEqual(self.manager.snapshot()["active_grants"], [])
+                self.assertEqual(self._decision(request_id, "grant").status_code, 200)
+                response = self._result(thread, box)
+                self.assertFalse(response.get("isError"), response)
+                data = json.loads(response["content"][0]["text"])
+                details = self.client.get(f"/console/api/jobs/{data['job_id']}").json()["job"]
+                self.assertIsNone(details["conversation_id"])
+                self.assertEqual(details["approval_status"], "approved_explicit")
+        self.assertEqual(self.executor.calls, 1)
+        self.assertEqual(self.executor.root_calls, 1)
+        self.assertEqual(self.manager.snapshot()["active_grants"], [])
+
+    def test_codex_and_neutral_conversation_ids_allow_scoped_timed_grants(self):
+        for conversation, header, metadata in (
+            ("thread-123", None, {"x-codex-turn-metadata": {"thread_id": "thread-123", "turn_id": "a"}}),
+            ("neutral-123", "X-SSH-MCP-Conversation", None),
+        ):
+            with self.subTest(conversation=conversation):
+                thread, box, request_id = self._start_call(
+                    conversation=conversation, header=header, metadata=metadata,
+                )
+                self.assertTrue(self.manager.pending[request_id].public()["timed_grants_allowed"])
+                self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 200)
+                self.assertFalse(self._result(thread, box).get("isError"))
+                self.assertFalse(self._rpc(conversation=conversation, header=header, metadata=metadata).get("isError"))
+        self.assertEqual(self.executor.calls, 4)
+        self.assertEqual(len(self.manager.snapshot()["active_grants"]), 2)
+        self.assertTrue(self._rpc(conversation="conflicting", metadata={
+            "x-codex-turn-metadata": {"thread_id": "thread-123"},
+        }).get("isError"))
+        self.assertEqual(self.executor.calls, 4)
+        thread, box, request_id = self._start_call(conversation=None)
+        self.assertEqual(self._decision(request_id, "deny").status_code, 200)
+        self.assertTrue(self._result(thread, box).get("isError"))
+        self.assertEqual(self.executor.calls, 4)
 
     def test_combined_root_approval_previews_exact_request_and_audits_root(self):
         thread, box, approval_id = self._start_call(

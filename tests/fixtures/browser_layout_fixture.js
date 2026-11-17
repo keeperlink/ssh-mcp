@@ -785,6 +785,28 @@
       send(18, [{ ...requests[0], id: "synthetic-expiring",
         expires_at: Date.now() / 1000 + 0.25 }]);
       await waitFor(() => layer.hidden, "Expired approval remains in modal");
+      send(19, [{ ...requests[0], id: "synthetic-headerless",
+        conversation_id: null, timed_grants_allowed: false,
+        client_id: "https://example.invalid/client.json",
+        expires_at: Date.now() / 1000 + 28 }]);
+      await waitFor(() => !layer.hidden, "Headerless approval appears");
+      assert(duration("once").checked && !duration("once").disabled
+        && ["5m", "15m", "1h", "8h", "16h"].every((value) => duration(value).disabled),
+      "Missing conversation must disable all timed grant choices");
+      assert(!document.getElementById("approval-duration-warning").hidden
+        && document.getElementById("approval-duration-warning").textContent.includes("conversation ID")
+        && document.getElementById("approval-client").textContent === "https://example.invalid/client.json",
+      "Headerless approval must explain the limitation and identify its client");
+      grant.click();
+      await waitFor(() => layer.hidden && posts.length === 9, "One-shot approval completes");
+      assert(posts[8].path.endsWith("/synthetic-headerless/grant")
+        && posts[8].fields.get("duration") === "once", "Headerless request sends only once");
+      send(21, [{ ...requests[0], id: "synthetic-conversation-again",
+        timed_grants_allowed: true, expires_at: Date.now() / 1000 + 28 }]);
+      await waitFor(() => !layer.hidden, "Conversation approval appears after headerless");
+      assert(!duration("5m").disabled && document.getElementById("approval-duration-warning").hidden,
+        "Conversation approval must restore timed options and hide warning");
+      send(22, []);
     } finally {
       window.fetch = originalFetch;
     }

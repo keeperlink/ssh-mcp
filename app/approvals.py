@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Literal
 from .ssh_executor import SSHDenied
 from .approval_status import ApprovalCode, ApprovalRejected
 
-GrantKey = tuple[str, str, str]  # verified OAuth sid, conversation, signed alias
+GrantKey = tuple[str, str, str]  # verified OAuth sid, conversation (empty = once only), signed alias
 Duration = Literal["once", "5m", "15m", "1h", "8h", "16h"]
 DURATIONS: dict[str, int | None] = {
     "once": None, "5m": 300, "15m": 900, "1h": 3600,
@@ -43,6 +43,7 @@ class PendingApproval:
     root_required: bool = False
     grant_host: bool = True
     grant_root: bool = False
+    client_id: str | None = None
     # The generation and deadline observed when admission began. Explicit
     # revocations are distinguishable from natural grant expiry.
     host_revoke_generation: int = 0
@@ -53,7 +54,8 @@ class PendingApproval:
     def public(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.id, "host": self.key[2],
-            "conversation_id": self.key[1], "tool": self.tool,
+            "conversation_id": self.key[1] or None, "tool": self.tool,
+            "client_id": self.client_id, "timed_grants_allowed": bool(self.key[1]),
             "reason": self.reason, "summary": self.summary,
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
             "requires_host": self.grant_host,
@@ -172,7 +174,7 @@ class ApprovalManager:
     def _authorized(self, key: GrantKey, host_required: bool,
                     root_required: bool) -> bool:
         now = time.monotonic()
-        return ((not host_required or self.grants.get(key, 0) > now)
+        return (bool(key[1]) and (not host_required or self.grants.get(key, 0) > now)
                 and (not root_required or self.root_grants.get(key, 0) > now))
 
     def _note_revoke(self, key: GrantKey, kind: str) -> None:
@@ -210,7 +212,8 @@ class ApprovalManager:
                       steps: Callable[[], list[dict[str, str | bool]]] | None = None,
                       disconnected: Callable[[], Awaitable[bool]] | None = None,
                       host_required: bool = True,
-                      root_required: bool = False) -> ApprovalCode:
+                      root_required: bool = False,
+                      client_id: str | None = None) -> ApprovalCode:
         if self.closed:
             raise SSHDenied("Approval manager has stopped")
         self._expire()
@@ -249,8 +252,9 @@ class ApprovalManager:
             waiter=asyncio.current_task(), disconnected=disconnected,
             steps=preview_steps,
             host_required=host_required, root_required=root_required,
-            grant_host=host_required and self.grants.get(key, 0) <= time.monotonic(),
-            grant_root=root_required and self.root_grants.get(key, 0) <= time.monotonic(),
+            grant_host=host_required and (not key[1] or self.grants.get(key, 0) <= time.monotonic()),
+            grant_root=root_required and (not key[1] or self.root_grants.get(key, 0) <= time.monotonic()),
+            client_id=client_id,
             host_revoke_generation=self._revoke_generations.get((key, "host"), 0),
             root_revoke_generation=self._revoke_generations.get((key, "root"), 0),
             host_expiry_at=self.grants.get(key, 0),
@@ -387,6 +391,8 @@ class ApprovalManager:
             return False
         seconds = DURATIONS[duration]
         if seconds is not None:
+            if not request.key[1]:
+                return False  # No conversation means no reusable grant.
             count = len(self.grants) + len(self.root_grants)
             additional = int(request.grant_host and request.key not in self.grants)
             additional += int(request.grant_root and request.key not in self.root_grants)
