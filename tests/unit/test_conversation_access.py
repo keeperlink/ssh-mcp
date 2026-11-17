@@ -66,6 +66,34 @@ class ConversationAccessTests(unittest.TestCase):
             with self.subTest(headers=headers, metadata=metadata), self.assertRaises(ValueError):
                 conversation_id_from_request(headers, metadata)
 
+    def test_antigravity_uses_exact_conversation_not_root(self):
+        conversation = "12345678-1234-4234-8234-123456789abc"
+        metadata = {
+            "antigravity.google/conversation_id": conversation,
+            "antigravity.google/root_conversation_id": "different-root",
+            "antigravity.google/artifacts_dir": "/synthetic/brain",
+        }
+        self.assertEqual(conversation_id_from_request(None, metadata), conversation)
+        self.assertEqual(conversation_id_from_request(
+            {"x-ssh-mcp-conversation": conversation}, metadata), conversation)
+        self.assertEqual(conversation_id_from_request(
+            {"x-openai-session": conversation}, metadata), conversation)
+        self.assertIsNone(conversation_id_from_request(None, {
+            "antigravity.google/root_conversation_id": conversation,
+        }))
+        for invalid in ("", None, 42, {}, "bad id", "x" * 257):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                conversation_id_from_request(None, {
+                    **metadata, "antigravity.google/conversation_id": invalid,
+                })
+        for headers, extra in (
+            ({"x-openai-session": "different"}, {}),
+            ({"x-ssh-mcp-conversation": "different"}, {}),
+            (None, {"x-codex-turn-metadata": {"thread_id": "different"}}),
+        ):
+            with self.subTest(headers=headers, extra=extra), self.assertRaises(ValueError):
+                conversation_id_from_request(headers, {**metadata, **extra})
+
     def test_restricted_host_fails_closed_for_every_auth_identity(self):
         class FakeSSH:
             def __init__(self, access: str):

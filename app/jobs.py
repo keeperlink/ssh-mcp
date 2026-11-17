@@ -35,9 +35,8 @@ TERMINAL = frozenset({
 })
 # Cumulative metrics persist in the private audit SQLite independently of retention.
 # No actor, command, argument, identity, endpoint or job id is used as a metric label.
-# Uvicorn owns the production stdout logger; plain module INFO logs are silent
-# under its default logging configuration. Reuse its existing handler.
-LOG = logging.getLogger("uvicorn.error")
+# Application-wide logging is configured by the service lifespan.
+LOG = logging.getLogger(__name__)
 DURATION_BUCKETS = (0.1, 0.5, 1, 2, 5, 10, 20, 60, 300)
 FAILURE_KINDS = frozenset({
     "none", "tcp_connect_timeout", "ssh_banner_timeout",

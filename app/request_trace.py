@@ -1,43 +1,30 @@
-"""Opt-in, preview-only MCP diagnostics; never record credentials or tool payloads."""
+"""DEBUG-only MCP diagnostics; never record credentials or tool payloads."""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
-import re
-import secrets
 from typing import Any
 
-LOG = logging.getLogger("ssh_mcp.preview.http")
+LOG = logging.getLogger(__name__)
 MAX_BODY_CAPTURE = 65536
 MAX_HEADERS = 256
 MAX_VALUE = 1024
-# Stable only for this process: unknown values can be correlated without
-# disclosing potentially credential-bearing custom headers or metadata.
-_FINGERPRINT_KEY = secrets.token_bytes(32)
+MAX_METADATA_DEPTH = 8
 _SECRET_NAMES = ("authorization", "cookie", "token", "secret", "key", "password",
-                 "credential", "csrf", "session-id", "session_id", "signature")
-_PUBLIC_HEADERS = frozenset({"host", "accept", "content-type", "content-length",
-                             "user-agent", "mcp-protocol-version", "origin"})
-_CORRELATION_HEADERS = frozenset({"x-openai-session", "x-ssh-mcp-conversation"})
-_CORRELATION_KEYS = frozenset({"thread_id", "turn_id", "conversation_id", "openai/session"})
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$")
+                 "passwd", "credential", "csrf", "session-id", "session_id", "sessionid",
+                 "signature", "code_verifier", "code-verifier", "auth_code", "auth-code")
+_SECRET_FIELDS = frozenset({"auth", "authentication", "pwd", "code", "state"})
 
 
 def _secret_name(name: str) -> bool:
-    return any(fragment in name.lower() for fragment in _SECRET_NAMES)
+    name = name.lower()
+    return name.rsplit("/", 1)[-1] in _SECRET_FIELDS or any(fragment in name for fragment in _SECRET_NAMES)
 
 
-def _fingerprint(value: str) -> str:
-    return "fingerprint:" + hmac.new(_FINGERPRINT_KEY, value.encode("utf-8"),
-                                    hashlib.sha256).hexdigest()[:24]
-
-
-def _correlation(value: Any) -> Any:
+def _scalar(value: Any) -> Any:
     if isinstance(value, str):
-        return value if _IDENTIFIER.fullmatch(value) else _fingerprint(value)
-    return value if type(value) is int else "[NOT_AN_IDENTIFIER]"
+        return value[:MAX_VALUE]
+    return value if value is None or type(value) in (bool, int, float) else "[NOT_A_SCALAR]"
 
 
 def _headers(scope: dict[str, Any]) -> list[dict[str, str]]:
@@ -45,37 +32,25 @@ def _headers(scope: dict[str, Any]) -> list[dict[str, str]]:
     for raw_name, raw_value in scope.get("headers", [])[:MAX_HEADERS]:
         name = raw_name.decode("latin-1").lower()
         value = raw_value.decode("latin-1")
-        if _secret_name(name):
-            visible = "[REDACTED]"
-        elif name in _CORRELATION_HEADERS:
-            visible = _correlation(value)
-        elif name in _PUBLIC_HEADERS:
-            visible = value[:MAX_VALUE]
-        else:
-            visible = _fingerprint(value)
-        result.append({"name": name, "value": visible})
+        result.append({"name": name[:MAX_VALUE],
+                       "value": "[REDACTED]" if _secret_name(name) else value[:MAX_VALUE]})
     return result
 
 
 def _metadata(value: Any, depth: int = 0) -> Any:
-    """Retain field names/structure and known correlation IDs, not arbitrary data."""
-    if depth >= 4:
+    """Retain bounded metadata values except credential-like fields."""
+    if depth >= MAX_METADATA_DEPTH:
         return "[MAX_DEPTH]"
     if isinstance(value, dict):
         return {
             str(key)[:120]: (
-                "[REDACTED]" if _secret_name(str(key)) else
-                _correlation(item) if key in _CORRELATION_KEYS else
-                _metadata(item, depth + 1)
+                "[REDACTED]" if _secret_name(str(key)) else _metadata(item, depth + 1)
             )
             for key, item in list(value.items())[:40]
         }
     if isinstance(value, list):
-        return {"type": "list", "length": len(value),
-                "items": [_metadata(item, depth + 1) for item in value[:10]]}
-    if isinstance(value, str):
-        return _fingerprint(value)
-    return {"type": type(value).__name__}
+        return [_metadata(item, depth + 1) for item in value[:10]]
+    return _scalar(value)
 
 
 def _envelope(body: bytes) -> list[dict[str, Any]]:
@@ -89,11 +64,11 @@ def _envelope(body: bytes) -> list[dict[str, Any]]:
         params = params if isinstance(params, dict) else {}
         arguments = params.get("arguments")
         result.append({
-            "method": _correlation(request.get("method")),
-            "request_id": _correlation(request.get("id")),
+            "method": _scalar(request.get("method")),
+            "request_id": _scalar(request.get("id")),
             "top_level_keys": sorted(str(key)[:120] for key in request)[:40],
             "params_keys": sorted(str(key)[:120] for key in params)[:40],
-            "tool": _correlation(params.get("name")),
+            "tool": _scalar(params.get("name")),
             "argument_keys": sorted(str(key)[:120] for key in arguments)[:40]
             if isinstance(arguments, dict) else [],
             "request_meta": _metadata(request.get("_meta")),
@@ -102,7 +77,7 @@ def _envelope(body: bytes) -> list[dict[str, Any]]:
     return result
 
 
-class PreviewRequestTrace:
+class RequestTrace:
     """Observe bytes as the downstream app consumes them; never alter ASGI traffic."""
 
     def __init__(self, app: Any):
@@ -111,7 +86,8 @@ class PreviewRequestTrace:
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         # OAuth forms, callback queries, console credentials, health and
         # metrics requests are deliberately outside the diagnostic scope.
-        if scope.get("type") != "http" or scope.get("path") not in {"/mcp", "/mcp/"}:
+        if (not LOG.isEnabledFor(logging.DEBUG) or scope.get("type") != "http"
+                or scope.get("path") not in {"/mcp", "/mcp/"}):
             await self.app(scope, receive, send)
             return
         body = bytearray()
@@ -139,10 +115,10 @@ class PreviewRequestTrace:
                         entry["body"]["parse"] = "invalid_json"
                 elif total > MAX_BODY_CAPTURE:
                     entry["body"]["parse"] = "truncated"
-                LOG.warning("SSH_MCP_PREVIEW_REQUEST %s", json.dumps(entry, sort_keys=True))
+                LOG.debug("SSH_MCP_REQUEST %s", json.dumps(entry, sort_keys=True))
             except Exception:
                 # A diagnostic failure must never fail an application request.
-                LOG.warning("SSH_MCP_PREVIEW_REQUEST diagnostic_failed")
+                LOG.debug("SSH_MCP_REQUEST diagnostic_failed")
 
         async def tracing_receive() -> Any:
             nonlocal total, complete

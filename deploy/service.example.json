@@ -1,6 +1,9 @@
 {
   "version": 1,
   "environment": "production",
+  "logging": {
+    "level": "INFO"
+  },
   "http": {
     "allowed_origins": [
       "https://chatgpt.com"

@@ -385,7 +385,7 @@ class StoreTests(unittest.TestCase):
     def test_durable_metrics_are_idempotent_across_reopen_and_pruning(self):
         job_id = self.store.create("alice", request("echo", "secret-value"))
         self.assertTrue(self.store.begin(job_id))
-        with self.assertLogs("uvicorn.error", level="INFO") as recorded:
+        with self.assertLogs("app.jobs", level="INFO") as recorded:
             self.store.finish(
                 job_id, "transport_error", exit_code=255, elapsed=10.5,
                 failure_kind="ssh_banner_timeout",

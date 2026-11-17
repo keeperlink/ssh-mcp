@@ -11,6 +11,33 @@ your established same-host HTTPS proxy; the
 also stores public TLS certificates in the separate
 `caddy-data` volume. Keep that volume across upgrades.
 
+## Runtime logging control
+
+Managed installations provide a private Unix socket at
+`/run/ssh-mcp/control.sock` (mode 0600 inside the existing mode-0700 tmpfs).
+The service UID can use the installed CLI without restarting:
+
+```bash
+docker exec ssh-mcp ssh-mcp-ctl get logging-level
+docker exec ssh-mcp ssh-mcp-ctl set logging-level DEBUG
+docker exec ssh-mcp ssh-mcp-ctl reset logging-level
+```
+
+Substitute your actual container name. Overrides take effect immediately,
+remain in memory only and reset at container restart. The signed
+configuration is not modified. The utility is available in managed mode;
+standalone environment-file deployments set `MCP_LOG_LEVEL` at startup
+(their SSH configuration directory is mounted read-only).
+
+DEBUG captures MCP HTTP headers, correlation IDs and bounded JSON-RPC
+metadata with actual values. Authorization, cookies, session credentials,
+tokens, API keys, passwords and other credential-like field names are
+redacted recursively. Tool argument values, OAuth forms, query strings,
+responses and raw bodies are not logged. The application level does not
+enable third-party wire logging. DEBUG output can contain personal data
+and custom metadata; name-based redaction cannot detect every arbitrary
+credential value. Protect the logs and reset the level when finished.
+
 ## Health and logs
 
 - `GET /health`: basic application liveness.

@@ -755,8 +755,10 @@ def _history_page(csrf: str) -> str:
     story_chars = int(os.getenv("HISTORY_STORY_ID_MAX_CHARS", "16"))
     story_side = os.getenv("HISTORY_STORY_ID_TRUNCATE_FROM", "end")
     environment_label = {"lab": "LAB", "production": "PROD"}[config.MCP_ENVIRONMENT]
-    version_label = (f'<span class="brand-version">v{html.escape(config.MCP_SERVICE_VERSION)}</span>'
-                     if config.MCP_SERVICE_VERSION else "")
+    version = config.MCP_SERVICE_VERSION
+    prefix = "" if config.is_commit_version(version) else "v"
+    version_label = (f'<span class="brand-version">{prefix}{html.escape(version)}</span>'
+                     if version else "")
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'

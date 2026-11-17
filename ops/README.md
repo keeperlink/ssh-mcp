@@ -19,7 +19,8 @@ Use [Getting started](../docs/getting-started.md) and the
 [hardened Compose](../docs/hardening.md) for new self-hosted instances. Managed existing deployments retain their
 independently controlled configuration and release process.
 
-## Nonproduction live preview
+## Live-source preview
 
 See [live preview and request diagnostics](preview/README.md) for the operator-only
-HAProxy switch helper. It is not part of the normal application runtime.
+Docker clone helper. It is independent of the reverse proxy and is not part of
+the normal application runtime.

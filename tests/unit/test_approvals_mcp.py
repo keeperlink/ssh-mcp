@@ -264,6 +264,45 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         self.assertTrue(self._result(thread, box).get("isError"))
         self.assertEqual(self.executor.calls, 4)
 
+    def test_antigravity_timed_grant_is_scoped_and_audited_by_conversation(self):
+        conversation = "12345678-1234-4234-8234-123456789abc"
+        other = "87654321-1234-4234-8234-123456789abc"
+        root = "shared-root"
+        metadata = {
+            "antigravity.google/conversation_id": conversation,
+            "antigravity.google/root_conversation_id": root,
+            "io.modelcontextprotocol/clientInfo": {"name": "antigravity-client", "version": "v1.0.0"},
+        }
+        thread, box, request_id = self._start_call(
+            conversation=conversation, header=None, metadata=metadata,
+        )
+        pending = self.manager.pending[request_id].public()
+        self.assertEqual(pending["conversation_id"], conversation)
+        self.assertTrue(pending["timed_grants_allowed"])
+        self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 200)
+        result = self._result(thread, box)
+        self.assertFalse(result.get("isError"), result)
+        job_id = json.loads(result["content"][0]["text"])["job_id"]
+        details = self.client.get(f"/console/api/jobs/{job_id}").json()["job"]
+        self.assertEqual(details["conversation_id"], conversation)
+        self.assertFalse(self._rpc(header=None, metadata=metadata).get("isError"))
+        self.assertEqual(self.executor.calls, 2)
+        # Even if a grant exists, conflicting correlation sources fail closed.
+        self.assertTrue(self._rpc(conversation="conflicting", metadata=metadata).get("isError"))
+        for target, meta in (
+            (other, {**metadata, "antigravity.google/conversation_id": other}),
+            (None, {"antigravity.google/root_conversation_id": root}),
+        ):
+            thread, box, request_id = self._start_call(
+                conversation=target, header=None, metadata=meta,
+            )
+            self.assertEqual(self.executor.calls, 2)
+            self.assertEqual(self.manager.pending[request_id].public()["timed_grants_allowed"],
+                             target is not None)
+            self.assertEqual(self._decision(request_id, "deny").status_code, 200)
+            self.assertTrue(self._result(thread, box).get("isError"))
+        self.assertEqual(self.executor.calls, 2)
+
     def test_combined_root_approval_previews_exact_request_and_audits_root(self):
         thread, box, approval_id = self._start_call(
             arguments=self._root_arguments(),

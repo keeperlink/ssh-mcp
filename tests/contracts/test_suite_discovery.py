@@ -37,11 +37,45 @@ class SuiteDiscoveryTests(unittest.TestCase):
         self.sample("contracts", f"test_contract_{uuid4().hex}.py")
         self.assertEqual(discover(tests=self.root).countTestCases(), 2)
 
+    def test_tools_are_discovered_only_when_selected(self) -> None:
+        self.sample("unit", f"test_unit_{uuid4().hex}.py")
+        self.sample("contracts", f"test_contract_{uuid4().hex}.py")
+        self.sample("tools", f"test_tools_{uuid4().hex}.py")
+        self.assertEqual(discover(tests=self.root).countTestCases(), 2)
+        self.assertEqual(discover(tests=self.root, tools_only=True).countTestCases(), 1)
+
+    def test_unselected_source_only_modules_are_not_imported(self) -> None:
+        self.sample("unit", f"test_unit_{uuid4().hex}.py")
+        self.sample("contracts", f"test_contract_{uuid4().hex}.py")
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / f"test_tools_{uuid4().hex}.py").write_text(
+            "raise RuntimeError('Source-only dependency is not installed')\n")
+        self.assertEqual(discover(tests=self.root).countTestCases(), 2)
+        with self.assertRaisesRegex(ValueError, "Failed tests/tools discovery"):
+            discover(tests=self.root, tools_only=True)
+
+    def test_duplicate_module_names_between_tools_and_wheel_tests_are_rejected(self) -> None:
+        name = f"test_duplicate_{uuid4().hex}.py"
+        self.sample("unit", name)
+        self.sample("contracts", f"test_contract_{uuid4().hex}.py")
+        self.sample("tools", name)
+        for tools_only in (False, True):
+            with self.assertRaisesRegex(ValueError, "Duplicate test module"):
+                discover(tests=self.root, tools_only=tools_only)
+
+    def test_missing_tools_suite_fails_only_when_selected(self) -> None:
+        self.sample("unit", f"test_unit_{uuid4().hex}.py")
+        self.sample("contracts", f"test_contract_{uuid4().hex}.py")
+        self.assertEqual(discover(tests=self.root).countTestCases(), 2)
+        with self.assertRaisesRegex(ValueError, "Missing or empty offline suite: tests/tools"):
+            discover(tests=self.root, tools_only=True)
+
     def test_root_tests_are_rejected_not_silently_omitted(self) -> None:
         self.sample("unit", f"test_unit_{uuid4().hex}.py")
         self.sample("contracts", f"test_contract_{uuid4().hex}.py")
         (self.root / "test_orphan.py").write_text("# orphan\n")
-        with self.assertRaisesRegex(ValueError, "tests/unit or tests/contracts"):
+        with self.assertRaisesRegex(ValueError, "tests/unit, tests/contracts or tests/tools"):
             discover(tests=self.root)
 
     def test_duplicate_module_names_across_suites_are_rejected(self) -> None:
@@ -59,7 +93,7 @@ class SuiteDiscoveryTests(unittest.TestCase):
             "integration/test_accidental.py",
             "fixtures/test_accidental.py",
             "lab/test_accidental.py",
-            "tools/test_accidental.py",
+            "tools/nested/test_accidental.py",
             "unit/nested/test_accidental.py",
             "contracts/nested/test_accidental.py",
             "other/test_accidental.py",
@@ -68,7 +102,7 @@ class SuiteDiscoveryTests(unittest.TestCase):
                 misplaced = self.root / name
                 misplaced.parent.mkdir(parents=True, exist_ok=True)
                 misplaced.write_text("# a lost test must stop the build\n")
-                with self.assertRaisesRegex(ValueError, "tests/unit or tests/contracts"):
+                with self.assertRaisesRegex(ValueError, "tests/unit, tests/contracts or tests/tools"):
                     discover(tests=self.root)
                 misplaced.unlink()
 

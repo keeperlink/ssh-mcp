@@ -1,89 +1,57 @@
-# Nonproduction live preview
+# Live-source development fixture
 
-Use this operator-only helper to temporarily switch an existing managed,
-digest-pinned SSH-MCP service behind HAProxy to a separate preview container.
-Use **only an explicitly approved nonproduction host and maintenance window**.
-The source must be reviewed and compatible with the signed runtime and SQLite
-schema. This is not a release deployment, production diagnostic, or substitute
-for isolated integration acceptance.
+The operator selects the host and service, and is responsible for approval
+and source compatibility with the installed image and retained database.
+Stop all active work first. The original and fixture share the database;
+never run both simultaneously or run a deployment concurrently.
+No backup, migration or automatic rollback is performed by this helper.
 
-## Select the exact target
+The proxy must independently follow the Docker service DNS alias (for
+HAProxy, configure a Docker resolver at `127.0.0.11:53` and attach it to the
+server). The fixture never communicates with or modifies the proxy.
 
-On the approved host, stage the reviewed source checkout accessible to the
-container UID 10001. Supply the exact local hostname, original container,
-HAProxy container, backend/server from its admin socket, and original ingress
-Docker network. Verify that all MCP/Console ingress uses that backend and
-that there will be no direct access to the private port during the switch.
-No private identifiers or credentials belong in the checkout. Do not run
-deployment, Docker daemon restarts, HAProxy reloads or other lifecycle
-operations concurrently with a preview.
-
-Example with synthetic names (replace with the reviewed nonproduction values):
+From the reviewed checkout on the selected host (substitute the actual
+container name):
 
 ```bash
-preview=(python3 ops/preview/lab_preview.py
-  --test-host demo-test
-  --container ssh-mcp
-  --proxy haproxy
-  --backend ssh_mcp/ssh_mcp_demo
-  --network demo-ingress)
+preview=(python3 ops/preview/preview.py --container ssh-mcp)
+"${preview[@]}" start
 "${preview[@]}" status
-"${preview[@]}" fix-source
-"${preview[@]}" start --trace
-docker logs --since 5m ssh-mcp-dev 2>&1 | grep SSH_MCP_PREVIEW_REQUEST
+docker exec ssh-mcp-dev python -m app.control_cli set logging-level DEBUG
+docker logs --since 5m ssh-mcp-dev 2>&1 | grep SSH_MCP_REQUEST
+# After a source edit:
+"${preview[@]}" restart
+# DEBUG is reset on restart; enable it again if needed.
 "${preview[@]}" stop
 ```
 
-The default runs the **original installed wheel**, with only the preview
-entrypoint and diagnostic middleware added. It cannot accidentally use an
-older checkout's application. Use `start --source-preview` explicitly for a
-reviewed local application edit and Uvicorn reload; add `--trace` if needed.
-Reloads interrupt in-memory approvals and operations; do not edit while they
-are active. Mount only the app source and preview tooling, read-only.
-`fix-source` repairs readability of source files only; it refuses symlinks,
-special files and unsafe ownership. Never use it on a source tree containing
-credentials. The normal service does not import the preview entrypoint.
+The running original is the source of truth: the helper inspects its Docker
+configuration, keeps the local image ID, actual volume identities, input
+mounts, environment, command, health check, security settings, ports and
+network configuration. It locates the installed app package without importing
+it and binds the checkout's app/ directory directly over that package, read-only.
+A temporary file containing the checkout's short HEAD commit is mounted over
+`/usr/local/share/ssh-mcp/version` read-only, refreshed in place on restart and
+removed on stop. The Console and MCP report this commit instead of the release
+version (an explicit inherited MCP_SERVICE_VERSION override still takes precedence).
+Uncommitted edits do not change the HEAD commit. Run restart from the same checkout.
+No Compose file, environment changes or image rebuild are needed. The clone adds
+the original name as a network alias on user-defined networks, uses a -dev
+container name, replaces Compose ownership labels with a fixture identity label,
+and disables automatic restart. Docker-generated IDs, hostname and assigned
+network addresses are not reused. Explicit IPAM settings are retained.
+Auto-removing containers and volumes-from configurations are not supported.
+The source must be readable by the service UID and contain no credentials.
+Restart the container to load changes.
 
-## Request diagnostics
+The helper creates a stopped fixture before stopping the original, then
+starts the fixture. If a switch fails, use `status` and inspect the
+containers. `stop` removes the owned fixture and starts the intact original
+if needed; a stopped fixture can also be removed while the original remains
+running. If no fixture exists and the original is stopped, manually start it
+with `docker start ssh-mcp` (substitute the actual name).
+Never start the original while the fixture is running. A brief interruption
+is expected during switching and DNS/health-check convergence.
 
-`--trace` logs MCP request method, path, repeated HTTP header names/values,
-and bounded JSON-RPC envelope and metadata. Known protocol headers and
-validated correlation IDs are visible; credential-like header values are
-redacted, unknown values are fingerprinted with a process-local random key
-so identical values can be compared without exposing a possible credential.
-Known correlation metadata includes Codex thread/turn IDs. Only argument
-names, never arbitrary tool arguments, are recorded. No bearer/cookie values,
-OAuth form values, query strings, response bodies or raw request body are
-logged. Capture at most 64 KiB of a consumed request body and 256 headers.
-Logs are sensitive nonproduction diagnostic data; restrict access and stop
-the preview when finished. The trace is off by default.
-
-## Switch and recover
-
-The helper checks that the original configuration declares the lab environment,
-uses the local Docker socket, and checks the signed-managed configuration mounts, current
-private runtime paths, immutable local image ID, restricted private port,
-state volume, two original networks and the exact selected HAProxy server
-address. It never modifies the original container, image or release lock.
-Before stopping it, put the selected server in maintenance, wait for
-`awaiting_approval`, `queued`, and `running` commands, file operations and
-batches to drain, and create a mode-0600 integrity-checked SQLite online
-backup under the mode-0700 user cache. Check work again after snapshot.
-A private persistent marker binds the original container and proxy IDs and the exact
-selected routing target. The helper stops the original (never removes it),
-starts the temporary hardened preview using the same state volume, verifies
-health, then redirects only the selected HAProxy server via its admin socket.
-No HAProxy configuration rewrite or daemon restart occurs.
-Before using this version, restore any active older preview with its original
-helper; never switch tooling while an earlier switch is incomplete.
-
-Use the same target options for `stop` or `recover`. Stop drains preview work,
-removes only the identified preview container, starts the intact original,
-checks readiness and restores the server address/ready state. Failed switches
-attempt restoration; if interrupted or restoration fails, inspect `status`
-and use `recover`. Never blindly retry start. Recovery may interrupt active
-operations; restoring SQLite itself is deliberately not automatic. Only one
-container may access the volume at any time. The backup contains sensitive
-audit/OAuth state; keep it private, and separately authorize restoration or
-deletion. Schema changes can make rollback incompatible: do not use this
-helper to experiment with migrations against persistent state.
+`python -m app.control_cli` works even when the installed base wheel predates
+the `ssh-mcp-ctl` console entry point.

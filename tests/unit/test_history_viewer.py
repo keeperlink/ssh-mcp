@@ -815,8 +815,9 @@ class BrowserTests(unittest.TestCase):
                 self.assertIn(f"<title>SSH-MCP · Operator Console · {label}</title>", page.text)
                 self.assertIn(f'<span class="brand-sub">{label}</span>', page.text)
                 if config.MCP_SERVICE_VERSION:
+                    prefix = "" if config.is_commit_version(config.MCP_SERVICE_VERSION) else "v"
                     self.assertIn(
-                        f'<span class="brand-version">v{config.MCP_SERVICE_VERSION}</span>',
+                        f'<span class="brand-version">{prefix}{config.MCP_SERVICE_VERSION}</span>',
                         page.text,
                     )
                 else:
@@ -848,6 +849,8 @@ class BrowserTests(unittest.TestCase):
             self.assertIn('<span class="brand-version">v0.1.7</span>', markup)
             self.assertLess(markup.index('class="brand-sub"'), markup.index('class="brand-version"'))
             self.assertTrue(config._valid_service_version(config.MCP_SERVICE_VERSION))
+        with patch.object(config, "MCP_SERVICE_VERSION", "abc1234"):
+            self.assertIn('<span class="brand-version">abc1234</span>', self.client.get("/console").text)
         for bad in ("<script>", "0.1.${BUILD_NUMBER}", "1.2.3<img", "x" * 41):
             with self.subTest(bad=bad), patch.object(config, "MCP_SERVICE_VERSION", bad), patch.object(
                     config, "MCP_RESOURCE", config.MCP_ISSUER + "/mcp"):

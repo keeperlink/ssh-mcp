@@ -277,23 +277,23 @@ class IsolationTests(unittest.TestCase):
             self.assertFalse(any(args[0] == "run" for args in calls))
 
     def test_live_host_listener_must_be_unreachable_from_mcp(self) -> None:
-        with patch.object(runner, "text", return_value="10.77.240.10"), \
+        with patch.object(runner, "text", return_value="192.0.2.20"), \
              patch.object(runner.socket, "create_connection", return_value=MagicMock()), \
              patch.object(runner, "docker", return_value="HOST_REACHABILITY_BLOCKED") as docker_mock:
             runner.verify_host_isolation("synthetic-mcp")
             argv = docker_mock.call_args.args
             self.assertEqual(argv[:3], ("exec", "synthetic-mcp", "python"))
-            self.assertIn("10.77.240.10", argv)
+            self.assertIn("192.0.2.20", argv)
 
     def test_reachable_host_listener_blocks_setup(self) -> None:
-        with patch.object(runner, "text", return_value="10.77.240.10"), \
+        with patch.object(runner, "text", return_value="192.0.2.20"), \
              patch.object(runner.socket, "create_connection", return_value=MagicMock()), \
              patch.object(runner, "docker", return_value="HOST_REACHABILITY_VIOLATION"):
             with self.assertRaisesRegex(runner.LabError, "unexpectedly reached"):
                 runner.verify_host_isolation("synthetic-mcp")
 
     def test_host_listener_positive_control_required(self) -> None:
-        with patch.object(runner, "text", return_value="10.77.240.10"), \
+        with patch.object(runner, "text", return_value="192.0.2.20"), \
              patch.object(runner.socket, "create_connection",
                           side_effect=ConnectionRefusedError("nothing listening")), \
              patch.object(runner, "docker") as docker_mock:
