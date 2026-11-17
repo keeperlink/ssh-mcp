@@ -78,6 +78,45 @@ class SessionStoreTests(unittest.TestCase):
         self.assertIsNone(self.rotate(newer["refresh_token"]))
         self.assertEqual(self.store.revoke(sid), 0)
 
+    def test_cross_client_consumed_token_replay_never_revokes_original_session(self):
+        sid, old = self.issue()
+        newer = self.rotate(old)
+        foreign_client = "https://foreign.example.com/oauth/client.json"
+        with patch("app.oauth_sessions.time.time", return_value=time.time() + 15):
+            # Foreign client tries to rotate using client's consumed token
+            self.assertIsNone(self.rotate(old, client_id=foreign_client))
+            # Also test resource or scope mismatch on consumed token
+            self.assertIsNone(self.rotate(old, resource="https://other.invalid/mcp"))
+            self.assertIsNone(self.rotate(old, scopes="mcp.access different.scope"))
+        # Original family must NOT be revoked
+        self.assertIsNone(self.store.list_sessions()[0]["revoked_at"])
+        # Legitimate successor can still rotate cleanly
+        self.assertIsNotNone(self.rotate(newer["refresh_token"]))
+
+    def test_independent_client_refresh_isolated(self):
+        client_a = "https://client-a.example.com/oauth/client.json"
+        client_b = "https://client-b.example.com/oauth/client.json"
+        sid_a, old_a = self.issue(client_id=client_a)
+        sid_b, old_b = self.issue(client_id=client_b)
+
+        newer_a = self.rotate(old_a, client_id=client_a)
+        newer_b = self.rotate(old_b, client_id=client_b)
+        self.assertIsNotNone(newer_a)
+        self.assertIsNotNone(newer_b)
+
+        # Cross-client replay of consumed tokens after grace does not revoke
+        with patch("app.oauth_sessions.time.time", return_value=time.time() + 15):
+            self.assertIsNone(self.rotate(old_a, client_id=client_b))
+            self.assertIsNone(self.rotate(old_b, client_id=client_a))
+
+        sessions = {s["id"]: s for s in self.store.list_sessions()}
+        self.assertIsNone(sessions[sid_a]["revoked_at"])
+        self.assertIsNone(sessions[sid_b]["revoked_at"])
+
+        # Both continue to rotate independently
+        self.assertIsNotNone(self.rotate(newer_a["refresh_token"], client_id=client_a))
+        self.assertIsNotNone(self.rotate(newer_b["refresh_token"], client_id=client_b))
+
     def test_two_simultaneous_requests_never_issue_two_successors(self):
         _, old = self.issue()
         gate = Barrier(2)
@@ -444,6 +483,31 @@ class RefreshEndpointTests(unittest.TestCase):
         self.assertEqual(self.client.post("/oauth/token", data={
             "grant_type": "refresh_token", "refresh_token": next_token, "client_id": CLIENT,
         }).status_code, 200)
+
+    def test_endpoint_cross_client_consumed_token_replay_does_not_revoke(self):
+        initial = self.authorize()
+        initial_refresh = initial["refresh_token"]
+        body = {"grant_type": "refresh_token", "refresh_token": initial_refresh,
+                "client_id": CLIENT}
+        renewed = self.client.post("/oauth/token", data=body)
+        self.assertEqual(renewed.status_code, 200, renewed.text)
+        next_token = renewed.json()["refresh_token"]
+
+        with patch("app.oauth_sessions.time.time", return_value=time.time() + 15):
+            # Foreign client replays consumed token
+            rejected = self.client.post("/oauth/token", data={
+                "grant_type": "refresh_token", "refresh_token": initial_refresh,
+                "client_id": "https://evil.invalid/client",
+            })
+            self.assertEqual(rejected.status_code, 400)
+            self.assertEqual(rejected.json()["error"], "invalid_grant")
+
+        # Legitimate client can still rotate using next_token
+        valid = self.client.post("/oauth/token", data={
+            "grant_type": "refresh_token", "refresh_token": next_token,
+            "client_id": CLIENT,
+        })
+        self.assertEqual(valid.status_code, 200, valid.text)
 
 
 if __name__ == "__main__":

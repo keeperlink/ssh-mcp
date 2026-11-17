@@ -120,6 +120,10 @@ class SessionStore:
 
         Invalid or concurrent uses return None, never token values. A duplicate
         within the grace window does not revoke, even across server processes.
+
+        Client/resource/scope binding is validated before replay-triggered
+        revocation so that a foreign client presenting a consumed token from
+        another family cannot revoke that family's session.
         """
         now = int(time.time())
         successor = _refresh_token()
@@ -144,12 +148,23 @@ class SessionStore:
                 # Revoke the family before consuming/minting any successor.
                 db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
                            (now, row["id"]))
+            elif (row["client_id"] != client_id or row["resource"] != resource
+                  or (scopes is not None and row["scopes"] != scopes)):
+                # Binding mismatch: reject silently without revoking or
+                # consuming the token. The presenting client has no standing
+                # over this family regardless of whether the token is fresh
+                # or already consumed.
+                return None
             elif row["consumed_at"] is not None:
+                # Same client, but token already consumed. Revoke the family
+                # only if the grace window has passed; within it, treat as a
+                # benign duplicate and return None without side-effects.
                 if now > row["consumed_at"] + REFRESH_REPLAY_GRACE_SECONDS:
-                    db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
-                               (now, row["id"]))
-            elif (row["client_id"] == client_id and row["resource"] == resource
-                  and (scopes is None or row["scopes"] == scopes)):
+                    db.execute(
+                        "UPDATE oauth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+                        (now, row["id"]),
+                    )
+            else:
                 db.execute("UPDATE oauth_refresh SET consumed_at=? WHERE token_hash=?",
                            (now, _digest(refresh_token)))
                 db.execute(
