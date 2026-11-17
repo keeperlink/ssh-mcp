@@ -237,6 +237,14 @@ class HistoryStore:
     def _where(filters: dict[str, str]) -> tuple[List[str], List[Any]]:
         where = ["1=1"]
         params: list[Any] = []
+        # The browser is an independent authenticated operator view. MCP
+        # always injects its server-derived, client-scoped actor here.
+        scoped_actor = filters.get("actor")
+        if scoped_actor is not None:
+            if not isinstance(scoped_actor, str) or not scoped_actor:
+                raise ValueError("Invalid audit actor")
+            where.append("actor=?")
+            params.append(scoped_actor)
         record_kind = filters.get("record_kind", "all")
         if record_kind not in {"all", "command", "file", "batch"}:
             raise ValueError("Invalid record kind")
@@ -307,11 +315,14 @@ class HistoryStore:
             raise ValueError("Date interval is invalid")
         return where, params
 
-    def hosts(self) -> List[str]:
-        """Every distinct historical alias, independent of the execution registry."""
+    def hosts(self, *, actor: str | None = None) -> List[str]:
+        """Historical aliases, optionally restricted to the authenticated client actor."""
+        clause = "WHERE actor=?" if actor is not None else ""
+        params = (actor,) if actor is not None else ()
         with self._connect() as db:
             rows = db.execute(
-                "SELECT DISTINCT server FROM history_events ORDER BY server LIMIT 501"
+                f"SELECT DISTINCT server FROM history_events {clause} "
+                "ORDER BY server LIMIT 501", params
             ).fetchall()
         if len(rows) > 500:
             raise ValueError("History host list exceeds limit")

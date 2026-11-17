@@ -47,7 +47,8 @@ from .file_transfer import BinaryTransferService
 from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
 from .history import HistoryStore
 from .operational import service_status, service_version
-from .oauth import OAuthTokenVerifier, _supported_scopes
+from .oauth import (OAuthTokenVerifier, _supported_scopes, client_audit_actor,
+                    register_transport_origins, session_store)
 from .ssh_executor import SSHDenied, SSHExecutor
 
 LOGGER = logging.getLogger(__name__)
@@ -359,20 +360,14 @@ def create_mcp_server(*, job_registry: dict | None = None,
             executor is None
             or token is None
             or config.MCP_SSH_SCOPE not in token.scopes
-            or token.client_id != config.MCP_CIMD_CLIENT_ID
-            or not token.subject
+            or not token.client_id
+            or token.subject != config.MCP_OPERATOR_SUBJECT
         ):
             return _error("SSH tool requires an authenticated ssh.execute grant")
 
-        # Historical audits are available only to the configured ChatGPT
-        # operator; a valid token for a different subject must not confer
-        # cross-actor history visibility or alter execution/cancel semantics.
-        if (params.name in {
-            "list_jobs", "get_job", "get_job_output",
-            "get_job_stats", "get_status",
-        } and token.subject != config.MCP_OPERATOR_SUBJECT):
-            return _error("Operator history access denied")
-
+        # The signed operator subject is mandatory for every host/tool method.
+        # Client-specific actor partitioning applies only after this gate.
+        actor = client_audit_actor(token.client_id)
         arguments = dict(params.arguments or {})
         # Keep the existing structured validation errors for batches before
         # the shared host gate; no CWD preflight or SSH occurs in this step.
@@ -449,7 +444,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
             if not isinstance(server_name, str):
                 return _error("Invalid SSH request arguments")
             try:
-                host = executor.authorized_host(token.subject, server_name)
+                host = executor.authorized_host(actor, server_name)
                 sid = (token.claims or {}).get("sid")
                 conversation_id = conversation_id_context.get()
                 if (host.access == "restricted"
@@ -462,7 +457,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         and file_request.operation_id
                         and files.audit.operation_id_exists(file_request.operation_id)):
                     existing_history_id = files.audit.replay_history_id(
-                        token.subject, file_request.operation_id,
+                        actor, file_request.operation_id,
                     )
                     return _result({
                         "status": "failed", "operation_id": file_request.operation_id,
@@ -475,13 +470,13 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     }, is_error=True)
                 if command_request is not None and jobs is not None:
                     audit_id = jobs.store.create(
-                        token.subject, command_request,
+                        actor, command_request,
                         mode="async" if params.name == "submit_job" else "sync",
                         pending_approval=True, username=host.username,
                     )
                 elif batch_request is not None and batches is not None:
                     audit_id = batches.store.create(
-                        token.subject, batch_request, pending_approval=True,
+                        actor, batch_request, pending_approval=True,
                         username=host.username,
                     )
                 elif file_request is not None and files is not None:
@@ -493,7 +488,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "upload_file": "upload", "download_file": "download",
                     }[params.name]
                     audit_id = files.audit.reserve(
-                        token.subject, file_request.server, file_kind,
+                        actor, file_request.server, file_kind,
                         file_request.path, file_request.story_id,
                     )
                 else:
@@ -516,7 +511,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
             sid = (token.claims or {}).get("sid")
             try:
                 approval_code = await require_host_access(
-                    executor, token.subject, server_name,
+                    executor, actor, server_name,
                     session_id=sid if isinstance(sid, str) else None,
                     conversation_id=conversation_id_context.get(),
                     approvals=approvals, tool=params.name,
@@ -581,7 +576,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     assert batch_request is not None
                     try:
                         data = await batches.execute(
-                            token.subject, batch_request,
+                            actor, batch_request,
                             admitted_root=batch_request.privileged,
                             precreated_id=audit_id,
                         )
@@ -598,25 +593,21 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     })
                 if params.name == "get_batch":
                     query = GetBatchRequest.model_validate(arguments)
-                    data = batches.get(token.subject, query.batch_id,
+                    data = batches.get(actor, query.batch_id,
                                        cursor=query.cursor, limit=query.limit)
                     return _result(data) if data is not None else _error("Batch unavailable")
                 if params.name == "list_batches":
                     query = ListBatchesRequest.model_validate(arguments)
-                    return _result(batches.list(token.subject, cursor=query.cursor,
+                    return _result(batches.list(actor, cursor=query.cursor,
                                                  limit=query.limit))
                 query = CancelBatchRequest.model_validate(arguments)
-                data = batches.cancel(token.subject, query.batch_id, reason=query.reason)
+                data = batches.cancel(actor, query.batch_id, reason=query.reason)
                 return _result(data) if data is not None else _error("Batch unavailable")
             if params.name == "list_servers":
                 ListServersRequest.model_validate(arguments)
                 return _result({
-                    "servers": executor.list_servers(token.subject),
-                    "history_hosts": (
-                        history.hosts()
-                        if history is not None and token.subject == config.MCP_OPERATOR_SUBJECT
-                        else []
-                    ),
+                    "servers": executor.list_servers(actor),
+                    "history_hosts": history.hosts(actor=actor) if history is not None else [],
                 })
             if params.name == "probe_binary_file_exchange":
                 if not probe_enabled:
@@ -631,12 +622,12 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     return _error("File operations require durable audit storage")
                 if params.name == "upload_file":
                     upload_request = UploadFileRequest.model_validate(arguments)
-                    data = await files.upload(token.subject, upload_request,
+                    data = await files.upload(actor, upload_request,
                                               precreated_id=audit_id)
                     return _result(data, is_error=data["status"] != "succeeded")
                 if params.name == "download_file":
                     download_request = DownloadFileRequest.model_validate(arguments)
-                    data = await files.download(token.subject, download_request,
+                    data = await files.download(actor, download_request,
                                                 precreated_id=audit_id)
                     if data["status"] != "succeeded":
                         return _result(data, is_error=True)
@@ -675,7 +666,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 }[params.name]
                 if params.name == "apply_patch" and file_request.dry_run:
                     operation = "patch_preview"
-                data = await files.perform(token.subject, file_request, operation,
+                data = await files.perform(actor, file_request, operation,
                                            payload, precreated_id=audit_id)
                 return _result(data, is_error=data["status"] != "succeeded")
             if params.name in JOB_TOOL_NAMES:
@@ -684,14 +675,16 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 if params.name == "submit_job":
                     assert command_request is not None
                     return _result({"job": jobs.submit(
-                        token.subject, command_request,
+                        actor, command_request,
                         admitted_root=command_request.privileged,
                         precreated_id=audit_id,
                     )})
                 assert history is not None
                 if params.name == "list_jobs":
                     query = ListJobsRequest.model_validate(arguments)
-                    rows = history.list(query.history_filters(), before=_decode_mcp_cursor(query.cursor),
+                    filters = query.history_filters()
+                    filters["actor"] = actor
+                    rows = history.list(filters, before=_decode_mcp_cursor(query.cursor),
                                         limit=query.limit)
                     # Historical actor identities are internal audit metadata.
                     summaries = [
@@ -707,6 +700,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 if params.name == "get_job_stats":
                     query = GetJobStatsRequest.model_validate(arguments)
                     filters = query.history_filters()
+                    filters["actor"] = actor
                     if not any(k in filters for k in ("time_range", "from_date", "to_date")):
                         filters["time_range"] = "24h"
                     return _result(history.stats(filters, group_by=query.group_by,
@@ -717,18 +711,22 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 if params.name == "get_job":
                     query = GetJobRequest.model_validate(arguments)
                     item = history.detail(query.job_id)
-                    if item is not None:
-                        item.pop("actor", None)
+                    if item is None or item.get("actor") != actor:
+                        return _error("Job unavailable")
+                    item.pop("actor", None)
                     return _result({"job": item}) if item is not None else _error("Job unavailable")
                 if params.name == "get_job_output":
                     query = GetJobOutputRequest.model_validate(arguments)
+                    detail = history.detail(query.job_id)
+                    if detail is None or detail.get("actor") != actor:
+                        return _error("Job unavailable")
                     data = history.output(
                         query.job_id, cursor=query.cursor, max_bytes=query.max_bytes,
                     )
                     return _result(data) if data is not None else _error("Job unavailable")
                 if params.name == "cancel_job":
                     query = CancelJobRequest.model_validate(arguments)
-                    data = jobs.cancel(token.subject, query.job_id, reason=query.reason)
+                    data = jobs.cancel(actor, query.job_id, reason=query.reason)
                     return _result(data) if data is not None else _error("Job unavailable")
             assert command_request is not None
             request = command_request
@@ -747,12 +745,12 @@ def create_mcp_server(*, job_registry: dict | None = None,
 
         try:
             job_id, result = await jobs.execute_sync(
-                token.subject, request, on_created=remember_job_id,
+                actor, request, on_created=remember_job_id,
                 admitted_root=request.privileged,
                 precreated_id=audit_id,
             )
             if result is None:
-                saved = jobs.get(token.subject, job_id)
+                saved = jobs.get(actor, job_id)
                 if saved is not None and saved["status"] == "cancelled":
                     return _result({
                         "job_id": job_id, "server": request.server,
@@ -795,7 +793,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
         # Do not log argv, reason, credentials, stdout or stderr.
         LOGGER.info(
             "direct_ssh request_id=%s principal=%s server=%s status=%s exit_code=%s",
-            request_id, token.subject, result.server, result.status, result.exit_code,
+            request_id, actor, result.server, result.status, result.exit_code,
         )
         return _result(
             {"request_id": request_id, **asdict(result),
@@ -833,11 +831,20 @@ def create_mcp_server(*, job_registry: dict | None = None,
         required_scopes=_supported_scopes(),
         validate_token_resource=True,
     )
+    # Existing signed Origins stay valid. Additional Origin values come only
+    # from previously approved, still-active OAuth sessions and validated
+    # redirects after successful interactive authorization.
+    origins = list(MCP_ALLOWED_ORIGINS)
+    try:
+        origins.extend(item for item in session_store().active_origins() if item not in origins)
+    except RuntimeError:
+        pass  # OAuth-only synthetic test setup without a session store.
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=MCP_ALLOWED_HOSTS,
-        allowed_origins=MCP_ALLOWED_ORIGINS,
+        allowed_origins=origins,
     )
+    register_transport_origins(security.allowed_origins)
     mcp_app = server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,

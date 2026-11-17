@@ -5,28 +5,41 @@ metadata at `/.well-known/oauth-authorization-server` and
 `/.well-known/oauth-protected-resource`, with authorization and
 token exchange under `/oauth/authorize` and `/oauth/token`.
 
-**One client ID per deployment:** the server checks an operator
-configured HTTPS client metadata document and exact callback allowlist.
-The standalone example targets **ChatGPT**, the currently supported
-browser authorization flow. Although client metadata and callback
-allowlists are configurable, `app/oauth.py` currently restricts
-the authorization page's CSP `form-action` to `'self'` and
-`https://chatgpt.com`. Browsers may enforce this on the POST
-redirect, preventing callbacks to other origins. **Do not assume
-a non-ChatGPT client will authenticate by changing metadata
-and redirect settings alone.** That needs an independently
-reviewed allowlisted CSP change and browser acceptance tests,
-not disabling CSP or adding a wildcard. Simultaneous authorization
-for two different client IDs is not implemented.
+**Unknown clients can connect without preregistration.** For each HTTPS URL-form
+OAuth `client_id`, SSH-MCP retrieves the Client ID Metadata Document (CIMD)
+over certificate-validated HTTPS, validates its exact client ID and redirect URI,
+and displays the client name, document URL and callback before asking the
+operator to authorize it with the private login key. The claimed client name
+is **not** independently attested. Inspect the actual metadata and callback
+origin before approving an unfamiliar client.
+
+The server accepts several approved OAuth clients concurrently. Their codes,
+refresh sessions and MCP audit views are client-bound. The Operator Console
+remains the separately password-protected view of all host activity.
+Signed SSH inventory, restricted-host approvals and sudo policy still apply:
+OAuth consent alone does not authorize arbitrary SSH access.
+
+The login page derives a narrow `form-action` CSP origin from the **verified
+callback for that request**, not from untrusted parameters or a global
+allowlist. Origins associated with valid authorized sessions survive restart.
+The metadata fetch is bounded, pins publicly routable IPs and rejects HTTP,
+redirects and private-network endpoints. The configured legacy client ID
+and static redirect/origin values remain for offline fixtures and existing
+ChatGPT audit compatibility; with remote validation enabled they **do not**
+limit which new CIMD clients can request authorization.
+
+MCP clients that lack HTTPS CIMD support may require a separately supported
+registration mechanism; Dynamic Client Registration is not enabled.
 
 ## Connection procedure
 
 1. Put the server behind authenticated HTTPS, set `MCP_ISSUER` to
    the exact proxy origin, and connect to issuer + `/mcp`.
-2. For the supported example, keep the **ChatGPT metadata,
-   redirect URI and allowed origin**. Keep remote metadata
-   validation enabled. Other clients need separately verified
-   browser callback/CSP support.
+2. Keep remote CIMD metadata validation **enabled**. The example's
+   ChatGPT settings remain backward-compatible, but other HTTPS CIMD
+   clients no longer require adding a client ID or origin to configuration.
+   Unknown clients must pass metadata and redirect checks and must be
+   approved separately on the OAuth consent page.
 3. Request `mcp.access` for `ping` and `ssh.execute` for SSH,
    job, batch and file tools. A tool cannot override inventory hosts.
 4. Enter `MCP_LOGIN_KEY` on the OAuth screen. It is **not** the
@@ -54,10 +67,10 @@ host and permission type. Without a header, a restricted request
 fails closed: no implicit shared conversation is created.
 
 Not every MCP client supports the existing header or ChatGPT-native
-binary attachment parameter. Multiple OAuth clients, provider-neutral
-restricted approvals and generic binary upload have separate
-future enhancement tracks; renaming the server metadata alone does
-not provide those capabilities.
+binary attachment parameter. Provider-neutral restricted approvals and
+generic binary upload remain separate enhancements. Unknown clients
+that cannot send the configured workflow header cannot reach restricted
+SSH hosts even after successful OAuth authorization.
 
 ## Reverse proxy
 
