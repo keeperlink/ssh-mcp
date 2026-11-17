@@ -5,6 +5,8 @@ import os
 import re
 from pathlib import Path
 
+from .control import LEVELS
+
 # Production mounts are all-or-nothing. Lab environment-file mode remains
 # supported by the exact same single image, without separate bootstrap code.
 _MOUNTS = ("MCP_CONFIG_FILE", "MCP_INVENTORY_FILE", "MCP_KNOWN_HOSTS_FILE", "MCP_SECRETS_FILE")
@@ -26,6 +28,7 @@ def _csv_env(name: str, default: str = "") -> list[str]:
 MCP_LOGIN_KEY = os.getenv("MCP_LOGIN_KEY", "")
 MCP_TOKEN_SIGNING_SECRET = os.getenv("MCP_TOKEN_SIGNING_SECRET", "")
 MCP_ENVIRONMENT = os.getenv("MCP_ENVIRONMENT", "lab")
+MCP_LOG_LEVEL = os.getenv("MCP_LOG_LEVEL", "INFO")
 # The image builder embeds the resolved release tag into the immutable image; local
 # development can override it without changing signed deployment settings.
 _IMAGE_VERSION = Path("/usr/local/share/ssh-mcp/version")
@@ -69,16 +72,22 @@ SSH_MAX_CONCURRENT = int(os.getenv("SSH_MAX_CONCURRENT", "4"))
 SSH_MAX_ACTIVE_JOBS = int(os.getenv("SSH_MAX_ACTIVE_JOBS", "32"))
 
 
+def is_commit_version(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{7,40}", value) is not None
+
+
 def _valid_service_version(value: str) -> bool:
-    return not value or (len(value) <= 40 and re.fullmatch(
+    return not value or is_commit_version(value) or (len(value) <= 40 and re.fullmatch(
         r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", value) is not None)
 
 
 def validate_mcp_config() -> None:
+    if MCP_LOG_LEVEL not in LEVELS:
+        raise RuntimeError("Invalid MCP_LOG_LEVEL")
     if MCP_ENVIRONMENT not in {"lab", "production"}:
         raise RuntimeError("MCP_ENVIRONMENT must be lab or production")
     if not _valid_service_version(MCP_SERVICE_VERSION):
-        raise RuntimeError("MCP_SERVICE_VERSION must be a release version")
+        raise RuntimeError("MCP_SERVICE_VERSION must be a release version or Git commit hash")
     if len(MCP_LOGIN_KEY) < 32:
         raise RuntimeError("MCP_LOGIN_KEY must contain at least 32 characters")
     if len(MCP_TOKEN_SIGNING_SECRET) < 32:

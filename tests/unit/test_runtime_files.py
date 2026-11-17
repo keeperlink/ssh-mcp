@@ -161,6 +161,23 @@ class SignedConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid service setting schema"):
             _valid_settings(missing)
 
+    def test_logging_level_defaults_and_signed_value(self):
+        from app.runtime_files import _valid_settings
+
+        for bad in (None, {}, {"level": "TRACE"}, {"level": True},
+                    {"level": "INFO", "extra": True}):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "Invalid logging settings"):
+                    _valid_settings({**self.settings, "logging": bad})
+        legacy = dict(self.settings)
+        legacy.pop("logging", None)
+        self.write(self.config, legacy)
+        self.assertEqual(self.prepare()["MCP_LOG_LEVEL"], "INFO")
+        target = self.root / "debug-runtime"
+        target.mkdir(mode=0o700)
+        self.write(self.config, {**self.settings, "logging": {"level": "DEBUG"}})
+        self.assertEqual(prepare(self.config, self.secrets, self.inventory, self.known, target)["MCP_LOG_LEVEL"], "DEBUG")
+
     def test_obsolete_file_source_allowlist_removed_from_signed_schema(self):
         from app.runtime_files import _valid_settings
         for env in ("lab", "production"):

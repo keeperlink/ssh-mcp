@@ -52,6 +52,23 @@ class RuntimeUnitTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "MCP_ENVIRONMENT"):
                 config.validate_mcp_config()
 
+    def test_service_version_accepts_releases_and_short_git_commits(self):
+        for value in ("", "0.1.7", "1.2.3-rc.1", "abc1234", "1234567", "a" * 40):
+            with self.subTest(value=value), patch.object(config, "MCP_SERVICE_VERSION", value):
+                config.validate_mcp_config()
+        for value in ("abc123", "xyz1234", "ABC1234", "a" * 41, "abc1234/other", "<script>"):
+            with self.subTest(value=value), patch.object(config, "MCP_SERVICE_VERSION", value):
+                with self.assertRaisesRegex(RuntimeError, "MCP_SERVICE_VERSION"):
+                    config.validate_mcp_config()
+
+    def test_logging_config_rejects_unknown_level(self):
+        for value in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            with patch.object(config, "MCP_LOG_LEVEL", value):
+                config.validate_mcp_config()
+        with patch.object(config, "MCP_LOG_LEVEL", "TRACE"):
+            with self.assertRaisesRegex(RuntimeError, "Invalid MCP_LOG_LEVEL"):
+                config.validate_mcp_config()
+
     def test_config_timeout_safety_ceiling_is_ten_hours(self):
         with patch.object(config, "SSH_DEFAULT_TIMEOUT_SECONDS", 60):
             with patch.object(config, "SSH_MAX_TIMEOUT_SECONDS", 36000):

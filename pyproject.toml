@@ -26,6 +26,7 @@ Issues = "https://github.com/keeperlink/ssh-mcp/issues"
 
 [project.scripts]
 oauth-sessions = "app.oauth_session_cli:main"
+ssh-mcp-ctl = "app.control_cli:main"
 
 [project.optional-dependencies]
 dev = [

@@ -253,7 +253,7 @@ class ContractTests(unittest.TestCase):
             (ReadFileRequest, {"server": "demo-sandbox", "path": "test.txt",
                                "reason": "Synthetic test"}),
         )
-        supported = ("SKY-308", "#123", "12345", "owner/repo#123",
+        supported = ("TEST-308", "#123", "12345", "owner/repo#123",
                      "issue:workspace/ref-123", "x" * 80, "KA-123", "ıA-123")
         invalid = ("", "x" * 81, "two words", "a\nb", "a\tb", "a\x00b",
                    "a\x1fb", "a\x7fb", "a\x80b", "a\x81b", "a\x8fb", "a\x9fb")
@@ -277,7 +277,7 @@ class ContractTests(unittest.TestCase):
         self.assertIsNone(default.cwd)
         self.assertFalse(default.strict_bash)
         valid = ExecuteCommandRequest.model_validate({
-            **args, "cwd": "/home/gateway/repo link",
+            **args, "cwd": "/home/demo/repo link",
             "success_exit_codes": [0, 1, 254], "strict_bash": True,
         })
         self.assertTrue(valid.strict_bash)

@@ -9,7 +9,9 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
-from .config import MCP_OPERATOR_SUBJECT, validate_mcp_config
+from .config import MCP_LOG_LEVEL, MCP_OPERATOR_SUBJECT, validate_mcp_config
+from .control import SOCKET, control_server
+from .request_trace import RequestTrace
 from .approvals import ApprovalManager
 from .jobs import JobStore
 
@@ -42,7 +44,10 @@ async def _prune_loop(store: JobStore | None) -> None:
 async def lifespan(_app: FastAPI):
     if any(os.getenv(name, "1") != "1" for name in ("WEB_CONCURRENCY", "UVICORN_WORKERS")):
         raise RuntimeError("Memory-only approvals require a single server worker")
-    async with _mcp_server.session_manager.run():
+    # Standalone env-mode examples mount this directory read-only. Managed
+    # services already provide a private writable tmpfs.
+    socket_path = SOCKET if os.getenv("MCP_CONFIG_FILE") else None
+    async with control_server(MCP_LOG_LEVEL, socket_path), _mcp_server.session_manager.run():
         jobs = _job_registry.get("jobs")
         # Fail at startup if private session storage cannot initialize.
         session_store()
@@ -66,6 +71,7 @@ app = FastAPI(
     openapi_url=None,
     lifespan=lifespan,
 )
+app.add_middleware(RequestTrace)
 
 
 @app.get("/health")

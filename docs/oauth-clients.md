@@ -64,6 +64,8 @@ workflow identifier from one of these sources:
 
 - The configured dedicated header (`X-OpenAI-Session` by default).
 - Codex tool-call `params._meta["x-codex-turn-metadata"].thread_id`.
+- Antigravity tool-call `params._meta["antigravity.google/conversation_id"]`
+  (not the root conversation ID).
 - The optional `X-SSH-MCP-Conversation` header, if a client supplies it.
 
 The identifier is **correlation**, not authentication. Malformed or

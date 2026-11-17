@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import os
 import subprocess
 import sys
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,7 +19,7 @@ os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
 os.environ.setdefault("MCP_TOKEN_SIGNING_SECRET", "synthetic-test-signing-" + "b" * 40)
 os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 
-from app import main
+from app import main, control_cli, request_trace
 
 
 class PeriodicPruneTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +80,33 @@ class MainHistoryIntegrationTests(unittest.TestCase):
                     response = client.get("/health")
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_managed_lifespan_starts_socket_and_toggles_request_debug(self):
+        @asynccontextmanager
+        async def scoped_session_manager():
+            yield
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "control.sock"
+            with patch.dict(os.environ, {"MCP_CONFIG_FILE": "/synthetic/service.json"}), \
+                 patch.object(main, "SOCKET", path), \
+                 patch.object(main, "MCP_LOG_LEVEL", "INFO"), \
+                 patch.object(main._mcp_server.session_manager, "run", side_effect=scoped_session_manager), \
+                 patch.object(main, "session_store", return_value=SimpleNamespace(prune=lambda: 0)), \
+                 patch.object(request_trace.LOG, "debug") as logged:
+                with TestClient(main.app) as client:
+                    self.assertTrue(path.is_socket())
+                    client.get("/mcp", headers={"host": "localhost", "x-test": "synthetic"})
+                    logged.assert_not_called()
+                    result = control_cli.request("set", "DEBUG", path=path)
+                    self.assertEqual(result["effective"], "DEBUG")
+                    client.get("/mcp", headers={"host": "localhost", "user-agent": "demo-client"})
+                    self.assertEqual(logged.call_count, 1)
+                    self.assertIn("demo-client", str(logged.call_args.args))
+                    control_cli.request("reset", path=path)
+                    client.get("/mcp", headers={"host": "localhost"})
+                    self.assertEqual(logged.call_count, 1)
+                self.assertFalse(path.exists())
 
     def test_history_cannot_enable_without_durable_jobs(self):
         env = {

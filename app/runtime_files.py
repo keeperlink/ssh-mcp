@@ -15,6 +15,8 @@ import stat
 from typing import Any
 from urllib.parse import urlsplit
 
+from .control import LEVELS
+
 CONFIG = Path("/etc/ssh-mcp/service.json")
 INVENTORY = Path("/etc/ssh-mcp/inventory.json")
 KNOWN_HOSTS = Path("/etc/ssh-mcp/known_hosts")
@@ -114,13 +116,17 @@ def _positive(value: Any, maximum: int) -> bool:
 
 def _valid_settings(settings: dict[str, Any]) -> None:
     required = {"version", "environment", *SECTIONS}
-    if (set(settings) != required
+    if (not required <= set(settings) <= required | {"logging"}
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
                 not (keys <= set(settings[section]) <= (keys | VIEWER_OPTIONAL)
                      if section == "viewer" else set(settings[section]) == keys)
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
+    logging_settings = settings.get("logging", {"level": "INFO"})
+    if (type(logging_settings) is not dict or set(logging_settings) != {"level"}
+            or logging_settings["level"] not in LEVELS):
+        raise ValueError("Invalid logging settings")
     if type(settings["environment"]) is not str or settings["environment"] not in {"lab", "production"}:
         raise ValueError("Invalid service environment")
     http, oauth, ssh = settings["http"], settings["oauth"], settings["ssh"]
@@ -258,6 +264,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
     issuer = oauth["issuer"]
     return {
         "MCP_ENVIRONMENT": cfg["environment"],
+        "MCP_LOG_LEVEL": cfg.get("logging", {"level": "INFO"})["level"],
         "MCP_ISSUER": issuer, "MCP_RESOURCE": issuer + "/mcp",
         "MCP_ALLOWED_HOSTS": (urlsplit(issuer).hostname + "," +
             urlsplit(issuer).hostname + f":{urlsplit(issuer).port or 443},"

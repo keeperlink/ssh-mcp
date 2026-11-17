@@ -45,6 +45,7 @@ Never mount two service instances to the same database.
 
 | Key | Behavior |
 | --- | --- |
+| `MCP_LOG_LEVEL` | Application logging level in environment-file mode (default INFO) |
 | `MCP_ISSUER` | Public HTTPS origin, without path/trailing slash; resource equals issuer + `/mcp` |
 | `MCP_ALLOWED_HOSTS` | Explicit public host plus private localhost health checks |
 | `MCP_ALLOWED_ORIGINS` | Initial trusted HTTP Origins; active consented clients add exact approved callback origins, which persist in OAuth sessions |
@@ -123,6 +124,12 @@ verified redirect on each authorization request. The configured
 single-client values remain for compatibility, not as an allowlist
 (see [OAuth clients](oauth-clients.md)).
 Do not use signed managed startup mode with public Compose examples.
+
+Managed `service.json` optionally includes `"logging": {"level": "INFO"}`.
+Supported levels are DEBUG, INFO, WARNING, ERROR and CRITICAL. Existing
+signed files without this section retain INFO. The signed default takes
+precedence over the inherited environment. See [runtime logging control](operations.md)
+for an in-memory override.
 
 For production, the issuer and subject are security boundaries:
 update signed service.json, inventory principals and any client

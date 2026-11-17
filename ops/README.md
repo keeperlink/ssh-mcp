@@ -18,3 +18,9 @@ Use [Getting started](../docs/getting-started.md) and the
 [optional Caddy](../docs/reverse-proxies.md) and
 [hardened Compose](../docs/hardening.md) for new self-hosted instances. Managed existing deployments retain their
 independently controlled configuration and release process.
+
+## Live-source preview
+
+See [live preview and request diagnostics](preview/README.md) for the operator-only
+Docker clone helper. It is independent of the reverse proxy and is not part of
+the normal application runtime.

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MYPY_FILES = (
     "app/contracts.py", "app/ssh_executor.py", "app/jobs.py",
     "app/history.py", "app/observability.py", "app/form_body.py", "app/runtime_files.py",
+    "app/control.py", "app/control_cli.py", "app/request_trace.py", "ops/preview/preview.py",
     "app/file_audit.py", "app/file_helper.py", "app/file_transport.py",
     "app/file_ops.py", "ops/history_db.py", "scripts/check_coverage.py",
     "scripts/sync_requirements_dev.py", "tests/tools/validate.py",
@@ -145,7 +146,8 @@ def installed_wheel(temp: Path, env: dict[str, str]) -> None:
          "venv=Path(sys.prefix).resolve();"
          "path=Path(app.__file__).resolve();"
          "assert path.is_relative_to(venv),(path,venv);"
-         "assert (venv/'bin'/'oauth-sessions').is_file()"],
+         "assert (venv/'bin'/'oauth-sessions').is_file();"
+         "assert (venv/'bin'/'ssh-mcp-ctl').is_file()"],
         cwd=validation, env=isolated_env)
     coverage_checks(validation, isolated_env, "installed-wheel", isolated_python)
 
@@ -173,11 +175,10 @@ def main(argv: list[str] | None = None) -> int:
                 env=env)
             checks += 3
         if args.mode != "lint":
-            # Development-lock tests require tooling distributions unavailable
-            # in the deliberately minimal hardened runtime-test image.
-            run("development dependency-lock regression tests",
-                [sys.executable, "-m", "unittest", "discover", "-s",
-                 "scripts", "-p", "test_*.py", "-q"], env=env)
+            # Source-only tooling tests require the checkout and development
+            # dependencies unavailable in the minimal runtime-test image.
+            run("development dependency-lock and source-tool regression tests",
+                [sys.executable, "tests/tools/run_unit_tests.py", "--tools"], env=env)
             with tempfile.TemporaryDirectory(prefix="sky235-validation-") as folder:
                 temp = Path(folder)
                 installed_wheel(temp, env)

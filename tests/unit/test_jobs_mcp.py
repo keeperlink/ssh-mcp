@@ -174,7 +174,7 @@ class JobHTTPTests(unittest.TestCase):
 
             good = self.tool("execute_command", {
                 "server": "demo-node-b", "argv": ["pwd"],
-                "cwd": "/home/gateway", "reason": "TEST-282 valid cwd control",
+                "cwd": "/home/demo", "reason": "TEST-282 valid cwd control",
             })
             self.assertFalse(good.get("isError"))
             self.assertEqual(json.loads(good["content"][0]["text"])["status"],
@@ -228,7 +228,7 @@ class JobHTTPTests(unittest.TestCase):
         with patch.object(FakeSSH, "execute", new=uncertain):
             response = self.tool("execute_command", {
                 "server": "demo-node-b", "argv": ["touch", "must-not-run"],
-                "cwd": "/home/gateway", "reason": "TEST-282 interrupted preflight",
+                "cwd": "/home/demo", "reason": "TEST-282 interrupted preflight",
             })
         self.assertTrue(response.get("isError"))
         result = json.loads(response["content"][0]["text"])
@@ -863,13 +863,14 @@ class JobHTTPTests(unittest.TestCase):
         from types import SimpleNamespace
         from app import operational
 
-        with patch.object(config, "MCP_SERVICE_VERSION", "0.1.999"):
-            status = json.loads(self.tool("get_status", {})["content"][0]["text"])
-            self.assertEqual(status["service"]["version"], "0.1.999")
-            with patch.dict(os.environ, {"SSH_JOBS_ENABLED": "false"}):
-                with patch.object(mcp_gateway.SSHExecutor, "from_environment", return_value=FakeSSH()):
-                    candidate, _ = mcp_gateway.create_mcp_server()
-                self.assertEqual(candidate.version, "0.1.999")
+        for value in ("0.1.999", "abc1234"):
+            with self.subTest(value=value), patch.object(config, "MCP_SERVICE_VERSION", value):
+                status = json.loads(self.tool("get_status", {})["content"][0]["text"])
+                self.assertEqual(status["service"]["version"], value)
+                with patch.dict(os.environ, {"SSH_JOBS_ENABLED": "false"}):
+                    with patch.object(mcp_gateway.SSHExecutor, "from_environment", return_value=FakeSSH()):
+                        candidate, _ = mcp_gateway.create_mcp_server()
+                    self.assertEqual(candidate.version, value)
 
         with patch.object(operational, "session_store", side_effect=OSError("hidden-private-path")):
             broken = self.tool("get_status", {})

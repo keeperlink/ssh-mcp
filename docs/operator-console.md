@@ -31,7 +31,7 @@ host, status, story ID, conversation, command and mode. Pagination
 sizes fit the viewport, and the latest change cursor permits
 bounded polling. Relative/absolute time format, filters, splitter
 width and panel preferences are saved **only in that browser**.
-Story IDs support common tracker formats such as SKY-308, #123, 12345
+Story IDs support common tracker formats such as TEST-308, #123, 12345
 and owner/repo#123. The table shortens long IDs using the signed
 viewer.story_id_max_chars (default 16, including the ellipsis) and
 viewer.story_id_truncate_from (end keeps the beginning, start keeps

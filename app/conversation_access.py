@@ -49,6 +49,10 @@ def conversation_id_from_request(
             raise ValueError("Invalid Codex conversation metadata")
         if "thread_id" in turn:
             add(turn["thread_id"])
+    if metadata is not None and "antigravity.google/conversation_id" in metadata:
+        # The root conversation can contain several independent conversations.
+        # Never use it as a substitute for the exact conversation ID.
+        add(metadata["antigravity.google/conversation_id"])
     if len(set(values)) > 1:
         raise ValueError("Conflicting conversation identifiers")
     return values[0] if values else None
