@@ -5,6 +5,8 @@ from contextvars import ContextVar
 import re
 from typing import Awaitable, Callable, Mapping
 
+from starlette.datastructures import Headers
+
 from . import config
 from .approvals import ApprovalManager
 from .approval_status import ApprovalCode, ApprovalRejected
@@ -34,7 +36,12 @@ def conversation_id_from_request(
         for name in dict.fromkeys((
             config.MCP_CONVERSATION_HEADER_NAME.lower(), "x-ssh-mcp-conversation",
         )):
-            if name in headers:
+            # Starlette Headers preserves repeated wire fields. Indexing would
+            # silently accept the first value and ignore a conflicting second.
+            if isinstance(headers, Headers):
+                for value in headers.getlist(name):
+                    add(value)
+            elif name in headers:
                 add(headers[name])
     if metadata is not None and "x-codex-turn-metadata" in metadata:
         turn = metadata["x-codex-turn-metadata"]

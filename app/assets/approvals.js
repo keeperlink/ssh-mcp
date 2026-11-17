@@ -24,8 +24,8 @@
   const conversationNumber = (id) => {
     if (typeof id !== "string" || !id) return null;
     if (!state.conversationNumbers.has(id)) {
-      // Opaque correlation IDs stay in memory only; indices never authorize
-      // a request and remain stable for this open viewer page.
+      // Opaque approval scope IDs distinguish OAuth sessions and hosts.
+      // Local indices never authorize a request or expose session IDs.
       if (state.conversationNumbers.size >= 1024)
         state.conversationNumbers.delete(state.conversationNumbers.keys().next().value);
       state.conversationNumbers.set(id, state.nextConversation++);
@@ -157,7 +157,7 @@
     if (previousId !== state.active || layer.hidden) {
       if (layer.hidden) previousFocus = document.activeElement;
       $("approval-host").textContent = request.host || "Unknown";
-      const number = conversationNumber(request.conversation_id);
+      const number = conversationNumber(request.scope_id);
       $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
       $("approval-client").textContent = request.client_id || "MCP client";
       const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
@@ -183,7 +183,7 @@
     updateClock();
   }
   function grantName(grant) {
-    const number = conversationNumber(grant.conversation_id);
+    const number = conversationNumber(grant.scope_id);
     return grant.host + (number ? " [" + number + "]" : "");
   }
   function revokeButton(grant, name) {

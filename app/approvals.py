@@ -55,6 +55,7 @@ class PendingApproval:
         data: dict[str, Any] = {
             "id": self.id, "host": self.key[2],
             "conversation_id": self.key[1] or None, "tool": self.tool,
+            "scope_id": ApprovalManager.grant_id(self.key, "scope") if self.key[1] else None,
             "client_id": self.client_id, "timed_grants_allowed": bool(self.key[1]),
             "reason": self.reason, "summary": self.summary,
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),

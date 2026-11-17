@@ -218,7 +218,8 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(KEY, self.manager.root_grants)
         visible = self.manager.snapshot()["active_grants"]
         self.assertEqual({entry["kind"] for entry in visible}, {"host", "root"})
-        self.assertEqual(len({entry["scope_id"] for entry in visible}), 1)
+        self.assertEqual({entry["scope_id"] for entry in visible}, {pending["scope_id"]})
+        self.assertNotIn(KEY[0], str(pending))
         self.assertNotEqual(visible[0]["id"], visible[1]["id"])
         self.assertNotIn(KEY[0], str(visible))
         await self.manager.require(KEY, tool="submit_job", reason="again",

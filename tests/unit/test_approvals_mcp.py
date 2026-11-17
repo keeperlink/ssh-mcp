@@ -130,14 +130,15 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         return csrf
 
     def _rpc(self, *, conversation=CONVERSATION, tool="execute_command",
-             arguments=None, header="X-OpenAI-Session", metadata=None):
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json, text/event-stream",
-            "Host": "localhost",
-        }
+             arguments=None, header="X-OpenAI-Session", metadata=None, extra_headers=()):
+        headers = [
+            ("Authorization", f"Bearer {self.token}"),
+            ("Accept", "application/json, text/event-stream"),
+            ("Host", "localhost"),
+        ]
         if conversation is not None and header is not None:
-            headers[header] = conversation
+            headers.append((header, conversation))
+        headers.extend(extra_headers)
         params = {"name": tool, "arguments": arguments or {
             "server": "demo-node2", "argv": ["hostname"],
             "reason": "TEST-263 offline MCP operator approval test",
@@ -194,6 +195,27 @@ class MCPApprovalHTTPTests(unittest.TestCase):
             "cwd": "/root/synthetic", "timeout_seconds": 30,
         }
 
+    def test_repeated_workflow_headers_validate_all_wire_values(self):
+        # A duplicate field must not hide a conflicting or malformed value.
+        for header in ("X-OpenAI-Session", "X-SSH-MCP-Conversation"):
+            for second in ("different", "bad value", ""):
+                with self.subTest(header=header, second=second):
+                    result = self._rpc(conversation="workflow-1", header=header,
+                                       extra_headers=[(header, second)])
+                    self.assertTrue(result.get("isError"), result)
+                    self.assertEqual(self.manager.snapshot()["pending_approvals"], [])
+        self.assertEqual(self.executor.calls, 0)
+        thread, box, approval_id = self._start_call(conversation="workflow-1")
+        self.assertEqual(self._decision(approval_id, "grant", "5m").status_code, 200)
+        self.assertFalse(self._result(thread, box).get("isError"))
+        for header in ("X-OpenAI-Session", "X-SSH-MCP-Conversation"):
+            self.assertFalse(self._rpc(conversation="workflow-1", header=header,
+                                       extra_headers=[(header, "workflow-1")]).get("isError"))
+            # Even an existing timed grant cannot bypass validation.
+            self.assertTrue(self._rpc(conversation="workflow-1", header=header,
+                                      extra_headers=[(header, "other")]).get("isError"))
+        self.assertEqual(self.executor.calls, 3)
+
     def test_headerless_client_can_approve_once_but_not_create_timed_grant(self):
         for privileged in (False, True):
             with self.subTest(privileged=privileged):
@@ -202,6 +224,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
                 )
                 pending = self.manager.pending[request_id].public()
                 self.assertIsNone(pending["conversation_id"])
+                self.assertIsNone(pending["scope_id"])
                 self.assertEqual(pending["client_id"], CLIENT)
                 self.assertFalse(pending["timed_grants_allowed"])
                 self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 404)
