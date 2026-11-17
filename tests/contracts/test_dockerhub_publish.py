@@ -46,9 +46,12 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertEqual(workflow.count("runs-on:"), 2)
         self.assertNotIn("self-hosted", workflow)
         self.assertNotIn("fromJSON(", workflow)
-        self.assertIn("needs: [python]", workflow)
-        self.assertIn("PYTHON_RESULT:", workflow)
-        self.assertIn('test "$PYTHON_RESULT" = success', workflow)
+        # Both required jobs run independently; no Python outcome dependency.
+        self.assertNotIn("needs: [python]", workflow)
+        self.assertNotIn("needs.python", workflow)
+        self.assertNotIn("PYTHON_RESULT:", workflow)
+        self.assertIn("name: Python package and installed-wheel coverage", workflow)
+        self.assertIn("name: Python package, contracts, security and coverage", workflow)
         self.assertIn("contents: read", workflow)
         for action in ("actions/checkout", "actions/setup-python",
                        "astral-sh/setup-uv", "docker/setup-buildx-action",

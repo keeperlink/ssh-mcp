@@ -82,15 +82,9 @@ jobs:
 
   tests:
     name: Python package, contracts, security and coverage
-    needs: [python]
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Require completed Python validation
-        env:
-          PYTHON_RESULT: ${{ needs.python.result }}
-        run: test "$PYTHON_RESULT" = success
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5 (Node 24)
         with:
           persist-credentials: false
@@ -150,15 +144,13 @@ jobs:
         if: always()
         shell: bash
         env:
-          OFFLINE_RESULT: ${{ needs.python.result }}
           BROWSER_RESULT: ${{ steps.browser.outcome }}
           OCI_RESULT: ${{ steps.oci.outcome }}
         run: |
           {
-            echo '## Complete validation results'
+            echo '## Browser and OCI validation results'
             echo '| Mandatory gate | Outcome |'
             echo '| --- | --- |'
-            echo "| Python 3.14 offline lint, typing, and package | $OFFLINE_RESULT |"
             echo "| Browser JS syntax and headless Chrome | $BROWSER_RESULT |"
             echo "| Hardened OCI installed-wheel tests + coverage >=95% | $OCI_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
