@@ -58,19 +58,26 @@ issued access tokens can remain active until their own expiry.
 
 ## Workflow-scoped grants
 
-When a host or permitted root operation is `restricted`, the MCP
-request must carry an opaque, validated workflow identifier in the
-dedicated configured header (`X-OpenAI-Session` by default).
-The identifier is **correlation**, not authentication. A grant is
-scoped to the authenticated OAuth session, exact conversation ID,
-host and permission type. Without a header, a restricted request
-fails closed: no implicit shared conversation is created.
+Restricted host or root operations always require a verified OAuth session
+and operator approval. Timed grants additionally require a validated
+workflow identifier from one of these sources:
 
-Not every MCP client supports the existing header or ChatGPT-native
-binary attachment parameter. Provider-neutral restricted approvals and
-generic binary upload remain separate enhancements. Unknown clients
-that cannot send the configured workflow header cannot reach restricted
-SSH hosts even after successful OAuth authorization.
+- The configured dedicated header (`X-OpenAI-Session` by default).
+- Codex tool-call `params._meta["x-codex-turn-metadata"].thread_id`.
+- The optional `X-SSH-MCP-Conversation` header, if a client supplies it.
+
+The identifier is **correlation**, not authentication. Malformed or
+conflicting supplied identifiers are rejected; no transport session ID,
+connection, IP address or request ID substitutes for a conversation.
+Timed grants are scoped to the authenticated OAuth session, exact
+conversation ID, host and permission type. Give each workflow its own
+identifier; a static custom header does not separate conversations.
+
+If a client sends no conversation identifier, the existing approval
+popup allows **one request** only. Timed choices are disabled and the
+server rejects attempts to create a timed grant. No session-wide grant
+or implicit conversation is created. This applies equally to host and
+root approvals. Generic binary upload remains a separate enhancement.
 
 ## Reverse proxy
 

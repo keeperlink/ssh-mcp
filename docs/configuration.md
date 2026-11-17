@@ -91,8 +91,10 @@ actor-scoped history/grants are not silently migrated or reassigned.
 MCP callers choose an approved alias returned by `list_servers` and
 cannot supply an arbitrary host address, remote username or SSH key.
 
-`restricted` hosts require a valid conversation identifier plus a
-timed operator decision before execution. `always-granted` bypasses
+`restricted` hosts require an authenticated OAuth session and an
+operator decision before execution. Timed grants require a validated
+conversation identifier; otherwise only the exact request may be
+approved. `always-granted` bypasses
 only this *additional* approval, not OAuth, principal membership or
 host-key verification. For a starter host choose `restricted` and
 `privileged_access: "none"`.

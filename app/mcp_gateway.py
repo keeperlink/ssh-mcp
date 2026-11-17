@@ -31,7 +31,7 @@ from .approvals import ApprovalManager
 from .approval_status import ApprovalRejected, approval_status_context
 from .approval_preview import approval_summary, approval_steps
 from .conversation_access import (
-    conversation_id_context, conversation_id_from_headers, require_host_access,
+    conversation_id_context, conversation_id_from_request, require_host_access,
 )
 from .config import MCP_ALLOWED_HOSTS, MCP_ALLOWED_ORIGINS, MCP_ISSUER, MCP_RESOURCE, MCP_SCOPES
 from .contracts import (
@@ -445,12 +445,11 @@ def create_mcp_server(*, job_registry: dict | None = None,
             try:
                 host = executor.authorized_host(actor, server_name)
                 sid = (token.claims or {}).get("sid")
-                conversation_id = conversation_id_context.get()
                 if (host.access == "restricted"
                         or privileged and host.privileged_access == "restricted"):
-                    # Missing verified session/conversation context cannot
-                    # enter the operator queue or allocate a pending audit.
-                    if not isinstance(sid, str) or not conversation_id:
+                    # A verified OAuth session is mandatory; missing conversation
+                    # context limits approval to this exact suspended request.
+                    if not isinstance(sid, str) or not sid:
                         return authorization_error()
                 if (file_request is not None and files is not None
                         and file_request.operation_id
@@ -513,7 +512,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     executor, actor, server_name,
                     session_id=sid if isinstance(sid, str) else None,
                     conversation_id=conversation_id_context.get(),
-                    approvals=approvals, tool=params.name,
+                    approvals=approvals, tool=params.name, client_id=token.client_id,
                     reason=str(arguments.get("reason") or ""),
                     summary=lambda: approval_summary(
                         params.name, arguments, batch_request,
@@ -805,11 +804,12 @@ def create_mcp_server(*, job_registry: dict | None = None,
     async def call_tool(_ctx, params: CallToolRequestParams):
         request = _ctx.request if _ctx is not None else None
         try:
-            conversation_id = conversation_id_from_headers(
-                request.headers if isinstance(request, Request) else None
+            conversation_id = conversation_id_from_request(
+                request.headers if isinstance(request, Request) else None,
+                params.meta,
             )
         except ValueError:
-            return _error("Invalid conversation header")
+            return _error("Invalid or conflicting conversation identifier")
         context_token = conversation_id_context.set(conversation_id)
         approval_token = approval_status_context.set(None)
         try:

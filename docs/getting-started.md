@@ -162,10 +162,10 @@ callback on the consent screen before authorizing. The OAuth page accepts
 `https://YOUR_DOMAIN/console` uses the independent
 `HISTORY_VIEWER_PASSWORD`.
 
-The sample SSH host requires a conversation ID in the configured
-header (default `X-OpenAI-Session`) plus an operator approval.
-A client without that header cannot execute on the restricted host;
-do not weaken the gate as a convenience. OAuth callback CSP origins are
+The sample SSH host requires operator approval in an authenticated
+OAuth session. A validated conversation ID enables timed approvals;
+clients without a conversation identifier can receive an explicit
+one-request approval only. OAuth callback CSP origins are
 derived from validated client metadata, not an unrestricted wildcard.
 See [OAuth clients](oauth-clients.md).
 

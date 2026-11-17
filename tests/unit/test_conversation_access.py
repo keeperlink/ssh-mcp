@@ -13,7 +13,7 @@ from app import config
 from app.batch import BatchStore
 from app.contracts import ExecuteCommandRequest, ExecuteCommandsRequest
 from app.conversation_access import (
-    conversation_id_context, conversation_id_from_headers, require_host_access,
+    conversation_id_context, conversation_id_from_headers, conversation_id_from_request, require_host_access,
 )
 from app.file_audit import FileAudit
 from app.history import HistoryStore
@@ -45,6 +45,26 @@ class ConversationAccessTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 conversation_id_from_headers({"x-ssh-mcp-conversation": "bad value"})
+
+    def test_neutral_and_codex_sources_are_validated_and_conflicts_rejected(self):
+        codex = {"x-codex-turn-metadata": {"thread_id": "thread-123", "turn_id": "turn-1"}}
+        self.assertEqual(conversation_id_from_request(None, codex), "thread-123")
+        self.assertEqual(conversation_id_from_request({"x-ssh-mcp-conversation": "thread-123"}), "thread-123")
+        self.assertEqual(conversation_id_from_request(
+            {"x-openai-session": "thread-123", "x-ssh-mcp-conversation": "thread-123"}, codex),
+            "thread-123")
+        self.assertIsNone(conversation_id_from_request(None, {"x-codex-turn-metadata": {"turn_id": "turn-only"}}))
+        self.assertIsNone(conversation_id_from_request({"mcp-session-id": "transport-only"}, {}))
+        for headers, metadata in (
+            ({"x-openai-session": "different"}, codex),
+            ({"x-openai-session": "thread-1", "x-ssh-mcp-conversation": "thread-2"}, None),
+            ({"x-openai-session": "thread-123", "x-ssh-mcp-conversation": ""}, codex),
+            (None, {"x-codex-turn-metadata": "not-an-object"}),
+            (None, {"x-codex-turn-metadata": {"thread_id": None}}),
+            (None, {"x-codex-turn-metadata": {"thread_id": "bad id"}}),
+        ):
+            with self.subTest(headers=headers, metadata=metadata), self.assertRaises(ValueError):
+                conversation_id_from_request(headers, metadata)
 
     def test_restricted_host_fails_closed_for_every_auth_identity(self):
         class FakeSSH:

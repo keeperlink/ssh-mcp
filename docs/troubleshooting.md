@@ -45,11 +45,10 @@ network errors without reconciling their durable IDs.
   `ssh.execute` and both SSH execution flags must
   be enabled; an inventory host must include the
   configured operator principal.
-- **Restricted SSH denied without a dialog:** client
-  must send the configured conversation header with
-  a valid nonempty value; review the signed/approved
-  host policy and current OAuth session. A missing
-  header does not authorize a global grant.
+- **Restricted SSH denied without a dialog:** review the signed/approved
+  host policy, current OAuth session, and any malformed or conflicting
+  conversation identifiers. A client with no conversation identifier can
+  receive one-request approval, but cannot receive a timed grant.
 - **Console cannot sign in:** use the independent
   Console password via HTTPS and correct same-origin
   CSRF form; an OAuth login credential is not valid

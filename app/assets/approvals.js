@@ -24,8 +24,8 @@
   const conversationNumber = (id) => {
     if (typeof id !== "string" || !id) return null;
     if (!state.conversationNumbers.has(id)) {
-      // Opaque correlation IDs stay in memory only; indices never authorize
-      // a request and remain stable for this open viewer page.
+      // Opaque approval scope IDs distinguish OAuth sessions and hosts.
+      // Local indices never authorize a request or expose session IDs.
       if (state.conversationNumbers.size >= 1024)
         state.conversationNumbers.delete(state.conversationNumbers.keys().next().value);
       state.conversationNumbers.set(id, state.nextConversation++);
@@ -157,8 +157,11 @@
     if (previousId !== state.active || layer.hidden) {
       if (layer.hidden) previousFocus = document.activeElement;
       $("approval-host").textContent = request.host || "Unknown";
-      const number = conversationNumber(request.conversation_id);
-      $("approval-conversation").textContent = number ? "Conversation #" + number : "Unknown";
+      const number = conversationNumber(request.scope_id);
+      $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
+      $("approval-client").textContent = request.client_id || "MCP client";
+      const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
+      $("approval-duration-warning").hidden = timedAllowed;
       $("approval-tool").textContent = request.tool || "Operation";
       $("approval-reason").textContent = request.reason || "Not specified";
       const root = request.requires_root === true;
@@ -169,7 +172,7 @@
         ? (request.requires_host
           ? "Approve SSH host access and root execution for this exact request."
           : "Approve execution as root for this exact request.")
-          + " A timed grant also authorizes subsequent root requests in this conversation and host."
+          + (timedAllowed ? " A timed grant also authorizes subsequent root requests in this conversation and host." : "")
         : "An agent is waiting for your approval. Access will not be granted automatically.";
       renderPreview(request);
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
@@ -180,7 +183,7 @@
     updateClock();
   }
   function grantName(grant) {
-    const number = conversationNumber(grant.conversation_id);
+    const number = conversationNumber(grant.scope_id);
     return grant.host + (number ? " [" + number + "]" : "");
   }
   function revokeButton(grant, name) {
@@ -296,8 +299,9 @@
     $("approval-grant").disabled = state.busy || seconds === 0;
     $("approval-deny").disabled = state.busy;
     $("approval-close").disabled = state.busy;
+    const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
     for (const control of layer.querySelectorAll('input[name="approval-duration"]'))
-      control.disabled = state.busy || seconds === 0;
+      control.disabled = state.busy || seconds === 0 || (!timedAllowed && control.value !== "once");
   }
   function tick() {
     for (const [id, request] of state.pending) {

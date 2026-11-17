@@ -578,6 +578,7 @@
       const deadline = Date.now() / 1000 + 28;
       const requests = [
         { id: "synthetic-a", host: "demo-node-a", conversation_id: "dialog-test-A-12345",
+          scope_id: "synthetic-session-grant-scope",
           tool: "execute_commands", reason: "synthetic fixture",
           summary: "fallback only", expires_at: deadline,
           steps: [
@@ -594,6 +595,7 @@
               command: "hostname\npwd", truncated: false },
           ] },
         { id: "synthetic-b", host: "demo-node-b", conversation_id: "dialog-test-B-12345",
+          scope_id: "synthetic-other-scope",
           tool: "read_file", reason: "second waiting command",
           summary: "/tmp/synthetic.txt", expires_at: deadline },
       ];
@@ -663,7 +665,7 @@
         && posts[1].fields.get("duration") === "8h",
       "Grant did not send requested duration");
       const timed = [{ id: "synthetic-grant", host: "demo-node-b",
-        conversation_id: "dialog-test-B-12345",
+        scope_id: requests[1].scope_id, conversation_id: "dialog-test-B-12345",
         expires_at: Date.now() / 1000 + 453 * 60 + 20 }];
       send(5, [], timed);
       assert(chips.textContent.includes("demo-node-b")
@@ -785,6 +787,49 @@
       send(18, [{ ...requests[0], id: "synthetic-expiring",
         expires_at: Date.now() / 1000 + 0.25 }]);
       await waitFor(() => layer.hidden, "Expired approval remains in modal");
+      send(19, [{ ...requests[0], id: "synthetic-headerless",
+        conversation_id: null, scope_id: null, timed_grants_allowed: false,
+        client_id: "https://example.invalid/client.json",
+        expires_at: Date.now() / 1000 + 28 }]);
+      await waitFor(() => !layer.hidden, "Headerless approval appears");
+      assert(duration("once").checked && !duration("once").disabled
+        && ["5m", "15m", "1h", "8h", "16h"].every((value) => duration(value).disabled),
+      "Missing conversation must disable all timed grant choices");
+      assert(!document.getElementById("approval-duration-warning").hidden
+        && document.getElementById("approval-duration-warning").textContent.includes("conversation ID")
+        && document.getElementById("approval-client").textContent === "https://example.invalid/client.json",
+      "Headerless approval must explain the limitation and identify its client");
+      grant.click();
+      await waitFor(() => layer.hidden && posts.length === 9, "One-shot approval completes");
+      assert(posts[8].path.endsWith("/synthetic-headerless/grant")
+        && posts[8].fields.get("duration") === "once", "Headerless request sends only once");
+      send(21, [{ ...requests[0], id: "synthetic-conversation-again",
+        timed_grants_allowed: true, expires_at: Date.now() / 1000 + 28 }]);
+      await waitFor(() => !layer.hidden, "Conversation approval appears after headerless");
+      assert(!duration("5m").disabled && document.getElementById("approval-duration-warning").hidden,
+        "Conversation approval must restore timed options and hide warning");
+      send(22, []);
+      // Identical raw conversation and host: each authorization scope gets
+      // its own label, consistently in the popup and active grant controls.
+      const sameConversation = { ...requests[0], id: "synthetic-other-client",
+        scope_id: "separate-session-for-same-workflow",
+        client_id: "https://other.invalid/client.json",
+        expires_at: Date.now() / 1000 + 28 };
+      send(23, [sameConversation], [hostGrant]);
+      const firstLabel = chips.querySelector(".grant-name").textContent;
+      const secondNumber = document.getElementById("approval-conversation").textContent
+        .replace("Conversation #", "");
+      assert(firstLabel.endsWith("[1]") && secondNumber !== "1" && secondNumber,
+        "Popup must distinguish the other session using the same raw conversation");
+      send(24, [], [hostGrant, { ...hostGrant, id: "synthetic-other-host-grant",
+        scope_id: sameConversation.scope_id }]);
+      const labels = [...chips.querySelectorAll(".grant-name")].map((node) => node.textContent);
+      const revokeLabels = [...chips.querySelectorAll("button")].map((node) => node.getAttribute("aria-label"));
+      assert(labels.length === 2 && new Set(labels).size === 2
+        && labels.some((label) => label.endsWith("[" + secondNumber + "]"))
+        && new Set(revokeLabels).size === 2,
+      "Concurrent grants sharing host/conversation must have distinct matching revoke labels");
+      send(25, []);
     } finally {
       window.fetch = originalFetch;
     }
