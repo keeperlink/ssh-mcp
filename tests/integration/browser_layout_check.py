@@ -309,7 +309,6 @@ class Handler(BaseHTTPRequestHandler):
                 "page": page, "page_size": limit, "page_count": page_count,
                 "filtered_total": len(filtered), "totals": TOTALS,
                 "changes_cursor": str(len(LIVE_EVENTS)) + ":_",
-                "readiness": readiness_snapshot(),
                 "next_page": None,
             }))
         elif url.path == "/console/api/summary":
@@ -323,6 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json(json.dumps({
                 "jobs": new, "has_more": False,
                 "changes_cursor": str(len(LIVE_EVENTS)) + ":_",
+                # Readiness changes independently of retained History events.
+                "readiness": readiness_snapshot(),
             }))
         elif url.path.startswith("/console/api/jobs/") and url.path.endswith("/output"):
             import json
