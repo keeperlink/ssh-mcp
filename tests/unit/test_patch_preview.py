@@ -397,7 +397,7 @@ class PreviewTests(unittest.TestCase):
 
     def test_preview_contract_1_7_typed_response(self):
         doc = contract_document()
-        self.assertEqual(doc["contract_version"], "1.9")
+        self.assertEqual(doc["contract_version"], "2.0")
         schema = next(x for x in doc["tools"] if x["name"] == "apply_patch")
         self.assertIn("dry_run", schema["inputSchema"]["properties"])
         self.assertIn("max_diff_bytes", schema["inputSchema"]["properties"])

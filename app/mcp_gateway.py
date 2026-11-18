@@ -48,7 +48,7 @@ from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
 from .history import HistoryStore
 from .operational import service_status, service_version
 from .oauth import OAuthTokenVerifier, _supported_scopes, client_audit_actor, ActiveOrigins
-from .ssh_executor import SSHDenied, SSHExecutor
+from .ssh_executor import ReadinessDenied, SSHDenied, SSHExecutor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ TOOLS = [
 SSH_TOOLS = [
     Tool(
         name="list_servers",
-        description="List approved SSH hosts visible to your authenticated identity.",
+        description="List authorized host aliases mapped to status (active, offline, retired) and sudo_ready. Use only active hosts for execution. Retired hosts are history-only; sudo_ready is not approval.",
         input_schema=ListServersRequest.model_json_schema(),
         annotations=ToolAnnotations(
             read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -330,6 +330,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
     if probe_enabled and executor is None:
         raise RuntimeError("Binary capability probe requires SSH OAuth authorization")
     if job_registry is not None:
+        job_registry["executor"] = executor
         job_registry["jobs"] = jobs
         job_registry["batches"] = batches
     history = HistoryStore(jobs.store) if jobs is not None else None
@@ -540,7 +541,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "steps_attempted": 0,
                     }, is_error=True)
                 return _error("SSH host access denied or requires operator approval")
-            except (SSHDenied, ValidationError, ValueError):
+            except (SSHDenied, ValidationError, ValueError) as exc:
                 # Manager missing/full/shutdown is operational failure, not
                 # operator Deny; store a terminal row with NULL approval code.
                 try:
@@ -552,8 +553,10 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "status": "rejected", "failure_kind": "authorization",
                         "failed_step": None, "failed_field": "server",
                         "steps_attempted": 0,
+                        **({"error": str(exc)} if isinstance(exc, ReadinessDenied) else {}),
                     }, is_error=True)
-                return _error("SSH host access denied or requires operator approval")
+                return _error(str(exc) if isinstance(exc, ReadinessDenied)
+                              else "SSH host access denied or requires operator approval")
             except asyncio.CancelledError:
                 # Request cancellation while awaiting approval never starts SSH.
                 settle(None, denied=True)
@@ -603,9 +606,10 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 return _result(data) if data is not None else _error("Batch unavailable")
             if params.name == "list_servers":
                 ListServersRequest.model_validate(arguments)
+                historical = history.hosts(actor=actor) if history is not None else []
                 return _result({
-                    "servers": executor.list_servers(actor),
-                    "history_hosts": history.hosts(actor=actor) if history is not None else [],
+                    "servers": executor.discover_hosts(actor, historical),
+                    "history_hosts": historical,
                 })
             if params.name == "probe_binary_file_exchange":
                 if not probe_enabled:
@@ -768,7 +772,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "failure_kind": "pre_execution_rejected",
                         "execution_started": False,
                         "exit_code": None,
-                        "error": "SSH request rejected before command execution",
+                        "error": saved["error"] or "SSH request rejected before command execution",
                     }, is_error=True)
                 return _result({
                     "job_id": job_id, "server": request.server,

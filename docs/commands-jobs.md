@@ -49,7 +49,7 @@ whether the outcome is an ordinary command error or a transport issue.
 `get_job` polls status and exit code; `get_job_output` pages through
 bounded stdout and stderr using returned cursors. `list_jobs` and
 `get_job_stats` search retained jobs. `get_status` reports
-service/job health; `list_servers` returns aliases the OAuth operator
+service/job health; `list_servers` returns an object keyed by aliases the OAuth operator
 is authorized to see.
 
 An immediate synchronous `execute_command` result may use
@@ -112,3 +112,10 @@ The [Security](security.md) guide covers the trust boundary.
 5. Use a separate, explicit authorization for sensitive environments.
 
 The server does not automatically retry interrupted SSH mutations.
+
+
+The list_servers response contains a servers map with status (active,
+offline, or retired) and sudo_ready for every visible alias. Select only
+active aliases for execution, and require sudo_ready=true for privileged
+requests; this flag is capability readiness, not operator approval.
+Retired aliases are available only for authorized historical queries.

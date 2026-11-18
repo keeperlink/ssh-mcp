@@ -278,7 +278,7 @@ class PatchConflictDiagnosticsTests(unittest.TestCase):
 
     def test_published_patch_contract_typed_roundtrip_matches_response(self):
         document = {t["name"]: t for t in contract_document()["tools"]}
-        self.assertEqual(contract_document()["contract_version"], "1.9")
+        self.assertEqual(contract_document()["contract_version"], "2.0")
         self.assertIn("PatchConflictDiagnostic",
                       document["apply_patch"]["outputSchema"]["$defs"])
         raw = dispatch(request(update(str(self.original), before="missing")))

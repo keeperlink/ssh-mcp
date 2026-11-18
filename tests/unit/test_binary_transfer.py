@@ -374,6 +374,34 @@ class ServiceBinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repeated["error"]["code"], "duplicate_operation")
         self.assertFalse(target.exists())
 
+    async def test_readiness_lost_before_publication_leaves_unpublished_stage(self):
+        from app.readiness import ProbeResult, ReadinessMonitor, ReadinessSettings
+        from unittest.mock import AsyncMock
+
+        now = [1000.]
+        monitor = ReadinessMonitor(ReadinessSettings(authorized=True),
+            {"dev": False}, AsyncMock(return_value=ProbeResult(True)), clock=lambda: now[0])
+        self.executor.readiness = monitor
+        self.assertTrue(await monitor.check("dev"))
+        target = self.root / "readiness.bin"
+        original = self.service.transport.execute
+        operations = []
+
+        async def lose_readiness(actor, server, operation, data, **kw):
+            operations.append(operation)
+            if operation == "upload_finish":
+                now[0] += 300
+            return await original(actor, server, operation, data, **kw)
+
+        with patch.object(self.service.transport, "execute", side_effect=lose_readiness):
+            failed = await self.upload(self.req(target), b"never published")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "host_readiness")
+        self.assertFalse(failed["error"]["published"])
+        self.assertFalse(target.exists())
+        self.assertEqual(operations, ["upload_start", "upload_chunk", "upload_finish"])
+        self.assertEqual(len(list(self.root.glob(".ssh-mcp-upload-*"))), 1)
+
     async def test_unauthorized_identity_does_not_start_audit(self):
         with self.assertRaises(SSHDenied):
             await self.service.upload(

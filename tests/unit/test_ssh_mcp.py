@@ -38,8 +38,21 @@ class FakeExecutor:
         self.username = "gateway"
         self._sudo_passwords = {}
 
+    def discover_hosts(self, actor, history_hosts):
+        result = {alias: {'status': 'active', 'sudo_ready': False}
+                  for alias in self.list_servers(actor)}
+        result.update({alias: {'status': 'retired', 'sudo_ready': False}
+                       for alias in history_hosts if alias not in result})
+        return result
+
     def list_servers(self, principal):
         return ["demo-node-b"] if principal == "ssh-mcp-operator" else []
+
+    def require_ready(self, server, *, privileged=False):
+        pass
+
+    async def check_readiness_live(self, server, *, privileged=False):
+        pass
 
     def authorized_host(self, principal, server):
         if principal != "ssh-mcp-operator" or server != "demo-node-b":
@@ -194,7 +207,7 @@ class DirectSSHMCPTests(unittest.TestCase):
             self.assertIn(denied.status_code, (401, 403))
             self.assertEqual(fake.calls, [])
             discovery = rpc(strong, "tools/call", {"name": "list_servers", "arguments": {}})
-            self.assertEqual(json.loads(discovery["content"][0]["text"])["servers"], ["demo-node-b"])
+            self.assertEqual(json.loads(discovery["content"][0]["text"])["servers"], {"demo-node-b": {"status": "active", "sudo_ready": False}})
             invalid = rpc(strong, "tools/call", {"name": "execute_command", "arguments": {
                 "server": "demo-node-b", "argv": ["id"], "reason": "ci", "principal": "admin",
             }})

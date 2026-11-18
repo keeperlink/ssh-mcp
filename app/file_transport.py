@@ -15,7 +15,7 @@ from typing import Any
 
 from . import config
 from .contracts import ExecuteCommandRequest
-from .ssh_executor import SSHExecutor, HostSpec, _ssh_argv, OutputLimitExceeded
+from .ssh_executor import ReadinessDenied, SSHExecutor, HostSpec, _ssh_argv, OutputLimitExceeded
 
 _MAX_STDOUT = 262144
 _MAX_STDIN = 1024 * 1024
@@ -194,6 +194,7 @@ class FileTransport:
         command = _ssh_argv(host, request, allow_stdin=True)
         try:
             async with self.executor._global, self.executor._semaphores[host.alias]:
+                self.executor.require_ready(host.alias)
                 process = await asyncio.create_subprocess_exec(
                     *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -235,6 +236,9 @@ class FileTransport:
                         raise FileTransportError("output_limit", "File response exceeds limit",
                                                  uncertain=True) from None
                     raise
+        except ReadinessDenied as exc:
+            # No remote call was launched; this is not uncertain publication.
+            raise FileTransportError("host_readiness", str(exc)) from None
         except FileTransportError:
             raise
         except OSError as exc:

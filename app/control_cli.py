@@ -8,15 +8,18 @@ import socket
 import sys
 from typing import Any
 
-from .control import LEVELS, LIMIT, SOCKET, TIMEOUT
+from .control import LEVELS, LIMIT, SOCKET, TIMEOUT, RECHECK_TIMEOUT
 
 
-def request(action: str, level: str | None = None, *, path: Path = SOCKET) -> dict[str, Any]:
+def request(action: str, level: str | None = None, *, path: Path = SOCKET,
+            alias: str | None = None) -> dict[str, Any]:
     message = {"action": action}
     if level is not None:
         message["level"] = level
+    if alias is not None:
+        message["alias"] = alias
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(TIMEOUT)
+        client.settimeout(RECHECK_TIMEOUT + TIMEOUT if alias is not None else TIMEOUT)
         client.connect(str(path))
         client.sendall(json.dumps(message).encode() + b"\n")
         with client.makefile("rb") as stream:
@@ -37,12 +40,21 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("setting", choices=("logging-level",))
         if action == "set":
             sub.add_argument("level", choices=LEVELS)
+    actions.add_parser("recheck-host").add_argument("alias")
     args = parser.parse_args(argv)
     try:
-        result = request(args.action, getattr(args, "level", None))
+        if args.action == "recheck-host":
+            result = request(args.action, alias=args.alias)
+        else:
+            result = request(args.action, getattr(args, "level", None))
     except (OSError, ValueError):
-        print("Logging control unavailable or request rejected", file=sys.stderr)
+        print("Local control unavailable or request rejected", file=sys.stderr)
         return 1
+    if args.action == "recheck-host":
+        host = result["host"]
+        print(json.dumps(host, sort_keys=True))
+        return 0 if (host["status"] == "active"
+                     and (not host["sudo_configured"] or host["sudo_ready"])) else 1
     print(f"Configured: {result['configured']}\nEffective: {result['effective']}")
     return 0
 

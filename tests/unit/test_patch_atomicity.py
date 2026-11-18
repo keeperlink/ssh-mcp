@@ -399,7 +399,7 @@ class AtomicApplyTests(unittest.TestCase):
         self.assertFalse(big.exists())
 
     def test_typed_contract_and_response_support_change_state(self):
-        self.assertEqual(contract_document()["contract_version"], "1.9")
+        self.assertEqual(contract_document()["contract_version"], "2.0")
         result = apply(update("a.txt", "old-a", "old-a"), base=self.root)
         typed = ApplyPatchResponse.model_validate({
             "status": "succeeded",

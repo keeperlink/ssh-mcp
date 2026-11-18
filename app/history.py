@@ -30,6 +30,7 @@ from . import config
 from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
+from .readiness import ReadinessMonitor
 
 if TYPE_CHECKING:
     from .jobs import JobManager
@@ -771,7 +772,12 @@ def _history_page(csrf: str) -> str:
         '<h1 class="visually-hidden">SSH-MCP Operator Console</h1></div>'
         '<div class="top-actions"><div id="grant-chips" class="grant-chips"'
         ' aria-label="Active host access grants"></div>'
-        '<span id="connection" class="connection">Connected</span>'
+        '<div id="connection-wrap" class="connection-wrap">'
+        '<button type="button" id="connection" class="connection offline" '
+        'aria-expanded="false" aria-controls="connection-details">Disconnected</button>'
+        '<section id="connection-details" class="connection-details" hidden '
+        'aria-label="Host readiness"><strong id="readiness-summary"></strong>'
+        '<div id="readiness-hosts"></div></section></div>'
         '<span id="approval-status" class="approval-status" role="alert" hidden></span>'
         '<form method="post" action="/console/logout">'
         '<input type="hidden" name="csrf" value="' + html.escape(csrf, quote=True) + '">'
@@ -958,7 +964,8 @@ def _history_page(csrf: str) -> str:
 def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = None,
                           approvals: ApprovalManager | None = None,
                           job_manager: JobManager | None = None,
-                          batch_manager: BatchCanceller | None = None) -> APIRouter:
+                          batch_manager: BatchCanceller | None = None,
+                          readiness: ReadinessMonitor | None = None) -> APIRouter:
     """Create browser-only routes; operator actions never execute SSH commands."""
     secret = os.getenv("HISTORY_VIEWER_PASSWORD", "")
     store = HistoryStore(jobs)
@@ -1091,10 +1098,13 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
             return _json({"error": "Invalid time range"}, 400)
 
     @router.get("/console/api/hosts")
-    def registered_hosts(request: Request) -> Response:
-        if not signed_in(request):
+    async def registered_hosts(request: Request) -> Response:
+        if not await run_in_threadpool(signed_in, request):
             return _json({"error": "Unauthorized"}, 401)
-        return _json({"hosts": hosts})
+        result: dict[str, Any] = {"hosts": hosts}
+        if readiness is not None:
+            result["readiness"] = readiness.snapshot()
+        return _json(result)
 
     @router.get("/console/api/jobs")
     def list_jobs(request: Request) -> Response:
@@ -1135,6 +1145,8 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         # approval updates through the separate event stream.
         if approvals is not None:
             result.update(approvals.viewer_snapshot())
+        if readiness is not None:
+            result["readiness"] = readiness.snapshot()
         return _json(result)
 
     @router.get("/console/api/approval-events")

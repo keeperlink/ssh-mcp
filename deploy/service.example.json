@@ -54,5 +54,13 @@
     "absolute_timeout_seconds": 86400,
     "story_id_max_chars": 16,
     "story_id_truncate_from": "end"
+  },
+  "readiness": {
+    "authorized": false,
+    "interval_seconds": 30,
+    "timeout_seconds": 5,
+    "max_concurrent": 5,
+    "stale_seconds": 300,
+    "stale_retry_seconds": 120
   }
 }

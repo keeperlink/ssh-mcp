@@ -40,10 +40,23 @@ class FakeRestrictedSSH:
         self.after_root_step = None
         self._sudo_passwords = {"demo-node2": "synthetic-not-real-sudo"}
 
+    def require_ready(self, server, *, privileged=False):
+        pass
+
+    async def check_readiness_live(self, server, *, privileged=False):
+        pass
+
     def authorized_host(self, actor, server):
         if actor != "ssh-mcp-operator" or server != "demo-node2":
             raise SSHDenied("Not an approved signed host")
         return self
+
+    def discover_hosts(self, actor, history_hosts):
+        result = {alias: {'status': 'active', 'sudo_ready': False}
+                  for alias in self.list_servers(actor)}
+        result.update({alias: {'status': 'retired', 'sudo_ready': False}
+                       for alias in history_hosts if alias not in result})
+        return result
 
     def list_servers(self, actor):
         return ["demo-node2"] if actor == "ssh-mcp-operator" else []

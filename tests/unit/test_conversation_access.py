@@ -100,6 +100,12 @@ class ConversationAccessTests(unittest.TestCase):
                 self.host = SimpleNamespace(access=access)
                 self.calls = 0
 
+            def require_ready(self, server, *, privileged=False):
+                pass
+
+            async def check_readiness_live(self, server, *, privileged=False):
+                pass
+
             def authorized_host(self, actor: str, server: str):
                 self.calls += 1
                 if actor != "ssh-mcp-operator" or server != "demo-node2":

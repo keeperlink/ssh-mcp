@@ -173,6 +173,79 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             )
         return result, calls, processes
 
+    async def test_readiness_checks_real_wrappers_and_passwordless_safety(self):
+        from app.readiness import ReadinessSettings
+
+        executor = SSHExecutor(
+            {"test": self.host}, enabled=True, sudo_passwords={"test": PASSWORD},
+            readiness_settings=ReadinessSettings(authorized=True),
+        )
+        monitor = executor.readiness
+        safety_error = b"sudo: a password is required\n"
+        password_error = b""
+        unsafe = False
+        calls = []
+        processes = []
+
+        async def spawn(*args, **kwargs):
+            remote = shlex.split(args[-1])
+            if remote == ["/usr/bin/id", "-un"]:
+                self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+                calls.append("identity")
+                return SyntheticProcess(b"gateway\n", b"", 0)
+            self.assertEqual(remote[-2:], ["/usr/bin/id", "-u"])
+            self.assertIn("-k", remote)
+            self.assertNotIn(PASSWORD, repr(args))
+            token = _remote_token(remote)
+            if remote[1] == "-n":
+                calls.append("safety")
+                self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+                if not unsafe:
+                    return SyntheticProcess(b"", safety_error, 1)
+            else:
+                calls.append("sudo")
+                self.assertEqual(remote[1], "-S")
+                self.assertEqual(kwargs["stdin"], asyncio.subprocess.PIPE)
+                if password_error:
+                    proc = SyntheticProcess(b"", password_error, 1)
+                    processes.append(proc)
+                    return proc
+            proc = SyntheticProcess(_root_stdout(token, b"0\n"), _root_stderr(token), 0)
+            processes.append(proc)
+            return proc
+
+        with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+            self.assertTrue(await monitor.check("test", privileged=True))
+            self.assertTrue(monitor.sudo_ready("test"))
+            self.assertEqual(bytes(processes[-1].stdin.content), PASSWORD.encode() + b"\n")
+            safety_error = b"gateway is not in the sudoers file.\n"
+            self.assertTrue(await monitor.check("test"))
+            safety_error = b"sudo: must have a tty\n"
+            self.assertFalse(await monitor.check("test"))
+            self.assertTrue(monitor.active("test"))
+            unsafe = True
+            self.assertFalse(await monitor.check("test"))
+            self.assertFalse(monitor.active("test"))
+            unsafe = False
+            safety_error = b"sudo: a password is required\n"
+            password_error = b"sudo: 1 incorrect password attempt\n"
+            self.assertFalse(await monitor.check("test", privileged=True))
+            self.assertTrue(monitor.active("test"))
+            self.assertTrue(monitor.password_suspended("test"))
+            calls.clear()
+            self.assertFalse(await monitor.check("test", privileged=True))
+            self.assertEqual(calls, ["identity", "safety"])
+            password_error = b""
+            self.assertTrue((await monitor.recheck("test"))["sudo_ready"])
+            plain = SSHExecutor(
+                {"test": self.host.model_copy(update={"privileged_access": "none"})},
+                enabled=True, readiness_settings=ReadinessSettings(authorized=True),
+            )
+            calls.clear()
+            self.assertTrue(await plain.readiness.check("test"))
+            self.assertEqual(calls, ["identity", "safety"])
+            self.assertFalse(plain.readiness.sudo_ready("test"))
+
     async def test_public_execution_is_still_disabled(self):
         with patch("app.ssh_executor._spawn_ssh_command") as spawn:
             with self.assertRaisesRegex(SSHDenied, "not enabled"):

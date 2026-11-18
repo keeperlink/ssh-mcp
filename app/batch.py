@@ -392,8 +392,9 @@ class BatchStore:
             if batch is None:
                 return None
             rows = db.execute(
-                """SELECT * FROM command_batch_steps WHERE batch_id=?
-                   AND step_index>=? ORDER BY step_index LIMIT ?""",
+                """SELECT s.*, j.error AS job_error FROM command_batch_steps s
+                   LEFT JOIN jobs j ON j.id=s.job_id
+                   WHERE s.batch_id=? AND s.step_index>=? ORDER BY s.step_index LIMIT ?""",
                 (batch_id, cursor, limit),
             ).fetchall()
         steps = [{
@@ -409,6 +410,7 @@ class BatchStore:
                               else bool(row["exit_accepted"])),
             "elapsed_seconds": row["elapsed_seconds"],
             "attempted": row["status"] != "not_attempted",
+            **({"error": row["job_error"]} if (row["job_error"] or "").startswith("Host readiness unavailable:") else {}),
         } for row in rows]
         total = int(batch["total_steps"])
         following = cursor + len(rows)

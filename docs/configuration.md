@@ -152,3 +152,46 @@ pass Host validation.
 This source version renames the Python distribution, data/mount paths,
 metrics and remote file helper namespace. These are **breaking changes**
 for existing deployments; see [upgrade compatibility](upgrade-compatibility.md).
+
+
+## Host readiness
+
+Explicitly authorize the service's fixed probes before enabling access to hosts.
+In managed mode set the signed service.json readiness.authorized to true.
+In standalone mode set SSH_READINESS_AUTHORIZED=true in the protected environment
+file. Missing authorization leaves all configured aliases offline; there is no
+fallback to unverified execution. The following settings are available in the
+readiness object (standalone uses the corresponding uppercase
+SSH_READINESS_ prefix):
+
+| Key | Default |
+| --- | --- |
+| authorized | false |
+| interval_seconds | 30 |
+| timeout_seconds | 5 |
+| max_concurrent | 5 |
+| stale_seconds | 300 |
+| stale_retry_seconds | 120 |
+
+Fixed probes verify the pinned SSH identity, then run the fixed sudo wrapper
+noninteractively with cached credentials ignored and no password provided.
+Only an explicit password requirement or policy denial confirms this safety
+check; passwordless root execution disables the host immediately. Review the
+effective sudo policy at onboarding and after policy changes: one fixed probe
+cannot establish that every command-specific NOPASSWD rule is absent.
+Configured privileged hosts also verify their protected password using the
+fixed root identity probe. Rejected supplied passwords suspend further
+password attempts until restart or explicit local operator recheck.
+
+An active alias remains active until its last successful SSH safety check
+expires, even after transient probe failures. Sudo readiness expires
+independently. New approval prompts require a live check; previously admitted
+operations use cached readiness, rechecked before dispatch and each batch step
+or file call. No monitoring probe creates an approval grant.
+The Console connection indicator reports aggregate configured host health.
+
+Run ssh-mcp-ctl recheck-host ALIAS inside the service to retry immediately
+and clear a password suspension. In standalone deployments the local control
+socket can be enabled using SSH_CONTROL_SOCKET pointing to the default
+/run/ssh-mcp/control.sock in a writable service-owned mode-0700 directory.
+Only authorized fixed probes can run; no arbitrary command or grant is exposed.

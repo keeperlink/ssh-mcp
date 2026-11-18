@@ -46,16 +46,27 @@ async def lifespan(_app: FastAPI):
         raise RuntimeError("Memory-only approvals require a single server worker")
     # Standalone env-mode examples mount this directory read-only. Managed
     # services already provide a private writable tmpfs.
-    socket_path = SOCKET if os.getenv("MCP_CONFIG_FILE") else None
-    async with control_server(MCP_LOG_LEVEL, socket_path), _mcp_server.session_manager.run():
+    executor = _job_registry.get("executor")
+    readiness = getattr(executor, "readiness", None)
+    local_socket = os.getenv("SSH_CONTROL_SOCKET")
+    if local_socket and local_socket != str(SOCKET):
+        raise ValueError("SSH_CONTROL_SOCKET must use the fixed local control path")
+    socket_path = SOCKET if os.getenv("MCP_CONFIG_FILE") or local_socket else None
+    async with control_server(
+        MCP_LOG_LEVEL, socket_path, readiness.recheck if readiness is not None else None,
+    ), _mcp_server.session_manager.run():
         jobs = _job_registry.get("jobs")
         # Fail at startup if private session storage cannot initialize.
         session_store()
         cleanup = asyncio.create_task(_prune_loop(jobs.store if jobs is not None else None))
+        if readiness is not None:
+            readiness.start()
         try:
             yield
         finally:
             _approvals.shutdown()
+            if readiness is not None:
+                await readiness.stop()
             batches = _job_registry.get("batches")
             if batches is not None:
                 await batches.shutdown()
@@ -115,6 +126,7 @@ if os.getenv("HISTORY_VIEWER_ENABLED", "false").lower() == "true":
         manager.store, approved_hosts=manager.executor.list_servers(MCP_OPERATOR_SUBJECT),
         approvals=_approvals, job_manager=manager,
         batch_manager=_job_registry.get("batches"),
+        readiness=getattr(manager.executor, "readiness", None),
     ))
 
     @app.get("/", include_in_schema=False)

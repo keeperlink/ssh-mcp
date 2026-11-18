@@ -156,13 +156,13 @@ class BinaryTransferService(FileService):
         status = "unknown" if failure.uncertain else "failed"
         safe_finish_failure = failure.code in {
             "already_exists", "precondition_failed", "invalid_request", "changed_file",
-            "payload_limit",
+            "payload_limit", "host_readiness",
         }
         if finish_attempted and not failure.uncertain and not safe_finish_failure:
             # A filesystem/transport failure at publication may have happened
             # after installing the destination; never claim no mutation.
             status = "unknown"
-        if started and session_id and not failure.uncertain and (
+        if started and session_id and not failure.uncertain and failure.code != "host_readiness" and (
             not finish_attempted or safe_finish_failure
         ):
             # Clean only confirmed pre-publish failures. Unknown publication
@@ -182,6 +182,8 @@ class BinaryTransferService(FileService):
                       "sha256": source_sha256, "mode": request.mode},
         )
         error: dict[str, Any] = {"code": failure.code, "message": str(failure)}
+        if failure.code == "host_readiness":
+            error["published"] = False
         if source_diagnostic is not None:
             # Caller-only diagnostic. Never pass the hostname to audit.finish,
             # history details, logs or untrusted outbound HTTP exceptions.

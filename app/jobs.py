@@ -27,7 +27,7 @@ from .file_audit import init_file_schema
 from .approval_status import approval_status_context, decode
 from .output_codec import OutputCorruption, encode as encode_output, decode as decode_output
 from .sqlite_support import _ClosingConnection, _prepare_path
-from .ssh_executor import SSHDenied, SSHExecutor, SSHResult, OutputLimitExceeded
+from .ssh_executor import ReadinessDenied, SSHDenied, SSHExecutor, SSHResult, OutputLimitExceeded
 
 TERMINAL = frozenset({
     "succeeded", "failed", "cancelled", "timed_out",
@@ -831,13 +831,13 @@ class JobManager:
                 current.uncancel()
                 return None
             raise
-        except SSHDenied:
+        except SSHDenied as exc:
             # A definite authorization/preflight refusal; the caller's argv
             # was never dispatched even if SSH capacity and CWD preflight ran.
             # Persist fixed machine-readable evidence before replying.
             self.store.finish(
                 job_id, "failed", elapsed=elapsed(),
-                error="SSH authorization was rejected",
+                error=str(exc) if isinstance(exc, ReadinessDenied) else "SSH authorization was rejected",
                 failure_kind="pre_execution_rejected",
             )
         except Exception:

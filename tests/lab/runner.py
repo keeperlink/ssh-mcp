@@ -404,6 +404,7 @@ def create_secrets(state: dict, folder: Path) -> None:
         "MCP_BIND_PORT": "8000",
         "MCP_SSH_TOOLS_ENABLED": "true",
         "SSH_EXECUTOR_ENABLED": "true",
+        "SSH_READINESS_AUTHORIZED": "true",
         "SSH_JOBS_ENABLED": "true",
         "SSH_JOBS_DB": "/var/lib/ssh-mcp/jobs.sqlite",
         "SSH_INVENTORY_FILE": "/run/ssh-mcp/inventory.json",

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .control import LEVELS
+from .readiness import ReadinessSettings
 
 CONFIG = Path("/etc/ssh-mcp/service.json")
 INVENTORY = Path("/etc/ssh-mcp/inventory.json")
@@ -116,13 +117,14 @@ def _positive(value: Any, maximum: int) -> bool:
 
 def _valid_settings(settings: dict[str, Any]) -> None:
     required = {"version", "environment", *SECTIONS}
-    if (not required <= set(settings) <= required | {"logging"}
+    if (not required <= set(settings) <= required | {"logging", "readiness"}
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
                 not (keys <= set(settings[section]) <= (keys | VIEWER_OPTIONAL)
                      if section == "viewer" else set(settings[section]) == keys)
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
+    ReadinessSettings.from_mapping(settings.get("readiness", {}))
     logging_settings = settings.get("logging", {"level": "INFO"})
     if (type(logging_settings) is not dict or set(logging_settings) != {"level"}
             or logging_settings["level"] not in LEVELS):
@@ -263,6 +265,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
     http, oauth, ssh, jobs = (cfg[part] for part in ("http", "oauth", "ssh", "jobs"))
     issuer = oauth["issuer"]
     return {
+        **ReadinessSettings.from_mapping(cfg.get("readiness", {})).environment(),
         "MCP_ENVIRONMENT": cfg["environment"],
         "MCP_LOG_LEVEL": cfg.get("logging", {"level": "INFO"})["level"],
         "MCP_ISSUER": issuer, "MCP_RESOURCE": issuer + "/mcp",

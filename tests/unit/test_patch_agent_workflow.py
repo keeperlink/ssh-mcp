@@ -244,7 +244,7 @@ class AgentWorkflowTests(unittest.TestCase):
         self.assertNotEqual(self.hashes()["greeting.py"], sha(SOURCE_OLD.encode()))
 
     def test_typed_contract_accepts_agent_workflow_preview_and_apply(self) -> None:
-        self.assertEqual(contract_document()["contract_version"], "1.9")
+        self.assertEqual(contract_document()["contract_version"], "2.0")
         values = self.hashes()
         request = ApplyPatchRequest(
             server="demo-node-b", reason="TEST-248 related source test docs",

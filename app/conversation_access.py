@@ -85,12 +85,19 @@ async def require_host_access(
             raise SSHDenied("Restricted host requires authenticated OAuth session")
         if approvals is None:
             raise SSHDenied("Restricted host requires operator approval")
-        return await approvals.require(
+        async def before_prompt() -> None:
+            await executor.check_readiness_live(server, privileged=privileged)
+
+        code = await approvals.require(
             (session_id, conversation_id or "", server),
             tool=tool, reason=reason, client_id=client_id,
             summary=summary,
             steps=steps,
             disconnected=disconnected,
             host_required=host_required, root_required=root_required,
+            before_prompt=before_prompt,
         )
+        executor.require_ready(server, privileged=privileged)
+        return code
+    executor.require_ready(server, privileged=privileged)
     return ApprovalCode.APPROVED_CONFIG

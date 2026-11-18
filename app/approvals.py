@@ -214,7 +214,8 @@ class ApprovalManager:
                       disconnected: Callable[[], Awaitable[bool]] | None = None,
                       host_required: bool = True,
                       root_required: bool = False,
-                      client_id: str | None = None) -> ApprovalCode:
+                      client_id: str | None = None,
+                      before_prompt: Callable[[], Awaitable[None]] | None = None) -> ApprovalCode:
         if self.closed:
             raise SSHDenied("Approval manager has stopped")
         self._expire()
@@ -239,6 +240,22 @@ class ApprovalManager:
             return ApprovalCode.APPROVED_TIMED
         if len(self.pending) >= MAX_PENDING:
             raise SSHDenied("Approval queue is full")
+        if before_prompt is not None:
+            await before_prompt()
+            if self.closed:
+                raise SSHDenied("Approval manager has stopped")
+            if disconnected is not None and await disconnected():
+                raise ApprovalRejected(ApprovalCode.DENIED_DISCONNECTED, "Request disconnected")
+            self._expire()
+            # A concurrent prompt may already have established the grant.
+            if self._authorized(key, host_required, root_required):
+                return await self.require(
+                    key, tool=tool, reason=reason, summary=summary, steps=steps,
+                    disconnected=disconnected, host_required=host_required,
+                    root_required=root_required, client_id=client_id,
+                )
+            if len(self.pending) >= MAX_PENDING:
+                raise SSHDenied("Approval queue is full")
         # The operation preview is only needed for a newly queued decision.
         # Existing timed grants must retain normal file validation/auditing.
         summary_text = summary() if callable(summary) else summary

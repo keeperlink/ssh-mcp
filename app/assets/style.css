@@ -538,3 +538,13 @@
   overflow-wrap:anywhere
 }
 .cancel-feedback[hidden]{display:none}
+
+.connection-wrap{position:relative;flex:0 0 auto}
+.connection{border:0;background:transparent;padding:6px 0;white-space:nowrap}
+.connection.degraded{color:#8a6300}.connection.degraded:before{background:#e2ac21}
+.connection:focus-visible{outline:2px solid #1261a9;outline-offset:2px}
+.connection-details{position:absolute;right:-30px;top:100%;z-index:30;width:max-content;max-width:min(90vw,860px);max-height:65vh;overflow:auto;background:#fff;border:1px solid #d4deeb;border-radius:8px;padding:12px;box-shadow:0 6px 24px #192d4626;color:#243143}
+.connection-details table{border-collapse:collapse;font-size:11px;margin-top:7px}
+.connection-details th,.connection-details td{text-align:left;border-bottom:1px solid #e4ebf5;padding:5px 8px;vertical-align:top}
+.connection-details td:last-child{overflow-wrap:anywhere;max-width:180px}
+.connection-details[hidden]{display:none}
