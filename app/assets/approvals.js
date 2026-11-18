@@ -24,7 +24,7 @@
   const conversationNumber = (id) => {
     if (typeof id !== "string" || !id) return null;
     if (!state.conversationNumbers.has(id)) {
-      // Opaque approval scope IDs distinguish OAuth sessions and hosts.
+      // Opaque conversation scope IDs distinguish OAuth sessions, not hosts.
       // Local indices never authorize a request or expose session IDs.
       if (state.conversationNumbers.size >= 1024)
         state.conversationNumbers.delete(state.conversationNumbers.keys().next().value);
@@ -157,7 +157,7 @@
     if (previousId !== state.active || layer.hidden) {
       if (layer.hidden) previousFocus = document.activeElement;
       $("approval-host").textContent = request.host || "Unknown";
-      const number = conversationNumber(request.scope_id);
+      const number = conversationNumber(request.conversation_scope_id);
       $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
       $("approval-client").textContent = request.client_id || "MCP client";
       const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
@@ -183,7 +183,7 @@
     updateClock();
   }
   function grantName(grant) {
-    const number = conversationNumber(grant.scope_id);
+    const number = conversationNumber(grant.conversation_scope_id);
     return grant.host + (number ? " [" + number + "]" : "");
   }
   function revokeButton(grant, name) {

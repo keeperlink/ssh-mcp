@@ -56,6 +56,7 @@ class PendingApproval:
             "id": self.id, "host": self.key[2],
             "conversation_id": self.key[1] or None, "tool": self.tool,
             "scope_id": ApprovalManager.grant_id(self.key, "scope") if self.key[1] else None,
+            "conversation_scope_id": ApprovalManager.conversation_scope_id(self.key),
             "client_id": self.client_id, "timed_grants_allowed": bool(self.key[1]),
             "reason": self.reason, "summary": self.summary,
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
@@ -146,6 +147,7 @@ class ApprovalManager:
                 {"host": key[2], "conversation_id": key[1],
                  "id": self.grant_id(key),
                  "scope_id": self.grant_id(key, "scope"),
+                 "conversation_scope_id": self.conversation_scope_id(key),
                  "kind": "host",
                  "expires_at": time.time() + max(0, expires_at - time.monotonic())}
                 for key, expires_at in self.grants.items()
@@ -153,6 +155,7 @@ class ApprovalManager:
                 {"host": key[2], "conversation_id": key[1],
                  "id": self.grant_id(key, "root"), "kind": "root",
                  "scope_id": self.grant_id(key, "scope"),
+                 "conversation_scope_id": self.conversation_scope_id(key),
                  "expires_at": time.time() + max(0, expires_at - time.monotonic())}
                 for key, expires_at in self.root_grants.items()
             ],
@@ -170,6 +173,14 @@ class ApprovalManager:
         # Stable nonsecret identifier for a viewer revoke action. It must not
         # serve as an authentication credential; viewer auth + CSRF still apply.
         source = "\x00".join(key) if kind == "host" else kind + "\x00" + "\x00".join(key)
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def conversation_scope_id(key: GrantKey) -> str | None:
+        # Display correlation only: keep OAuth sessions distinct, regardless of host.
+        if not key[1]:
+            return None
+        source = "\x00".join(("conversation", key[0], key[1]))
         return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
 
     def _authorized(self, key: GrantKey, host_required: bool,

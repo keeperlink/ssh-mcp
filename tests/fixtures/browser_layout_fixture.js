@@ -579,6 +579,7 @@
       const requests = [
         { id: "synthetic-a", host: "demo-node-a", conversation_id: "dialog-test-A-12345",
           scope_id: "synthetic-session-grant-scope",
+          conversation_scope_id: "synthetic-conversation-a",
           tool: "execute_commands", reason: "synthetic fixture",
           summary: "fallback only", expires_at: deadline,
           steps: [
@@ -596,6 +597,7 @@
           ] },
         { id: "synthetic-b", host: "demo-node-b", conversation_id: "dialog-test-B-12345",
           scope_id: "synthetic-other-scope",
+          conversation_scope_id: "synthetic-conversation-b",
           tool: "read_file", reason: "second waiting command",
           summary: "/tmp/synthetic.txt", expires_at: deadline },
       ];
@@ -665,7 +667,8 @@
         && posts[1].fields.get("duration") === "8h",
       "Grant did not send requested duration");
       const timed = [{ id: "synthetic-grant", host: "demo-node-b",
-        scope_id: requests[1].scope_id, conversation_id: "dialog-test-B-12345",
+        scope_id: requests[1].scope_id, conversation_scope_id: requests[1].conversation_scope_id,
+        conversation_id: "dialog-test-B-12345",
         expires_at: Date.now() / 1000 + 453 * 60 + 20 }];
       send(5, [], timed);
       assert(chips.textContent.includes("demo-node-b")
@@ -686,10 +689,12 @@
       const scope = "synthetic-session-grant-scope";
       const sameExpiry = Date.now() / 1000 + 2 * 3600;
       const hostGrant = { id: "synthetic-host-grant", kind: "host",
-        scope_id: scope, host: "demo-node-a",
+        scope_id: scope, conversation_scope_id: requests[0].conversation_scope_id,
+        host: "demo-node-a",
         conversation_id: "dialog-test-A-12345", expires_at: sameExpiry };
       const rootGrant = { id: "synthetic-root-grant", kind: "root",
-        scope_id: scope, host: "demo-node-a",
+        scope_id: scope, conversation_scope_id: requests[0].conversation_scope_id,
+        host: "demo-node-a",
         conversation_id: "dialog-test-A-12345", expires_at: sameExpiry };
       send(8, [], [hostGrant, rootGrant]);
       assert(chips.children.length === 1
@@ -704,7 +709,8 @@
           button.getAttribute("aria-label")?.startsWith("Revoke root"))
         && !chips.textContent.toLowerCase().includes("sudo"),
       "Nested grants need independent red and green revoke controls, without sudo label");
-      send(9, [], [hostGrant, { ...rootGrant, scope_id: "different-oauth-session" }]);
+      send(9, [], [hostGrant, { ...rootGrant, scope_id: "different-oauth-session",
+        conversation_scope_id: "different-conversation-scope" }]);
       assert(chips.children.length === 2
         && chips.querySelectorAll(".grant-root-detail").length === 1,
       "Grants from different OAuth sessions must never be nested together");
@@ -788,7 +794,7 @@
         expires_at: Date.now() / 1000 + 0.25 }]);
       await waitFor(() => layer.hidden, "Expired approval remains in modal");
       send(19, [{ ...requests[0], id: "synthetic-headerless",
-        conversation_id: null, scope_id: null, timed_grants_allowed: false,
+        conversation_id: null, scope_id: null, conversation_scope_id: null, timed_grants_allowed: false,
         client_id: "https://example.invalid/client.json",
         expires_at: Date.now() / 1000 + 28 }]);
       await waitFor(() => !layer.hidden, "Headerless approval appears");
@@ -813,6 +819,7 @@
       // its own label, consistently in the popup and active grant controls.
       const sameConversation = { ...requests[0], id: "synthetic-other-client",
         scope_id: "separate-session-for-same-workflow",
+        conversation_scope_id: "separate-conversation-scope-for-same-workflow",
         client_id: "https://other.invalid/client.json",
         expires_at: Date.now() / 1000 + 28 };
       send(23, [sameConversation], [hostGrant]);
@@ -822,14 +829,32 @@
       assert(firstLabel.endsWith("[1]") && secondNumber !== "1" && secondNumber,
         "Popup must distinguish the other session using the same raw conversation");
       send(24, [], [hostGrant, { ...hostGrant, id: "synthetic-other-host-grant",
-        scope_id: sameConversation.scope_id }]);
+        scope_id: sameConversation.scope_id,
+        conversation_scope_id: sameConversation.conversation_scope_id }]);
       const labels = [...chips.querySelectorAll(".grant-name")].map((node) => node.textContent);
       const revokeLabels = [...chips.querySelectorAll("button")].map((node) => node.getAttribute("aria-label"));
       assert(labels.length === 2 && new Set(labels).size === 2
         && labels.some((label) => label.endsWith("[" + secondNumber + "]"))
         && new Set(revokeLabels).size === 2,
       "Concurrent grants sharing host/conversation must have distinct matching revoke labels");
-      send(25, []);
+      const anotherHost = { ...requests[0], id: "synthetic-same-conversation-other-host",
+        host: "demo-node-c", scope_id: "different-host-same-conversation",
+        expires_at: Date.now() / 1000 + 28 };
+      send(25, [anotherHost], [hostGrant]);
+      assert(document.getElementById("approval-conversation").textContent === "Conversation #1",
+        "Same conversation on another host must reuse the popup label");
+      const otherHostGrant = { ...hostGrant, id: "synthetic-host-c-grant",
+        host: anotherHost.host, scope_id: anotherHost.scope_id };
+      send(26, [], [hostGrant, otherHostGrant]);
+      const sameLabels = [...chips.querySelectorAll(".grant-name")].map((node) => node.textContent);
+      assert(sameLabels.length === 2 && sameLabels.every((label) => label.endsWith("[1]"))
+        && new Set(sameLabels).size === 2,
+      "Different hosts in the same conversation must reuse the grant label");
+      send(27, [], [hostGrant, { ...rootGrant, id: "synthetic-root-c-grant",
+        host: anotherHost.host, scope_id: anotherHost.scope_id }]);
+      assert(chips.children.length === 2 && !chips.querySelector(".grant-chip:not(.grant-root) .grant-root-detail"),
+        "Shared conversation label must not pair grants across hosts");
+      send(28, []);
     } finally {
       window.fetch = originalFetch;
     }

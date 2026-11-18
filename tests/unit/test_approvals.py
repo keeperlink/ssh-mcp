@@ -219,6 +219,8 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         visible = self.manager.snapshot()["active_grants"]
         self.assertEqual({entry["kind"] for entry in visible}, {"host", "root"})
         self.assertEqual({entry["scope_id"] for entry in visible}, {pending["scope_id"]})
+        self.assertEqual({entry["conversation_scope_id"] for entry in visible},
+                         {pending["conversation_scope_id"]})
         self.assertNotIn(KEY[0], str(pending))
         self.assertNotEqual(visible[0]["id"], visible[1]["id"])
         self.assertNotIn(KEY[0], str(visible))
@@ -238,6 +240,31 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len([g for g in active if g["kind"] == kind]), 2)
         self.assertNotIn(KEY[0], str(active))
         self.assertNotIn(OTHER_LOGIN[0], str(active))
+
+    async def test_conversation_scope_groups_hosts_not_logins_or_conversations(self):
+        scopes = {}
+        for key in (KEY, OTHER_HOST, OTHER_LOGIN, OTHER_CONVERSATION):
+            task, request_id = await self._root_pending(key=key)
+            pending = self.manager.pending[request_id].public()
+            scopes[key] = pending["conversation_scope_id"]
+            self.assertRegex(scopes[key], r"^[0-9a-f]{24}$")
+            self.assertTrue(self.manager.decide(request_id, grant=True, duration="5m"))
+            await task
+        self.assertEqual(scopes[KEY], scopes[OTHER_HOST])
+        self.assertEqual(len(set(scopes.values())), 3)
+        active = self.manager.snapshot()["active_grants"]
+        self.assertEqual(len(active), 8)
+        self.assertEqual(len({g["scope_id"] for g in active}), 4)
+        for key, scope in scopes.items():
+            pairing = self.manager.grant_id(key, "scope")
+            grants = [g for g in active if g["scope_id"] == pairing]
+            self.assertEqual({g["conversation_scope_id"] for g in grants}, {scope})
+            self.assertEqual({g["kind"] for g in grants}, {"host", "root"})
+        self.assertTrue(self.manager.revoke(self.manager.grant_id(KEY)))
+        self.assertNotIn(KEY, self.manager.grants)
+        self.assertNotIn(KEY, self.manager.root_grants)
+        self.assertIn(OTHER_HOST, self.manager.grants)
+        self.assertIn(OTHER_HOST, self.manager.root_grants)
 
     async def test_sudo_only_grant_without_host_timed_chip(self):
         task, request_id = await self._root_pending(host_required=False)
@@ -966,6 +993,7 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         second, second_id = await self._root_pending(key=key)
         pending = self.manager.pending[first_id].public()
         self.assertIsNone(pending["conversation_id"])
+        self.assertIsNone(pending["conversation_scope_id"])
         self.assertFalse(pending["timed_grants_allowed"])
         for duration in ("5m", "15m", "1h", "8h", "16h"):
             self.assertFalse(self.manager.decide(first_id, grant=True, duration=duration))
