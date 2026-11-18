@@ -854,7 +854,30 @@
         host: anotherHost.host, scope_id: anotherHost.scope_id }]);
       assert(chips.children.length === 2 && !chips.querySelector(".grant-chip:not(.grant-root) .grant-root-detail"),
         "Shared conversation label must not pair grants across hosts");
-      send(28, []);
+      // Keep a grant and a pending-only conversation alive while overflowing
+      // the bounded label cache with distinct, short-lived grant snapshots.
+      const livePending = { ...requests[1], id: "synthetic-cache-pending",
+        expires_at: Date.now() / 1000 + 60 };
+      send(28, [livePending], [hostGrant]);
+      assert(document.getElementById("approval-conversation").textContent === "Conversation #2",
+        "Pending conversation starts with its existing number");
+      for (let i = 0; i < 1025; i++) {
+        const transient = { ...hostGrant, id: "synthetic-cache-grant-" + i,
+          scope_id: "cache-host-scope-" + i, conversation_scope_id: "cache-conversation-" + i };
+        send(29 + i, [livePending], [hostGrant, transient]);
+      }
+      const pendingGrant = { ...hostGrant, id: "synthetic-pending-grant",
+        host: livePending.host, scope_id: livePending.scope_id,
+        conversation_scope_id: livePending.conversation_scope_id };
+      send(1054, [{ ...anotherHost, expires_at: Date.now() / 1000 + 28 }],
+        [hostGrant, otherHostGrant, pendingGrant]);
+      assert(document.getElementById("approval-conversation").textContent === "Conversation #1",
+        "A live grant must keep its number after label cache eviction");
+      const cachedLabels = [...chips.querySelectorAll(".grant-name")].map((node) => node.textContent);
+      assert(cachedLabels.includes("demo-node-a [1]") && cachedLabels.includes("demo-node-c [1]")
+        && cachedLabels.includes("demo-node-b [2]"),
+      "New grants must reuse numbers of both live grants and pending approvals after overflow");
+      send(1055, []);
     } finally {
       window.fetch = originalFetch;
     }
