@@ -235,8 +235,19 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             calls.clear()
             self.assertFalse(await monitor.check("test", privileged=True))
             self.assertEqual(calls, ["identity", "safety"])
+            password_error = b"sudo: must have a tty\n"
+            calls.clear()
+            failed = await monitor.recheck("test")
+            self.assertFalse(failed["recheck_ok"])
+            self.assertTrue(monitor.password_suspended("test"))
+            self.assertEqual(calls, ["identity", "safety", "sudo"])
+            calls.clear()
+            self.assertFalse(await monitor.check("test", privileged=True))
+            self.assertEqual(calls, ["identity", "safety"])
             password_error = b""
-            self.assertTrue((await monitor.recheck("test"))["sudo_ready"])
+            recovered = await monitor.recheck("test")
+            self.assertTrue(recovered["recheck_ok"])
+            self.assertTrue(recovered["sudo_ready"])
             plain = SSHExecutor(
                 {"test": self.host.model_copy(update={"privileged_access": "none"})},
                 enabled=True, readiness_settings=ReadinessSettings(authorized=True),

@@ -91,6 +91,7 @@ class HostHealth:
     suspended: bool = False
     unsafe: bool = False
     suspension_generation: int = 0
+    recheck_generation: int | None = None
     previous_active: bool = False
     previous_sudo_ready: bool = False
     last_warning: str | None = None
@@ -133,6 +134,12 @@ class ReadinessMonitor:
 
     def password_suspended(self, alias: str) -> bool:
         return self._states[alias].suspended
+
+    def password_probe_permitted(self, alias: str) -> bool:
+        """Permit only the scoped explicit retry, without lifting suspension."""
+        state = self._states[alias]
+        return (not state.suspended
+                or state.recheck_generation == state.suspension_generation)
 
     def sudo_ready(self, alias: str) -> bool:
         state = self._states[alias]
@@ -208,10 +215,9 @@ class ReadinessMonitor:
         async with self._locks[alias], self._capacity:
             state = self._states[alias]
             self._transitions(alias)
-            if resume and state.suspended:
-                state.suspended = False
-                state.last_sudo = None
-                state.sudo_reason = "pending"
+            # A rejection arriving during identity/safety verification must
+            # invalidate an earlier operator authorization to retry.
+            resume_generation = state.suspension_generation if resume and state.suspended else None
             state.last_check = self._wall()
             identity = await self._attempt(alias, "identity")
             if not identity.ok:
@@ -228,14 +234,21 @@ class ReadinessMonitor:
             state.last_warning = None
             self._transitions(alias)
             sudo_ok = False
-            if privileged is not False and state.expects_sudo and not state.suspended:
+            scoped_retry = state.suspended and resume_generation == state.suspension_generation
+            if privileged is not False and state.expects_sudo and (not state.suspended or scoped_retry):
                 generation = state.suspension_generation
-                sudo = await self._attempt(alias, "sudo")
+                if scoped_retry:
+                    state.recheck_generation = generation
+                try:
+                    sudo = await self._attempt(alias, "sudo")
+                finally:
+                    state.recheck_generation = None
                 if sudo.password_rejected:
                     self.suspend(alias)
-                elif generation == state.suspension_generation and not state.suspended:
+                elif generation == state.suspension_generation:
                     sudo_ok = sudo.ok
                     if sudo.ok:
+                        state.suspended = False
                         state.last_sudo = self._clock()
                         state.last_sudo_success = self._wall()
                         state.sudo_reason = ""
@@ -243,7 +256,8 @@ class ReadinessMonitor:
                         reason = sudo.reason or "probe_failed"
                         if reason != state.sudo_reason:
                             LOG.warning("host_sudo_check_failed host=%s reason=%s", alias, reason)
-                        state.sudo_reason = reason
+                        if not state.suspended:
+                            state.sudo_reason = reason
             self._transitions(alias)
             return self.active(alias) and (not privileged or sudo_ok and self.sudo_ready(alias))
 
@@ -300,5 +314,5 @@ class ReadinessMonitor:
     async def recheck(self, alias: str) -> dict[str, object]:
         if alias not in self._states or not self.settings.authorized:
             raise ValueError("Host readiness recheck unavailable")
-        await self.check(alias, resume=True)
-        return self.detail(alias)
+        ok = await self.check(alias, resume=True, privileged=self._states[alias].expects_sudo)
+        return {**self.detail(alias), "recheck_ok": ok}

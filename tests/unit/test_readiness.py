@@ -121,6 +121,100 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(b["sudo_configured"])
         self.assertFalse(b["degraded"])
 
+    async def test_failed_rechecks_retain_suspension_and_skip_future_password_probes(self):
+        a = "demo-node-a"
+        ok = ProbeResult(True)
+        self.assertTrue(await self.m.check(a, privileged=True))
+        self.m.suspend(a)
+        for responses in (
+            [ProbeResult(False, "connection_failed")],
+            [ok, ProbeResult(False, "inconclusive_safety")],
+            [ok, ok, TimeoutError()],
+            [ok, ok, ProbeResult(False, "inconclusive_sudo")],
+            [ok, ok, ProbeResult(False, "sudo_authentication", password_rejected=True)],
+        ):
+            with self.subTest(responses=responses):
+                self.probe.side_effect = responses
+                failed = await self.m.recheck(a)
+                self.assertFalse(failed["recheck_ok"])
+                self.assertTrue(self.m.password_suspended(a))
+                self.assertFalse(self.m.password_probe_permitted(a))
+                self.assertFalse(self.m.sudo_ready(a))
+                for privileged in (None, True, False):
+                    self.probe.reset_mock(side_effect=True)
+                    await self.m.check(a, privileged=privileged)
+                    self.assertEqual([c.args[1] for c in self.probe.await_args_list],
+                                     ["identity", "safety"])
+        result = await self.m.recheck(a)
+        self.assertTrue(result["recheck_ok"])
+        self.assertTrue(result["sudo_ready"])
+        self.assertFalse(self.m.password_suspended(a))
+
+    async def test_cancelled_recheck_revokes_scoped_permission(self):
+        a = "demo-node-a"
+        self.m.suspend(a)
+        entered = asyncio.Event()
+        async def probe(alias, kind):
+            if kind == "sudo":
+                self.assertTrue(self.m.password_suspended(alias))
+                self.assertTrue(self.m.password_probe_permitted(alias))
+                self.assertFalse(self.m.sudo_ready(alias))
+                entered.set()
+                await asyncio.Future()
+            return ProbeResult(True)
+        self.m._probe = probe
+        task = asyncio.create_task(self.m.recheck(a))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(self.m.password_suspended(a))
+        self.assertFalse(self.m.password_probe_permitted(a))
+        self.m._probe = self.probe
+        self.assertFalse(await self.m.check(a, privileged=True))
+        self.assertEqual([c.args[1] for c in self.probe.await_args_list],
+                         ["identity", "safety"])
+
+    async def test_rejection_during_recheck_invalidates_scoped_retry(self):
+        a = "demo-node-a"
+        for rejection_at in ("identity", "safety", "sudo"):
+            with self.subTest(rejection_at=rejection_at):
+                self.m.suspend(a)
+                calls = []
+                async def probe(alias, kind):
+                    calls.append(kind)
+                    if kind == rejection_at:
+                        if kind == "sudo":
+                            self.assertTrue(self.m.password_probe_permitted(alias))
+                        self.m.suspend(alias)
+                        self.assertFalse(self.m.password_probe_permitted(alias))
+                    return ProbeResult(True)
+                self.m._probe = probe
+                result = await self.m.recheck(a)
+                self.assertFalse(result["recheck_ok"])
+                self.assertTrue(self.m.password_suspended(a))
+                self.assertFalse(self.m.password_probe_permitted(a))
+                self.assertEqual(calls, ["identity", "safety", "sudo"]
+                                 if rejection_at == "sudo" else ["identity", "safety"])
+
+    async def test_recheck_reports_live_result_separately_from_cached_eligibility(self):
+        a, b = "demo-node-a", "demo-node-b"
+        await self.m.check(a)
+        await self.m.check(b)
+        for alias, responses in (
+            (b, [ProbeResult(False, "connection_failed")]),
+            (a, [ProbeResult(True), ProbeResult(True), ProbeResult(False, "probe_timeout")]),
+        ):
+            with self.subTest(alias=alias):
+                self.probe.side_effect = responses
+                result = await self.m.recheck(alias)
+                self.assertFalse(result["recheck_ok"])
+                self.assertEqual(result["status"], "active")
+                self.assertEqual(result["sudo_ready"], alias == a)
+                self.assertTrue(result["degraded"])
+                self.probe.side_effect = None
+        self.assertTrue((await self.m.recheck(a))["recheck_ok"])
+
     async def test_inflight_success_cannot_undo_new_suspension(self):
         a = "demo-node-a"
         async def probe(alias, kind):
@@ -250,14 +344,22 @@ class RecheckSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_alias_only_and_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             socket=Path(tmp)/"control.sock"
+            probe = AsyncMock(return_value=ProbeResult(True))
             m=ReadinessMonitor(ReadinessSettings(authorized=True),{"demo-node-a":False},
-                               AsyncMock(return_value=ProbeResult(True)))
+                               probe)
             async with control.control_server("INFO",socket,m.recheck):
                 result=await asyncio.to_thread(control_cli.request,"recheck-host",path=socket,alias="demo-node-a")
                 self.assertEqual(result["host"]["status"],"active")
+                self.assertIs(result["host"]["recheck_ok"], True)
+                probe.return_value = ProbeResult(False, "connection_failed")
+                failed = await asyncio.to_thread(control_cli.request,"recheck-host",path=socket,alias="demo-node-a")
+                self.assertEqual(failed["host"]["status"], "active")
+                self.assertIs(failed["host"]["recheck_ok"], False)
                 with self.assertRaises(ValueError):
                     await asyncio.to_thread(control_cli.request,"recheck-host",path=socket,alias="retired")
                 with patch.object(control_cli,"request",return_value=result), patch("builtins.print"):
                     self.assertEqual(control_cli.main(["recheck-host","demo-node-a"]),0)
-                    result["host"]["status"]="offline"
+                    with patch.object(control_cli, "request", return_value=failed):
+                        self.assertEqual(control_cli.main(["recheck-host","demo-node-a"]),1)
+                    result["host"].pop("recheck_ok")
                     self.assertEqual(control_cli.main(["recheck-host","demo-node-a"]),1)

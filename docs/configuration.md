@@ -190,8 +190,11 @@ operations use cached readiness, rechecked before dispatch and each batch step
 or file call. No monitoring probe creates an approval grant.
 The Console connection indicator reports aggregate configured host health.
 
-Run ssh-mcp-ctl recheck-host ALIAS inside the service to retry immediately
-and clear a password suspension. In standalone deployments the local control
+Run ssh-mcp-ctl recheck-host ALIAS inside the service to retry immediately.
+A suspended password gets one explicitly authorized verification attempt;
+suspension clears only after success. The returned recheck_ok boolean and
+CLI exit status report the live verification result, not cached eligibility
+(which still follows the stale threshold). In standalone deployments the local control
 socket can be enabled using SSH_CONTROL_SOCKET pointing to the default
 /run/ssh-mcp/control.sock in a writable service-owned mode-0700 directory.
 Only authorized fixed probes can run; no arbitrary command or grant is exposed.

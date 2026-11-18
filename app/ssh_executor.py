@@ -723,7 +723,7 @@ class SSHExecutor:
         async with self._global, self._semaphores[alias]:
             # A real command may have rejected a password while capacity was
             # being acquired. Never resume its suspension implicitly.
-            if kind == "sudo" and self.readiness.password_suspended(alias):
+            if kind == "sudo" and not self.readiness.password_probe_permitted(alias):
                 return ProbeResult(False, "sudo_authentication_suspended")
             result = await self._run(
                 host, request, time.monotonic(), None,

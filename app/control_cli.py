@@ -1,4 +1,4 @@
-"""Change the running service's logging level through its private local socket."""
+"""Manage service logging and host rechecks through its private local socket."""
 from __future__ import annotations
 
 import argparse
@@ -53,8 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "recheck-host":
         host = result["host"]
         print(json.dumps(host, sort_keys=True))
-        return 0 if (host["status"] == "active"
-                     and (not host["sudo_configured"] or host["sudo_ready"])) else 1
+        return 0 if host.get("recheck_ok") is True else 1
     print(f"Configured: {result['configured']}\nEffective: {result['effective']}")
     return 0
 
