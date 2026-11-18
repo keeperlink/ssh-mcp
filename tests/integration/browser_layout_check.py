@@ -117,6 +117,7 @@ def readiness_snapshot() -> dict[str, object]:
         hosts["demo-node-a"].update(
             ssh_reason="connection_failed", sudo_ready=False,
             sudo_reason="sudo_authentication_suspended", degraded=True,
+            last_sudo_success="2020-01-01T00:00:00Z",
         )
         hosts["demo-node-b"].update(
             status="offline", sudo_ready=False, ssh_reason="ssh_readiness_stale",

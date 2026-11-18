@@ -611,6 +611,39 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         self.assertTrue(all(row["approval_status"] == "denied_explicit" for row in rows))
         self.assertTrue(all(row["status"] == "denied" for row in rows))
 
+    def test_readiness_refusal_after_operator_grant_preserves_approval(self):
+        from app.ssh_executor import ReadinessDenied
+
+        message = "Host readiness unavailable: ssh_readiness_stale"
+        specs = (
+            ("execute_command", {"server": "demo-node2", "argv": ["id"], "reason": "synthetic"}),
+            ("submit_job", {"server": "demo-node2", "argv": ["id"], "reason": "synthetic"}),
+            ("execute_commands", {"server": "demo-node2", "reason": "synthetic",
+                                  "commands": [{"argv": ["id"]}, {"argv": ["pwd"]}]}),
+            ("read_file", {"server": "demo-node2", "path": "/tmp/synthetic", "reason": "synthetic"}),
+        )
+        for index, (tool, arguments) in enumerate(specs):
+            with self.subTest(tool=tool), patch.object(
+                    self.executor, "require_ready", side_effect=ReadinessDenied(message)):
+                thread, box, identifier = self._start_call(
+                    tool=tool, arguments=arguments, conversation=f"readiness-{index}",
+                )
+                self.assertEqual(self._decision(identifier, "grant", "5m").status_code, 200)
+                response = self._result(thread, box)
+                self.assertTrue(response.get("isError"), response)
+                if tool == "execute_commands":
+                    result = json.loads(response["content"][0]["text"])
+                    self.assertEqual(result["failure_kind"], "host_readiness")
+                    self.assertEqual(result["error"], message)
+                    self.assertTrue(all(not step["attempted"] for step in result["steps"]))
+                rows = self.client.get("/console/api/jobs?time_range=all").json()["jobs"]
+                row = next(r for r in rows if r["conversation_id"] == f"readiness-{index}")
+                self.assertEqual(row["status"], "failed")
+                self.assertEqual(row["approval_status"], "approved_timed")
+                self.assertIsNone(row["started_at"])
+                self.assertEqual(self.executor.calls, 0)
+                self.assertEqual(self.executor.root_calls, 0)
+
     def test_approval_unavailable_is_durable_with_null_code_not_denied(self):
         from app import approvals as approvals_module
 

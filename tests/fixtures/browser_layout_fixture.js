@@ -545,6 +545,16 @@
     assert(hosts.textContent.includes("Recent failure · still eligible")
       && hosts.textContent.includes("Offline") && hosts.textContent.includes("sudo_authentication_suspended"),
       "Popup must distinguish transient failure, stale SSH, and suspended sudo");
+    const header = [...hosts.querySelectorAll("th")].map(th => th.textContent);
+    const sshColumn = header.indexOf("Last SSH success");
+    const sudoColumn = header.indexOf("Last sudo success");
+    const hostRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-node-a");
+    const plainRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-sandbox");
+    assert(sshColumn >= 0 && sudoColumn >= 0
+      && hostRow.cells[sudoColumn].textContent === new Date("2020-01-01T00:00:00Z").toLocaleString()
+      && hostRow.cells[sshColumn].textContent !== hostRow.cells[sudoColumn].textContent
+      && plainRow.cells[sudoColumn].textContent === "N/A",
+      "Readiness popup must distinguish last successful SSH and sudo checks");
     const bounds = panel.getBoundingClientRect();
     assert(bounds.left >= 0 && bounds.right <= innerWidth + 1,
       "Readiness popup must fit within the viewport");

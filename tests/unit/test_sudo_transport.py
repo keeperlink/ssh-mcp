@@ -28,6 +28,14 @@ PASSWORD = "synthetic-test-sudo-password-no-production"
 ROOT_MARKER = re.compile(r"SSH-MCP-ROOT-START:[0-9a-f]{32}\Z")
 
 
+def _remote_sudo(raw: str) -> list[str]:
+    remote = shlex.split(raw)
+    if remote == ["/usr/bin/id", "-un"]:
+        return remote
+    assert remote[:2] == ["LC_ALL=C", "/usr/bin/sudo"], remote
+    return remote[1:]
+
+
 def _remote_token(remote: list[str]) -> str:
     return remote[13]  # sudo explicitly includes "-u root".
 
@@ -137,9 +145,9 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
 
         async def spawn(*args, **kwargs):
             calls.append(list(args))
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             self.assertEqual(remote[:10], [
-                "sudo", "-S", "-k", "-p", "", "-H", "-u", "root", "--", "/bin/sh",
+                "/usr/bin/sudo", "-S", "-k", "-p", "", "-H", "-u", "root", "--", "/bin/sh",
             ])
             self.assertEqual(remote[10], "-c")
             self.assertEqual(remote[11], _ROOT_WRAPPER)
@@ -188,7 +196,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         processes = []
 
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             if remote == ["/usr/bin/id", "-un"]:
                 self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
                 calls.append("identity")
@@ -219,6 +227,8 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(monitor.sudo_ready("test"))
             self.assertEqual(bytes(processes[-1].stdin.content), PASSWORD.encode() + b"\n")
             safety_error = b"gateway is not in the sudoers file.\n"
+            self.assertTrue(await monitor.check("test"))
+            safety_error = b"Sorry, user gateway is not allowed to run sudo on fixture.\n"
             self.assertTrue(await monitor.check("test"))
             safety_error = b"sudo: must have a tty\n"
             self.assertFalse(await monitor.check("test"))
@@ -257,6 +267,92 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls, ["identity", "safety"])
             self.assertFalse(plain.readiness.sudo_ready("test"))
 
+    async def test_confirmed_passwordless_root_latches_before_channel_closes(self):
+        from app.readiness import ReadinessSettings
+
+        executor = SSHExecutor(
+            {"test": self.host}, enabled=True, sudo_passwords={"test": PASSWORD},
+            readiness_settings=ReadinessSettings(authorized=True, timeout_seconds=1),
+        )
+        monitor = executor.readiness
+        unsafe = False
+        processes = []
+        marker_seen = asyncio.Event()
+        original = monitor.mark_passwordless_root
+
+        def latch(alias):
+            original(alias)
+            marker_seen.set()
+
+        async def spawn(*args, **kwargs):
+            remote = _remote_sudo(args[-1])
+            if remote == ["/usr/bin/id", "-un"]:
+                return SyntheticProcess(b"gateway\n", b"", 0)
+            if remote[1] == "-n" and not unsafe:
+                return SyntheticProcess(b"", b"sudo: a password is required\n", 1)
+            token = _remote_token(remote)
+            proc = SyntheticProcess(_root_stdout(token, b"0\n"), _root_stderr(token), 0,
+                                    blocked=unsafe)
+            processes.append(proc)
+            return proc
+
+        with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn), \
+                patch.object(monitor, "mark_passwordless_root", side_effect=latch):
+            self.assertTrue(await monitor.check("test", privileged=True))
+            unsafe = True
+            task = asyncio.create_task(monitor.check("test"))
+            await asyncio.wait_for(marker_seen.wait(), .5)
+            self.assertFalse(task.done())
+            self.assertFalse(monitor.active("test"))
+            self.assertFalse(monitor.sudo_ready("test"))
+            self.assertEqual(monitor.denial("test"), "passwordless_root")
+            self.assertFalse(await task)
+            self.assertTrue(processes[-1].killed)
+            self.assertEqual(monitor.detail("test")["ssh_reason"], "passwordless_root")
+            unsafe = False
+            self.assertTrue(await monitor.check("test", privileged=True))
+
+    async def test_delayed_sudo_channel_does_not_send_suspended_password(self):
+        from app.readiness import ReadinessSettings
+
+        executor = SSHExecutor(
+            {"test": self.host}, enabled=True, sudo_passwords={"test": PASSWORD},
+            readiness_settings=ReadinessSettings(authorized=True),
+        )
+        monitor = executor.readiness
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                connecting = asyncio.Event()
+                release = asyncio.Event()
+                processes = []
+                if explicit:
+                    monitor.suspend("test")
+
+                async def spawn(*args, **kwargs):
+                    remote = _remote_sudo(args[-1])
+                    if remote == ["/usr/bin/id", "-un"]:
+                        return SyntheticProcess(b"gateway\n", b"", 0)
+                    if remote[1] == "-n":
+                        return SyntheticProcess(b"", b"sudo: a password is required\n", 1)
+                    connecting.set()
+                    await release.wait()
+                    proc = SyntheticProcess(b"", b"sudo: no password was provided\n", 1)
+                    processes.append(proc)
+                    return proc
+
+                with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+                    task = asyncio.create_task(monitor.recheck("test") if explicit else
+                                               monitor.check("test", privileged=True))
+                    await asyncio.wait_for(connecting.wait(), 1)
+                    monitor.suspend("test")
+                    release.set()
+                    result = await task
+                    self.assertFalse(result["recheck_ok"] if explicit else result)
+                    self.assertEqual(len(processes), 1)
+                    self.assertEqual(bytes(processes[0].stdin.content), b"")
+                    self.assertTrue(processes[0].stdin.closed)
+                    self.assertTrue(monitor.password_suspended("test"))
+
     async def test_public_execution_is_still_disabled(self):
         with patch("app.ssh_executor._spawn_ssh_command") as spawn:
             with self.assertRaisesRegex(SSHDenied, "not enabled"):
@@ -294,7 +390,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         # transport. An incorrect full START token made the live disposable
         # SSH fixture report root_unconfirmed after exit 0.
         async def spawn(*args, **_kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             self.assertRegex(token, ROOT_MARKER)
             assert remote[14:17] == ["python3", "-c", _ROOT_EXEC]
@@ -338,7 +434,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         })
         result, calls, _ = await self.run_synthetic(request=request)
         self.assertEqual(result.status, "succeeded")
-        remote = shlex.split(calls[0][-1])
+        remote = _remote_sudo(calls[0][-1])
         self.assertEqual(remote[19:21], ["bash", "-lc"])
         self.assertIn("set -euo pipefail\n" + script, remote)
         self.assertEqual(remote[-2:], ["_", "a; $(id) 'quoted'"])
@@ -380,7 +476,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         async def capture(stream: str, data: bytes):
             streamed.append((stream, data))
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             marker = _framed_root_marker(token)
             proc = SyntheticProcess(_root_stdout(token, b"real stdout"), b"", 0)
@@ -411,7 +507,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         launches: list[tuple[list[str], int]] = []
         async def spawn(*args, **kwargs):
             launches.append((list(args), kwargs["stdin"]))
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             self.assertEqual(remote[14:17], ["python3", "-c", _ROOT_EXEC])
             self.assertEqual(remote[18], "/root/synthetic-private-cwd")
@@ -440,8 +536,8 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sudoers_echo_of_rejected_argv_cannot_spoof_root_marker(self):
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
-            self.assertEqual(remote[0], "sudo")
+            remote = _remote_sudo(args[-1])
+            self.assertEqual(remote[0], "/usr/bin/sudo")
             # sudo's policy denial quotes rejected argv, including the
             # unframed token, without ever starting the root wrapper.
             echoed = ("sudo: gateway is not allowed to execute "
@@ -491,7 +587,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stdin_close_race_and_ssh_spawn_failure_remain_sanitized(self):
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             proc = SyntheticProcess(_root_stdout(token), _root_stderr(token), 0)
             proc.stdin = SyntheticStdin(broken_close=True)
@@ -544,7 +640,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                 received.set()
 
         async def spawn(*args, **kwargs):
-            token = _remote_token(shlex.split(args[-1]))
+            token = _remote_token(_remote_sudo(args[-1]))
             process = SyntheticProcess(_root_stdout(token), b"", 0, blocked=True)
             process.stderr = asyncio.StreamReader()
             # No EOF: the root process is still running when it times out.
@@ -573,7 +669,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                 streamed.append(chunk)
 
         async def spawn(*args, **kwargs):
-            token = _remote_token(shlex.split(args[-1]))
+            token = _remote_token(_remote_sudo(args[-1]))
             nonce = token.removeprefix(_ROOT_MARKER_PREFIX)
             failed = _framed_root_marker(_ROOT_FAILED_PREFIX + nonce)
             process = SyntheticProcess(_root_stdout(token), b"", 127)
@@ -611,7 +707,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdout_over_limit_after_marker_is_bounded(self):
         self.executor._output_bytes = 3
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             proc = SyntheticProcess(_root_stdout(token), _root_stderr(token), 0)
             proc.stdout = asyncio.StreamReader()
@@ -631,7 +727,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_interleaved_pre_and_post_marker_stdout_is_preserved(self):
         async def spawn(*args, **kwargs):
-            remote = shlex.split(args[-1])
+            remote = _remote_sudo(args[-1])
             token = _remote_token(remote)
             proc = SyntheticProcess(b"", b"", 0)
             proc.stdout = asyncio.StreamReader()

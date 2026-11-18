@@ -175,7 +175,7 @@
       state.readiness ? state.readiness.degraded_count + " degraded host(s)" : "Host readiness unavailable";
     const table = document.createElement("table");
     const header = table.insertRow();
-    for (const caption of ["Host", "SSH", "Sudo", "Last check", "Last success", "Reason"]) {
+    for (const caption of ["Host", "SSH", "Sudo", "Last check", "Last SSH success", "Last sudo success", "Reason"]) {
       const th = document.createElement("th");
       th.textContent = caption;
       header.append(th);
@@ -189,6 +189,7 @@
         !host.sudo_configured ? "N/A" : host.sudo_ready ? "Ready" : "Unavailable",
         time(host.last_check),
         time(host.last_success),
+        host.sudo_configured ? time(host.last_sudo_success) : "N/A",
         [host.ssh_reason, host.sudo_configured ? host.sudo_reason : ""].filter(Boolean).join(" · ") || "—"
       ];
       for (const value of values) row.insertCell().textContent = value;

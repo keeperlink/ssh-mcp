@@ -135,6 +135,9 @@ class ReadinessMonitor:
     def password_suspended(self, alias: str) -> bool:
         return self._states[alias].suspended
 
+    def password_generation(self, alias: str) -> int:
+        return self._states[alias].suspension_generation
+
     def password_probe_permitted(self, alias: str) -> bool:
         """Permit only the scoped explicit retry, without lifting suspension."""
         state = self._states[alias]
@@ -193,8 +196,15 @@ class ReadinessMonitor:
             # Never record an exception message or raw SSH output.
             return ProbeResult(False, "probe_failed")
 
+    def mark_passwordless_root(self, alias: str) -> None:
+        """Latch verified unsafe evidence before transport cleanup can time out."""
+        self._ssh_failed(alias, ProbeResult(False, "passwordless_root", unsafe=True))
+
     def _ssh_failed(self, alias: str, result: ProbeResult) -> None:
         state = self._states[alias]
+        # Incomplete subsequent probes must not erase confirmed unsafe evidence.
+        if state.unsafe and not result.unsafe:
+            return
         state.ssh_reason = result.reason or "probe_failed"
         if result.unsafe:
             if not state.unsafe:

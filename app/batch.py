@@ -22,7 +22,7 @@ from .approval_status import approval_status_context, decode
 from .contracts import ExecuteCommandsRequest
 from .jobs import JobManager, JobStore
 from .file_audit import rebuild_history_view
-from .ssh_executor import SSHDenied, SSHExecutor, SSHResult
+from .ssh_executor import ReadinessDenied, SSHDenied, SSHExecutor, SSHResult
 
 MAX_BATCH_RESPONSE_BYTES = min(262144, config.SSH_OUTPUT_LIMIT_BYTES)
 # Reserve at least 64 KiB of the overall response/output budget for metadata,
@@ -63,6 +63,7 @@ class BatchStore:
                     timeout_seconds INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     failure_kind TEXT,
+                    error TEXT,
                     failed_step INTEGER,
                     failed_field TEXT,
                     created_at REAL NOT NULL,
@@ -89,6 +90,8 @@ class BatchStore:
                 );
             """)
             existing = {row["name"] for row in db.execute("PRAGMA table_info(command_batches)")}
+            if "error" not in existing:
+                db.execute("ALTER TABLE command_batches ADD COLUMN error TEXT")
             if "approval_status" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN approval_status INTEGER")
             if "conversation_id" not in existing:
@@ -362,16 +365,17 @@ class BatchStore:
 
     def finish(self, batch_id: str, status: str, *,
                failure_kind: str | None = None, failed_step: int | None = None,
-               failed_field: str | None = None, effective_cwd: str | None = None) -> None:
+               failed_field: str | None = None, effective_cwd: str | None = None,
+               error: str | None = None) -> None:
         if status not in BATCH_TERMINAL:
             raise ValueError("Invalid batch outcome")
         with self.jobs._connect() as db:
             db.execute(
-                """UPDATE command_batches SET status=?,failure_kind=?,failed_step=?,
+                """UPDATE command_batches SET status=?,failure_kind=?,failed_step=?,error=?,
                    failed_field=?,effective_cwd=COALESCE(?,effective_cwd),
                    updated_at=?,ended_at=?
                    WHERE id=? AND status IN ('queued','running')""",
-                (status, failure_kind, failed_step, failed_field, effective_cwd,
+                (status, failure_kind, failed_step, error, failed_field, effective_cwd,
                  time.time(), time.time(), batch_id),
             )
 
@@ -422,6 +426,7 @@ class BatchStore:
             "conversation_id": batch["conversation_id"],
             "reason": batch["reason"],
             "status": batch["status"], "failure_kind": batch["failure_kind"],
+            **({"error": batch["error"]} if batch["error"] else {}),
             "failed_step": batch["failed_step"],
             "failed_field": batch["failed_field"],
             "requested_cwd": batch["requested_cwd"],
@@ -542,6 +547,10 @@ class BatchManager:
                         batch_id, "timed_out", failure_kind="overall_timeout",
                         failed_field="cwd",
                     )
+                    return
+                except ReadinessDenied as exc:
+                    self.store.finish(batch_id, "rejected", failure_kind="host_readiness",
+                                      error=str(exc))
                     return
                 except SSHDenied:
                     self.store.finish(batch_id, "rejected", failure_kind="cwd_denied",

@@ -114,6 +114,10 @@ If using this **instead of** basic/hardened:
    `172.30.244.0/28`, `172.30.244.8/29`, `172.30.244.2`.
 3. In `service.env` set `MCP_ISSUER` and allowed hosts to that
    public HTTPS origin; replace invalid placeholder secrets.
+   After verifying the SSH account, pinned host key and sudo policy, set
+   SSH_READINESS_AUTHORIZED=true in the private service.env to authorize the
+   fixed readiness probes (see [Host readiness](configuration.md#host-readiness)).
+   Wait for the alias to become active before the first SSH command.
    Open only TCP 80/443 for certificate issuance and HTTPS.
 4. From the repository root:
 

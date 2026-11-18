@@ -28,7 +28,7 @@ from starlette.requests import Request
 
 from . import config
 from .approvals import ApprovalManager
-from .approval_status import ApprovalRejected, approval_status_context
+from .approval_status import ApprovalCode, ApprovalRejected, approval_status_context
 from .approval_preview import approval_summary, approval_steps
 from .conversation_access import (
     conversation_id_context, conversation_id_from_request, require_host_access,
@@ -507,9 +507,17 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     assert files is not None
                     files.audit.settle_approval(audit_id, code, denied=denied)
 
+            approved = False
+
+            def record_approval(code: ApprovalCode) -> None:
+                nonlocal approved
+                settle(int(code))
+                approved = True
+                approval_status_context.set(int(code))
+
             sid = (token.claims or {}).get("sid")
             try:
-                approval_code = await require_host_access(
+                await require_host_access(
                     executor, actor, server_name,
                     session_id=sid if isinstance(sid, str) else None,
                     conversation_id=conversation_id_context.get(),
@@ -525,10 +533,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         if _ctx is not None and isinstance(_ctx.request, Request)
                         else None
                     ),
-                    privileged=privileged,
+                    privileged=privileged, on_approved=record_approval,
                 )
-                settle(int(approval_code))
-                approval_status_context.set(int(approval_code))
             except ApprovalRejected as rejected:
                 try:
                     settle(rejected.approval_code, denied=True)
@@ -541,7 +547,34 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "steps_attempted": 0,
                     }, is_error=True)
                 return _error("SSH host access denied or requires operator approval")
-            except (SSHDenied, ValidationError, ValueError) as exc:
+            except ReadinessDenied as exc:
+                try:
+                    if approved:
+                        assert audit_id is not None
+                        if command_request is not None and jobs is not None:
+                            jobs.store.reject_unscheduled(audit_id, str(exc))
+                        elif batch_request is not None and batches is not None:
+                            batches.store.finish(audit_id, "rejected",
+                                                 failure_kind="host_readiness", error=str(exc))
+                            data = batches.get(actor, audit_id)
+                            if data is None:
+                                raise RuntimeError("Batch audit unavailable")
+                            return _result(data, is_error=True)
+                        else:
+                            assert files is not None
+                            files.audit.reject_unscheduled(audit_id, error_code="host_readiness")
+                    else:
+                        settle(None, denied=True)
+                except (sqlite3.DatabaseError, RuntimeError, OSError, ValueError):
+                    return _error("Durable SSH approval audit unavailable")
+                if params.name == "execute_commands":
+                    return _result({
+                        "status": "rejected", "failure_kind": "host_readiness",
+                        "failed_step": None, "failed_field": None,
+                        "steps_attempted": 0, "error": str(exc),
+                    }, is_error=True)
+                return _error(str(exc))
+            except (SSHDenied, ValidationError, ValueError):
                 # Manager missing/full/shutdown is operational failure, not
                 # operator Deny; store a terminal row with NULL approval code.
                 try:
@@ -553,10 +586,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "status": "rejected", "failure_kind": "authorization",
                         "failed_step": None, "failed_field": "server",
                         "steps_attempted": 0,
-                        **({"error": str(exc)} if isinstance(exc, ReadinessDenied) else {}),
                     }, is_error=True)
-                return _error(str(exc) if isinstance(exc, ReadinessDenied)
-                              else "SSH host access denied or requires operator approval")
+                return _error("SSH host access denied or requires operator approval")
             except asyncio.CancelledError:
                 # Request cancellation while awaiting approval never starts SSH.
                 settle(None, denied=True)

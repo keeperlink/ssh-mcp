@@ -175,6 +175,10 @@ SSH_READINESS_ prefix):
 
 Fixed probes verify the pinned SSH identity, then run the fixed sudo wrapper
 noninteractively with cached credentials ignored and no password provided.
+The supported target sudo executable is /usr/bin/sudo. The fixed launcher
+uses LC_ALL=C for deterministic diagnostics, including password rejection;
+ordinary root command execution retains the existing sanitized environment.
+Verify the installed absolute executable during host onboarding.
 Only an explicit password requirement or policy denial confirms this safety
 check; passwordless root execution disables the host immediately. Review the
 effective sudo policy at onboarding and after policy changes: one fixed probe

@@ -104,6 +104,14 @@ namespaces, account for the daemon's UID mapping without weakening
 SSH checks. The state volume is initialized from the UID-10001
 image directory.
 
+After verifying the dedicated account, host-key pin and sudo policy, explicitly
+authorize the service's fixed readiness probes: set
+\`SSH_READINESS_AUTHORIZED=true\` in your private \`service.env\`.
+The supplied example deliberately defaults to disabled. See
+[Host readiness](configuration.md#host-readiness) for the required policy and
+probe settings. Wait for the configured alias to become active in the Console
+or \`list_servers\` before your first SSH command.
+
 ## 3. Validate and start the single-service example
 
 From the repository root, after preparing your private configuration in

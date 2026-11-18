@@ -43,7 +43,8 @@ class NativeChannelFixture(unittest.IsolatedAsyncioTestCase):
         async def handle(process):
             argv = shlex.split(process.command or "")
             self.commands.append(process.command or "")
-            if argv and argv[0] == "sudo":
+            if argv[:2] == ["LC_ALL=C", "/usr/bin/sudo"]:
+                argv = argv[1:]
                 self.assertEqual(argv[11], _ROOT_WRAPPER)
                 token = argv[13]
                 self.assertTrue(token.startswith(_ROOT_MARKER_PREFIX))
