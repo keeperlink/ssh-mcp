@@ -272,9 +272,12 @@ def _usable_sudo_password(password: Any) -> bool:
 
 def _supplied_password_rejected(diagnostic: bytes) -> bool:
     message = diagnostic.decode("utf-8", errors="replace").lower()
-    return any(word in message for word in (
+    return (any(word in message for word in (
         "incorrect password", "authentication failure", "sorry, try again",
-    ))
+        # sudo-rs PAM retry warning (LC_ALL=C).
+        "authentication failed, try again.",
+    )) or re.search(r"\bmaximum [1-9][0-9]* incorrect authentication attempts\b", message)
+        is not None)
 
 
 def _no_password_failure_kind(diagnostic: bytes) -> str:
@@ -298,8 +301,7 @@ def _sudo_failure_kind(diagnostic: bytes) -> str:
         "not allowed to run sudo", "command not allowed", "not permitted to run", "policy plugin",
     )):
         return "sudo_authorization"
-    if any(word in message for word in (
-        "incorrect password", "authentication failure", "sorry, try again",
+    if _supplied_password_rejected(diagnostic) or any(word in message for word in (
         "a password is required", "no password was provided",
     )):
         return "sudo_authentication"
@@ -981,15 +983,21 @@ class SSHExecutor:
             nonlocal challenge_seen
             # The marker must be emitted in the bounded pre-root stream,
             # not supplied by a caller, a root command or an error after it.
-            if pre_root.rstrip().endswith(prompt_bytes):
+            # Traditional sudo renders the custom prompt verbatim. sudo-rs
+            # renders "[sudo: <custom prompt>] <PAM prompt>". Match the
+            # nonce in these exact prompt positions, not in arbitrary
+            # diagnostics (e.g. an echoed rejected argument vector).
+            line = pre_root.rstrip().rsplit(b"\n", 1)[-1]
+            native_prefix = b"[sudo: " + prompt_bytes + b"]"
+            if line == prompt_bytes or line == native_prefix or line.startswith(native_prefix + b" "):
                 challenge_seen = True
                 challenge_event.set()
 
-        async def send_challenge_password(writer: ByteWriter, password: str) -> None:
+        def sent() -> None:
             nonlocal password_sent
-            def sent() -> None:
-                nonlocal password_sent
-                password_sent = True
+            password_sent = True
+
+        async def send_challenge_password(writer: ByteWriter, password: str) -> None:
             def permitted() -> bool:
                 return challenge_seen and not unsafe_root and permit_password_write()
             await challenge_event.wait()
@@ -1052,7 +1060,7 @@ class SSHExecutor:
             assert process.stdin is not None
             tasks.append(asyncio.create_task(
                 send_challenge_password(process.stdin, sudo_password) if challenge_password
-                else _send_sudo_password(process.stdin, sudo_password, permit_password_write)
+                else _send_sudo_password(process.stdin, sudo_password, permit_password_write, sent)
             ))
         try:
             completed = await asyncio.wait_for(
@@ -1188,7 +1196,7 @@ class SSHExecutor:
                         host.alias, "command_error", None, "", "Sudo rejected execution",
                         time.monotonic() - start, effective_cwd=effective_cwd,
                         root_started=None, failure_kind=kind,
-                        password_rejected=(not challenge_password or password_sent)
+                        password_rejected=password_sent
                         and _supplied_password_rejected(bytes(diagnostic)),
                     )
             return SSHResult(
@@ -1219,9 +1227,7 @@ class SSHExecutor:
                 else "Root execution could not be confirmed",
                 time.monotonic() - start, effective_cwd=effective_cwd,
                 root_started=None, failure_kind=kind,
-                password_rejected=(sudo_password is not None
-                                   and (not challenge_password or password_sent)
-                                   and _supplied_password_rejected(bytes(diagnostic))),
+                password_rejected=(password_sent and _supplied_password_rejected(bytes(diagnostic))),
             )
         if marker is not None and setup_failed[0]:
             # A root-side CWD or execvp error is NOT the requested command's
