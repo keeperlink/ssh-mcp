@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .contracts import ExecuteCommandRequest
+from .client_identity import client_id_context
 from .conversation_access import conversation_id_context
 from .file_audit import init_file_schema
 from .approval_status import approval_status_context, decode
@@ -193,6 +194,7 @@ class JobStore:
                 ("root_started", "INTEGER"),
                 ("failure_kind", "TEXT NOT NULL DEFAULT 'none'"),
                 ("approval_status", "INTEGER"),
+                ("client_id", "TEXT"),
             ):
                 if name not in existing:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
@@ -302,15 +304,15 @@ class JobStore:
             db.execute(
                 """INSERT INTO jobs
                 (id,actor,server,command,argv_count,command_sha256,privileged,ssh_username,
-                 status,created_at,updated_at,mode,story_id,conversation_id,request_json,approval_status)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 status,created_at,updated_at,mode,story_id,conversation_id,request_json,approval_status,client_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, actor, request.server, _safe_command(request.argv),
                  len(request.argv), fingerprint, int(request.privileged), username,
                  "awaiting_approval" if pending_approval else "queued",
                  now, now, mode, request.story_id,
                  conversation_id_context.get(),
                  json.dumps(request.model_dump(exclude_none=True), separators=(",", ":")),
-                 approval_status_context.get()),
+                 approval_status_context.get(), client_id_context.get()),
             )
         return job_id
 

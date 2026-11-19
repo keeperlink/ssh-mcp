@@ -950,15 +950,15 @@ class BrowserTests(unittest.TestCase):
         filters = page.text.split('<form class="filters" id="filters" role="search">', 1)[1].split("</form>", 1)[0]
         names = re.findall(r'name="([^"]+)"', filters)
         self.assertEqual(names, [
-            "time_range", "story_id", "host",
+            "time_range", "agent", "story_id", "host",
             "conversation_id", "command", "mode", "status",
         ])
         self.assertNotIn(">Apply</button>", page.text)
-        self.assertEqual(page.text.count('<label class="filter-'), 7)
+        self.assertEqual(page.text.count('<label class="filter-'), 8)
         self.assertIn('maxlength="64"', filters)
         self.assertIn('maxlength="80"', filters)
         columns = re.findall(r'<col class="([^"]+)"', page.text)
-        self.assertEqual(columns, ["col-time", "col-story", "col-host", "col-command",
+        self.assertEqual(columns, ["col-time", "col-agent", "col-story", "col-host", "col-command",
                                    "col-mode", "col-status", "col-duration"])
         self.assertIn('id="command-tooltip"', page.text)
         self.assertIn('role="tooltip" hidden', page.text)
@@ -982,7 +982,8 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("ssh-mcp-console-technical-open", self.client.get(
             "/console/assets/console.js").text)
         self.assertIn("table-layout:fixed", css)
-        self.assertIn("min-width:760px", css)
+        self.assertIn("min-width:865px", css)
+        self.assertIn(".jobs-table.relative-time .col-time{width:90px}", css)
         self.assertIn("brand-version{font-size:10px", css)
         self.assertIn(".command-cell:focus-visible", css)
         self.assertIn(".command-tooltip[hidden]{display:none}", css)

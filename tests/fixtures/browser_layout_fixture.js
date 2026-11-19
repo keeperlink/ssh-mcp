@@ -24,7 +24,10 @@
     const summary = document.getElementById("page-summary").getBoundingClientRect();
     const filters = document.getElementById("filters");
     const labels = [...filters.querySelectorAll(":scope > label")];
-    assert(labels.length === 7, "Expected seven History filter controls");
+    assert(labels.length === 8, "Expected eight History filter controls");
+    assert(labels.map(label => label.querySelector("input,select").name).join(",")
+      === "time_range,agent,story_id,host,conversation_id,command,mode,status",
+      "Agent filter must follow Time and precede Story");
     const positions = labels.map((label) => label.getBoundingClientRect());
     assert(positions.every((rect) => Math.abs(rect.top - positions[0].top) <= 2),
       "History filters must stay on one row without wrapping Mode/Status");
@@ -63,6 +66,55 @@
       assert(rect.top >= footer.top - 1 && rect.bottom <= footer.bottom + 1,
         name + " outside footer bounds");
     }
+  }
+  async function checkAgentAndTime() {
+    const table = document.getElementById("history-table");
+    const toggle = document.getElementById("time-toggle");
+    const header = table.querySelector("thead th");
+    const width = () => header.getBoundingClientRect().width;
+    const first = () => document.querySelector("#job-rows tr[data-id]");
+    if (toggle.getAttribute("aria-pressed") === "true") toggle.click();
+    const absoluteWidth = width();
+    const originalFetch = window.fetch;
+    const reloads = [];
+    window.fetch = (...args) => {
+      if (String(args[0]).startsWith("/console/api/jobs?")) reloads.push(args[0]);
+      return originalFetch(...args);
+    };
+    try {
+      toggle.click();
+      assert(table.classList.contains("relative-time") && width() < absoluteWidth - 30,
+        "Relative Time column must contract");
+      assert(/^[0-9]+[smhd] ago$/.test(first().cells[0].textContent),
+        "History must render relative time");
+      assert(Math.abs(first().cells[0].getBoundingClientRect().width - width()) < 2,
+        "Relative Time header/body alignment");
+      toggle.click();
+      assert(!table.classList.contains("relative-time") && Math.abs(width() - absoluteWidth) < 2,
+        "Absolute Time width must restore");
+      assert(reloads.length === 0, "Time toggle must not reload History");
+    } finally {
+      window.fetch = originalFetch;
+    }
+    const filter = document.getElementById("filters").elements.namedItem("agent");
+    assert(table.querySelectorAll("thead th")[1].textContent === "Agent",
+      "Agent column must follow Time");
+    filter.value = "https://agent-b.example.org/client.json";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent.endsWith("of 2"),
+      "Agent filter selected");
+    assert([...document.querySelectorAll("#job-rows tr[data-id]")].every(row =>
+      row.cells[1].textContent === "Agent B"), "Agent filter must select only matching rows");
+    first().click();
+    await waitFor(() => document.getElementById("detail-meta").textContent.includes("AgentAgent B"),
+      "Agent shown in detail");
+    filter.value = "";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent.includes("of 250"),
+      "Agent filter cleared");
+    first().click();
+    await waitFor(() => document.getElementById("detail").dataset.jobId ===
+      "file-sky238-upload", "restore initial file detail");
   }
   function verifyStoryIdTruncation() {
     const full = "owner/repo#12345678901234567890";
@@ -553,6 +605,35 @@
       && colored(readinessRow("demo-node-a").cells[2], "readiness-good", "rgb(24, 116, 75)")
       && colored(readinessRow("demo-sandbox").cells[2], "readiness-neutral", "rgb(100, 117, 139)"),
       "Healthy SSH and sudo must be green; N/A must stay neutral");
+    // Hold a normal poll in flight to prove the age advances from the
+    // local timer rather than requiring a new readiness response.
+    const originalFetch = window.fetch;
+    const originalNow = Date.now;
+    let resumePoll;
+    window.fetch = (...args) => {
+      if (!resumePoll && String(args[0]).startsWith("/console/api/changes?"))
+        return new Promise(resolve => {
+          resumePoll = () => resolve(originalFetch(...args));
+        });
+      return originalFetch(...args);
+    };
+    try {
+      await waitFor(() => resumePoll, "readiness poll paused");
+      const timestamp = Date.parse(readinessRow("demo-node-a").cells[3].dataset.timestamp);
+      assert(Number.isFinite(timestamp), "Readiness timestamp must preserve source time");
+      for (const [seconds, label] of [[25, "25s ago"], [60, "1m ago"],
+                                     [3600, "1h ago"], [86400, "1d ago"]]) {
+        Date.now = () => timestamp + seconds * 1000;
+        await waitFor(() => readinessRow("demo-node-a").cells[3].textContent === label,
+          "locally refreshed readiness " + label);
+      }
+      assert(readinessRow("demo-node-a").cells[3].title === new Date(timestamp).toLocaleString(),
+        "Absolute readiness timestamp must be accessible on hover");
+    } finally {
+      Date.now = originalNow;
+      window.fetch = originalFetch;
+      if (resumePoll) resumePoll();
+    }
     wrap.dispatchEvent(new MouseEvent("mouseleave"));
     assert(panel.hidden, "Unpinned popup must close when pointer leaves");
     connection.click();
@@ -581,7 +662,8 @@
     const hostRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-node-a");
     const plainRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-sandbox");
     assert(sshColumn >= 0 && sudoColumn >= 0
-      && hostRow.cells[sudoColumn].textContent === new Date("2020-01-01T00:00:00Z").toLocaleString()
+      && /^\d+d ago$/.test(hostRow.cells[sudoColumn].textContent)
+      && hostRow.cells[sudoColumn].title === new Date("2020-01-01T00:00:00Z").toLocaleString()
       && hostRow.cells[sshColumn].textContent !== hostRow.cells[sudoColumn].textContent
       && plainRow.cells[sudoColumn].textContent === "N/A",
       "Readiness popup must distinguish last successful SSH and sudo checks");
@@ -883,7 +965,7 @@
       await waitFor(() => layer.hidden, "Expired approval remains in modal");
       send(19, [{ ...requests[0], id: "synthetic-headerless",
         conversation_id: null, scope_id: null, conversation_scope_id: null, timed_grants_allowed: false,
-        client_id: "https://example.invalid/client.json",
+        client_id: "https://example.invalid/client.json", agent: "Agent A",
         expires_at: Date.now() / 1000 + 28 }]);
       await waitFor(() => !layer.hidden, "Headerless approval appears");
       assert(duration("once").checked && !duration("once").disabled
@@ -891,7 +973,8 @@
       "Missing conversation must disable all timed grant choices");
       assert(!document.getElementById("approval-duration-warning").hidden
         && document.getElementById("approval-duration-warning").textContent.includes("conversation ID")
-        && document.getElementById("approval-client").textContent === "https://example.invalid/client.json",
+        && document.getElementById("approval-client").textContent === "Agent A"
+        && document.getElementById("approval-client").title === "https://example.invalid/client.json",
       "Headerless approval must explain the limitation and identify its client");
       grant.click();
       await waitFor(() => layer.hidden && posts.length === 9, "One-shot approval completes");
@@ -1104,6 +1187,7 @@
     await pause(160);
     assertVisibleControls();
     verifyStoryIdTruncation();
+    await checkAgentAndTime();
     await checkUnicodeStoryFilters();
     await checkMixedHistoryAndKeyboard();
     await checkConversationClickAndClear();

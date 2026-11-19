@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from . import config
+from .client_identity import client_id_context
 from .conversation_access import conversation_id_context
 from .approval_status import approval_status_context, decode
 from .contracts import ExecuteCommandsRequest
@@ -98,6 +99,8 @@ class BatchStore:
                 db.execute("ALTER TABLE command_batches ADD COLUMN conversation_id TEXT")
             if "privileged" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN privileged INTEGER NOT NULL DEFAULT 0")
+            if "client_id" not in existing:
+                db.execute("ALTER TABLE command_batches ADD COLUMN client_id TEXT")
             if "ssh_username" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN ssh_username TEXT")
             # Startup recovery never runs work again. A remote command might
@@ -185,8 +188,8 @@ class BatchStore:
                 """INSERT INTO command_batches(
                     id,actor,server,story_id,conversation_id,reason,requested_cwd,
                     strict_bash,privileged,ssh_username,stop_on_error,timeout_seconds,status,
-                    created_at,updated_at,total_steps,approval_status
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    created_at,updated_at,total_steps,approval_status,client_id
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (batch_id, actor, request.server, request.story_id,
                  conversation_id_context.get(), request.reason,
                  request.cwd, int(request.strict_bash), int(request.privileged), username,
@@ -194,7 +197,7 @@ class BatchStore:
                  request.timeout_seconds,
                  "awaiting_approval" if pending_approval else "queued",
                  now, now, len(request.commands),
-                 approval_status_context.get()),
+                 approval_status_context.get(), client_id_context.get()),
             )
             for index, step in enumerate(request.commands):
                 raw = json.dumps(step.argv, ensure_ascii=False, separators=(",", ":"))

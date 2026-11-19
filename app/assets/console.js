@@ -135,6 +135,7 @@
     const f = state.filters;
     if (f.privileged === "true" && (job.record_kind === "file" || job.privileged !== true))
       return false;
+    if (f.agent && (job.agent_key || "unknown") !== f.agent) return false;
     if (f.host && job.server !== f.host) return false;
     if (f.story_id) {
       const jobStory = String(job.story_id || "");
@@ -180,19 +181,26 @@
       th.textContent = caption;
       header.append(th);
     }
-    const time = (value) => value ? new Date(value).toLocaleString() : "—";
+
     for (const [alias, host] of Object.entries(state.readiness?.hosts || {})) {
       const row = table.insertRow();
       const values = [
         alias,
         host.status !== "active" ? "Offline" : host.ssh_reason ? "Recent failure · still eligible" : "Active",
         !host.sudo_configured ? "N/A" : host.sudo_ready ? "Ready" : "Unavailable",
-        time(host.last_check),
-        time(host.last_success),
-        host.sudo_configured ? time(host.last_sudo_success) : "N/A",
+        formatRelative(host.last_check),
+        formatRelative(host.last_success),
+        host.sudo_configured ? formatRelative(host.last_sudo_success) : "N/A",
         [host.ssh_reason, host.sudo_configured ? host.sudo_reason : ""].filter(Boolean).join(" · ") || "—"
       ];
       for (const value of values) row.insertCell().textContent = value;
+      for (const [column, timestamp] of [[3, host.last_check], [4, host.last_success],
+        [5, host.sudo_configured ? host.last_sudo_success : null]]) {
+        if (timestamp && Number.isFinite(Date.parse(timestamp))) {
+          row.cells[column].dataset.timestamp = timestamp;
+          row.cells[column].title = formatWhen(timestamp);
+        }
+      }
       row.cells[1].className = host.status !== "active" ? "readiness-bad"
         : host.ssh_reason ? "readiness-warning" : "readiness-good";
       row.cells[2].className = !host.sudo_configured ? "readiness-neutral"
@@ -201,6 +209,12 @@
     }
     $("readiness-hosts").replaceChildren(table);
   }
+  function refreshReadinessTimes() {
+    if ($("connection-details").hidden) return;
+    for (const cell of $("readiness-hosts").querySelectorAll("[data-timestamp]"))
+      cell.textContent = formatRelative(cell.dataset.timestamp);
+  }
+  setInterval(refreshReadinessTimes, 1000);
   const connection = $("connection");
   const wrap = $("connection-wrap");
   const details = $("connection-details");
@@ -277,15 +291,16 @@
     if (!["queued", "running"].includes(job.status)) state.cancelling.delete(job.id);
     row.replaceChildren();
     const cells = [
-      formatTableTime(job.created_at), tableStoryId(job.story_id), job.server,
+      formatTableTime(job.created_at), job.agent || "Unknown", tableStoryId(job.story_id), job.server,
       (job.command_preview || job.command || "—").split(/\r?\n/, 1)[0],
       modeName(job.mode), statusLabel(job.status), duration(job.elapsed_seconds)
     ];
     cells.forEach((value, index) => {
-      const td = make("td", index < 4 || index === 6 ? value : undefined,
-        index === 3 ? "mono" : index === 1 && job.story_id ? "story-id" : "");
-      if (index === 1 && job.story_id) td.setAttribute("title", job.story_id);
-      if (index === 3) {
+      const td = make("td", index < 5 || index === 7 ? value : undefined,
+        index === 4 ? "mono" : index === 2 && job.story_id ? "story-id" : "");
+      if (index === 1) td.setAttribute("title", value);
+      if (index === 2 && job.story_id) td.setAttribute("title", job.story_id);
+      if (index === 4) {
         td.classList.add("command-cell");
         if (job.record_kind !== "file" && job.privileged === true) {
           const shield = rootShield();
@@ -307,8 +322,8 @@
           if (event.key === "Enter") selectJob(job.id).catch(() => setConnection(false));
         });
       }
-      if (index === 4) td.append(badge(value, job.mode || "async"));
-      if (index === 5) {
+      if (index === 5) td.append(badge(value, job.mode || "async"));
+      if (index === 6) {
         const pending = state.cancelling.has(job.id);
         const status = badge(pending ? "Cancelling…" : value, job.status || "queued");
         if (job.cancel_available && !pending) {
@@ -339,6 +354,7 @@
   }
   function updateTimeFormatButton() {
     const button = $("time-toggle");
+    $("history-table").classList.toggle("relative-time", state.relativeTime);
     button.setAttribute("aria-pressed", String(state.relativeTime));
     const next = state.relativeTime ? "absolute" : "relative";
     button.setAttribute("aria-label", "Show " + next + " times");
@@ -611,6 +627,7 @@
     [
       ["Status", statusLabel(job.status)], ["Approval", approvalLabel(job.approval_status)],
       ["Host", job.server],
+      ["Agent", job.agent || "Unknown"],
       ["Story ID", job.story_id || "—"],
     ].forEach(([label, value]) => appendMeta(meta, label, value));
     appendConversationMeta(meta, job.conversation_id);
@@ -707,7 +724,7 @@
     const technical = $("technical-metadata");
     technical.replaceChildren();
     [[isFile ? "Operation ID" : "Job ID", job.id],
-     ["Actor", job.actor], ["Submitted", formatWhen(job.created_at)],
+     ["Actor", job.actor], ["Client ID", job.client_id || "—"], ["Submitted", formatWhen(job.created_at)],
      ["Started", formatWhen(job.started_at)],
      ["Finished", formatWhen(job.ended_at)]].forEach(
       ([label, value]) => appendMeta(technical, label, value));

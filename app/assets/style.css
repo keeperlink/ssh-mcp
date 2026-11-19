@@ -187,7 +187,7 @@
 .jobs-table td{padding:9px 8px;font-size:11px}
 .jobs-table td:first-child{padding-left:12px}
 .jobs-table tr.selected td:first-child{padding-left:9px}
-.jobs-table td:nth-child(4){max-width:240px;min-width:115px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.jobs-table td:nth-child(5){max-width:240px;min-width:115px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{padding:4px 7px;font-size:9px}
 .right-pane{padding:10px 13px 18px}
 .detail-head h2{font-size:16px;margin:0 0 3px}
@@ -257,7 +257,7 @@
 .brand-sub{font-size:14px;letter-spacing:1px}
 .brand-version{font-size:10px;font-weight:600;color:#667b94;letter-spacing:0;margin-left:-7px}
 .overview .filters{
-  grid-template-columns:125px 85px 90px minmax(140px,1fr) minmax(140px,1fr) 78px 110px;
+  grid-template-columns:125px 105px 85px 90px minmax(140px,1fr) minmax(140px,1fr) 78px 110px;
   min-width:0;gap:7px;overflow-x:auto;
 }
 .overview .filters .filter-range,
@@ -267,8 +267,12 @@
 .overview .filters .filter-command,
 .overview .filters .filter-mode,
 .overview .filters .filter-status{grid-column:auto}
-.jobs-table{table-layout:fixed;min-width:760px;width:100%}
+.jobs-table{table-layout:fixed;min-width:865px;width:100%}
+.jobs-table.relative-time{min-width:810px}
 .jobs-table .col-time{width:145px}
+.jobs-table.relative-time .col-time{width:90px}
+.jobs-table .col-agent{width:105px}
+.jobs-table td:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .jobs-table .col-story{width:var(--story-id-column-width,145px)}
 .jobs-table .col-host{width:112px}
 .jobs-table .col-mode{width:62px}
@@ -277,7 +281,7 @@
 .jobs-table th,.jobs-table td{padding-left:7px;padding-right:7px;max-width:none}
 .jobs-table td:first-child{padding-left:11px}
 .jobs-table tr.selected td:first-child{padding-left:8px}
-.jobs-table td:nth-child(4){max-width:none;min-width:0}
+.jobs-table td:nth-child(5){max-width:none;min-width:0}
 .jobs-table .command-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .root-shield{display:inline-block;vertical-align:-3px;width:16px;height:16px;
   flex:none;color:#ba3229}
@@ -305,7 +309,7 @@
 }
 @media(max-width:900px){
   .overview .filters{
-    grid-template-columns:125px 85px 90px minmax(140px,1fr) minmax(140px,1fr) 78px 110px
+    grid-template-columns:125px 105px 85px 90px minmax(140px,1fr) minmax(140px,1fr) 78px 110px
   }
 }
 

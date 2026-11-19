@@ -24,6 +24,7 @@ os.environ.setdefault("MCP_TOKEN_SIGNING_SECRET", "synthetic-test-signing-" + "b
 os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 
 from app.history import _history_page  # noqa: E402
+from app import config  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,15 @@ JOBS = [
     }
     for index in range(250)
 ]
+CLIENT_A = "https://agent-a.example.org/client.json"
+CLIENT_B = "https://agent-b.example.org/client.json"
+for index, job in enumerate(JOBS):
+    if index in (0, 3):
+        job.update(agent="Agent A", agent_key=CLIENT_A, client_id=CLIENT_A)
+    elif index in (1, 4):
+        job.update(agent="Agent B", agent_key=CLIENT_B, client_id=CLIENT_B)
+    else:
+        job.update(agent="Unknown", agent_key="unknown")
 JOBS[3]["story_id"] = "owner/repo#12345678901234567890"
 JOBS[240]["story_id"] = "KA-123"  # Not equal to ASCII KA-123.
 JOBS[241]["story_id"] = "KA-123"
@@ -133,10 +143,11 @@ LARGE_OUTPUT = b"x" * (13 * 16384) + b"END_OF_CAPTURE"
 JOBS[3]["output_bytes"] = len(LARGE_OUTPUT)
 FINAL_OUTPUT = b"OUTPUT_AFTER_COMPLETION"
 def viewer_page() -> bytes:
-    return _history_page("synthetic-csrf").replace(
-        "</body>", '<output id="layout-test-result">PENDING</output>'
-        '<script src="/layout_fixture.js" defer></script></body>',
-    ).encode("utf-8")
+    with patch.object(config, "MCP_CLIENT_LABELS", {CLIENT_A: "Agent A", CLIENT_B: "Agent B"}):
+        return _history_page("synthetic-csrf").replace(
+            "</body>", '<output id="layout-test-result">PENDING</output>'
+            '<script src="/layout_fixture.js" defer></script></body>',
+        ).encode("utf-8")
 
 
 PAGE = viewer_page()
@@ -272,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(q.get("limit", ["15"])[0])
             page = int(q.get("page", ["1"])[0])
             filtered = JOBS
-            for key, attr in (("mode", "mode"), ("host", "server"),
+            for key, attr in (("agent", "agent_key"), ("mode", "mode"), ("host", "server"),
                               ("story_id", "story_id"), ("status", "status"),
                               ("conversation_id", "conversation_id")):
                 requested = q.get(key, [""])[0]

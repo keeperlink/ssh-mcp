@@ -168,7 +168,8 @@
       $("approval-host").textContent = request.host || "Unknown";
       const number = conversationNumber(request.conversation_scope_id);
       $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
-      $("approval-client").textContent = request.client_id || "MCP client";
+      $("approval-client").textContent = request.agent || "Unknown";
+      $("approval-client").title = (request.client_id || "").split("?", 1)[0];
       const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
       $("approval-duration-warning").hidden = timedAllowed;
       $("approval-tool").textContent = request.tool || "Operation";

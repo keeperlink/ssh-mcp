@@ -27,6 +27,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from . import config
+from .client_identity import client_id_context
 from .approvals import ApprovalManager
 from .approval_status import ApprovalCode, ApprovalRejected, approval_status_context
 from .approval_preview import approval_summary, approval_steps
@@ -721,7 +722,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                                         limit=query.limit)
                     # Historical actor identities are internal audit metadata.
                     summaries = [
-                        {key: value for key, value in row.items() if key not in {"actor", "command_preview"}}
+                        {key: value for key, value in row.items() if key not in {"actor", "command_preview", "agent", "agent_key"}}
                         for row in rows["jobs"]
                     ]
                     next_cursor = _encode_mcp_cursor(rows["next_page"])
@@ -748,7 +749,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     item = history.detail(query.job_id)
                     if item is None or item.get("actor") != actor:
                         return _error("Job unavailable")
-                    item.pop("actor", None)
+                    for field in ("actor", "agent", "agent_key", "client_id"):
+                        item.pop(field, None)
                     return _result({"job": item}) if item is not None else _error("Job unavailable")
                 if params.name == "get_job_output":
                     query = GetJobOutputRequest.model_validate(arguments)
@@ -847,9 +849,16 @@ def create_mcp_server(*, job_registry: dict | None = None,
             return _error("Invalid or conflicting conversation identifier")
         context_token = conversation_id_context.set(conversation_id)
         approval_token = approval_status_context.set(None)
+        access = get_access_token()
+        client_token = client_id_context.set(
+            access.client_id if access is not None
+            and access.subject == config.MCP_OPERATOR_SUBJECT
+            and config.MCP_SSH_SCOPE in access.scopes else None
+        )
         try:
             return await dispatch_tool(_ctx, params)
         finally:
+            client_id_context.reset(client_token)
             approval_status_context.reset(approval_token)
             conversation_id_context.reset(context_token)
 

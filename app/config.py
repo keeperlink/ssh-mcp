@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from .control import LEVELS
+from .client_identity import labels_from_environment
 
 # Production mounts are all-or-nothing. Lab environment-file mode remains
 # supported by the exact same single image, without separate bootstrap code.
@@ -48,6 +49,7 @@ MCP_SESSION_TTL_DEFAULT = int(os.getenv("MCP_SESSION_TTL_DEFAULT", "86400"))
 MCP_ACCESS_TOKEN_TTL = int(os.getenv("MCP_ACCESS_TOKEN_TTL", "900"))
 MCP_AUTH_CODE_TTL = int(os.getenv("MCP_AUTH_CODE_TTL", "300"))
 MCP_CIMD_CLIENT_ID = os.getenv("MCP_CIMD_CLIENT_ID", "https://chatgpt.com/oauth/client.json")
+MCP_CLIENT_LABELS = labels_from_environment(os.getenv("MCP_CLIENT_LABELS", "{}"))
 MCP_CIMD_VALIDATE_REMOTE = os.getenv("MCP_CIMD_VALIDATE_REMOTE", "true").lower() != "false"
 MCP_CIMD_CACHE_TTL = int(os.getenv("MCP_CIMD_CACHE_TTL", "3600"))
 MCP_ALLOWED_REDIRECT_URIS = set(

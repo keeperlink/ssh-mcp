@@ -61,6 +61,7 @@ Never mount two service instances to the same database.
 | `SSH_JOBS_ENABLED`, `SSH_JOBS_DB` | Durable, auditable SSH execution with a persistent SQLite path |
 | `SSH_JOBS_RETENTION_MONTHS` | Calendar-month audit retention, 3 in sample |
 | `HISTORY_VIEWER_ENABLED` | Enable the separate password-protected `/console` |
+| `MCP_CLIENT_LABELS` | Optional JSON map of exact OAuth client metadata IDs to operator-chosen console labels; managed installations set `viewer.client_labels` in signed service.json |
 | `HISTORY_STORY_ID_MAX_CHARS`, `HISTORY_STORY_ID_TRUNCATE_FROM` | Optional console table display settings (16, end by default); managed installations set them via viewer.story_id_max_chars and viewer.story_id_truncate_from in signed service.json |
 | `MCP_METRICS_ENABLED` | Disabled in example; enabling needs a distinct 32+ char `MCP_METRICS_TOKEN` |
 | `MCP_CONVERSATION_HEADER_NAME` | Optional dedicated workflow header; default `X-OpenAI-Session` |
@@ -71,6 +72,32 @@ Do **not** set legacy `SSH_JOBS_RETENTION_SECONDS` alongside
 issuer/resource are startup failures; no anonymous SSH fallback is
 provided. Token expiration is fixed at 15 minutes, while operator
 authorization sessions have bounded absolute lifetimes.
+
+## Console client attribution
+
+For environment-file mode set a JSON mapping, for example
+`MCP_CLIENT_LABELS='{"https://agent.example.org/client.json":"My agent"}'`.
+Managed mode uses the same mapping as the optional `viewer.client_labels`
+object. Up to 32 unique labels of 1–32 printable characters are allowed;
+`Unknown` is reserved. Use exact public HTTPS client metadata document IDs,
+not the operator subject, client-declared name, user agent, or conversation
+ID. These labels are display metadata only, never an authorization rule.
+Do not put credentials in metadata URLs or labels.
+
+The service persists the verified OAuth client ID at admission in the
+existing job, batch and file audit tables, including recorded denials.
+SQLite upgrades add nullable columns; no history is rewritten. Existing
+client-specific hashed actors can be mapped to configured clients, but
+the old shared operator actor is ambiguous and is displayed as Unknown.
+Unconfigured clients are also Unknown. Labels are resolved at read time,
+so updating the mapping updates older attributable records as well. Client
+IDs are visible in authenticated console details (URL queries omitted).
+MCP tools retain their existing actor-scoped response and permission
+contracts.
+
+The readiness popup always shows relative timestamps with absolute times
+on hover. The History time toggle adjusts the Time column width independently.
+The Agent column and filter follow Time and precede Story.
 
 ## Inventory host schema
 
