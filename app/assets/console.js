@@ -193,6 +193,11 @@
         [host.ssh_reason, host.sudo_configured ? host.sudo_reason : ""].filter(Boolean).join(" · ") || "—"
       ];
       for (const value of values) row.insertCell().textContent = value;
+      row.cells[1].className = host.status !== "active" ? "readiness-bad"
+        : host.ssh_reason ? "readiness-warning" : "readiness-good";
+      row.cells[2].className = !host.sudo_configured ? "readiness-neutral"
+        : !host.sudo_ready ? "readiness-bad"
+        : host.sudo_reason ? "readiness-warning" : "readiness-good";
     }
     $("readiness-hosts").replaceChildren(table);
   }

@@ -547,4 +547,8 @@
 .connection-details table{border-collapse:collapse;font-size:11px;margin-top:7px}
 .connection-details th,.connection-details td{text-align:left;border-bottom:1px solid #e4ebf5;padding:5px 8px;vertical-align:top}
 .connection-details td:last-child{overflow-wrap:anywhere;max-width:180px}
+.connection-details .readiness-good{color:#18744b;font-weight:700}
+.connection-details .readiness-bad{color:#a52e3b;font-weight:700}
+.connection-details .readiness-warning{color:#8a6300;font-weight:700}
+.connection-details .readiness-neutral{color:#64758b}
 .connection-details[hidden]{display:none}

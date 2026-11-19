@@ -192,6 +192,15 @@
   }
   async function checkUnicodeStoryFilters() {
     const story = document.getElementById("filters").elements.namedItem("story_id");
+    // Isolate live-filter polling from legitimate automatic page-size changes
+    // caused by the responsive footer when narrowing to a one-row result.
+    const size = document.getElementById("rows-per-page");
+    const previousSize = size.value;
+    assert(!size.querySelector('option[value="10"]').disabled, "Ten rows must fit");
+    size.value = "10";
+    size.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent ===
+      "Showing 1–10 of 250", "fixed page size before live filter checks");
     for (const [value, jobId] of [["KA-123", "synthetic-240"],
                                  ["KA-123", "synthetic-241"],
                                  ["ka-123", "synthetic-241"]]) {
@@ -215,14 +224,20 @@
       localStorage.getItem("ssh-mcp-console-filters")).story_id === padded,
     "The entered generic issue ID must remain verbatim in the form and preferences");
     const originalFetch = window.fetch;
-    let reloaded = 0;
+    const reloads = [];
+    let polls = 0;
     window.fetch = (...args) => {
-      if (String(args[0]).startsWith("/console/api/jobs?")) reloaded++;
+      const url = String(args[0]);
+      if (url.startsWith("/console/api/jobs?")) reloads.push(url);
+      if (url.startsWith("/console/api/changes?")) polls++;
       return originalFetch(...args);
     };
     try {
-      await pause(2200);
-      assert(reloaded === 0, "Untrimmed live filter is reloading History every poll");
+      // Each poll schedules its successor only after completing. Observe
+      // two completed poll cycles rather than relying on a timed sleep.
+      await waitFor(() => polls >= 3, "two completed live filter polls");
+      assert(reloads.length === 0,
+        "Untrimmed live filter is reloading History every poll: " + reloads.join(", "));
     } finally {
       window.fetch = originalFetch;
     }
@@ -230,6 +245,8 @@
     story.dispatchEvent(new Event("input", { bubbles: true }));
     await waitFor(() => document.getElementById("page-summary").textContent
       .includes("of 250"), "clear Unicode issue ID filter");
+    size.value = previousSize;
+    size.dispatchEvent(new Event("change", { bubbles: true }));
   }
   async function checkFiltersAndLiveRefresh() {
     const form = document.getElementById("filters");
@@ -528,6 +545,14 @@
       && hosts.textContent.includes("demo-node-a") && hosts.textContent.includes("N/A")
       && !hosts.textContent.includes("retired"),
       "Readiness popup must show only the configured hosts and N/A for unconfigured sudo");
+    const readinessRow = (alias) => [...hosts.querySelectorAll("tr")]
+      .find(row => row.cells[0]?.textContent === alias);
+    const colored = (cell, className, color) => cell.classList.contains(className)
+      && getComputedStyle(cell).color === color;
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-node-a").cells[2], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-sandbox").cells[2], "readiness-neutral", "rgb(100, 117, 139)"),
+      "Healthy SSH and sudo must be green; N/A must stay neutral");
     wrap.dispatchEvent(new MouseEvent("mouseleave"));
     assert(panel.hidden, "Unpinned popup must close when pointer leaves");
     connection.click();
@@ -545,6 +570,11 @@
     assert(hosts.textContent.includes("Recent failure · still eligible")
       && hosts.textContent.includes("Offline") && hosts.textContent.includes("sudo_authentication_suspended"),
       "Popup must distinguish transient failure, stale SSH, and suspended sudo");
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-warning", "rgb(138, 99, 0)")
+      && colored(readinessRow("demo-node-a").cells[2], "readiness-bad", "rgb(165, 46, 59)")
+      && colored(readinessRow("demo-node-b").cells[1], "readiness-bad", "rgb(165, 46, 59)")
+      && colored(readinessRow("demo-node-b").cells[2], "readiness-bad", "rgb(165, 46, 59)"),
+      "Transient SSH failure must be amber; offline SSH and unavailable sudo must be red");
     const header = [...hosts.querySelectorAll("th")].map(th => th.textContent);
     const sshColumn = header.indexOf("Last SSH success");
     const sudoColumn = header.indexOf("Last sudo success");
@@ -563,6 +593,9 @@
     assert(restored.ok, "Synthetic readiness recovery");
     await waitFor(() => connection.textContent === "Connected"
       && !connection.classList.contains("degraded"), "green recovered connection");
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-node-b").cells[2], "readiness-good", "rgb(24, 116, 75)"),
+      "Recovered capabilities must restore green status");
   }
   async function checkApprovalControls() {
     const layer = document.getElementById("approval-layer");

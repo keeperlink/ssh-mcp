@@ -179,8 +179,15 @@ The supported target sudo executable is /usr/bin/sudo. The fixed launcher
 uses LC_ALL=C for deterministic diagnostics, including password rejection;
 ordinary root command execution retains the existing sanitized environment.
 Verify the installed absolute executable during host onboarding.
-Only an explicit password requirement or policy denial confirms this safety
-check; passwordless root execution disables the host immediately. Review the
+An explicit password requirement or policy denial confirms this safety check.
+An otherwise unidentified, fully completed noninteractive exit 1 needs
+corroboration: on an authorized sudo-capable host the service requests a
+unique sudo password prompt, sends its configured password only after the
+prompt is observed, and requires framed root execution and UID 0. No new
+OS-specific refusal diagnostics are required. Unknown refusals without an
+available credential, recognized authentication challenge or confirmed root
+result stay inconclusive; SSH-only hosts retain the conservative explicit
+refusal check. Passwordless root execution disables the host immediately. Review the
 effective sudo policy at onboarding and after policy changes: one fixed probe
 cannot establish that every command-specific NOPASSWD rule is absent.
 Configured privileged hosts also verify their protected password using the

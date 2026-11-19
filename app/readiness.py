@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 LOG = logging.getLogger(__name__)
-ProbeKind = Literal["identity", "safety", "sudo"]
+ProbeKind = Literal["identity", "safety", "sudo", "sudo_challenge"]
 HostStatus = Literal["active", "offline", "retired"]
 
 
@@ -76,6 +76,7 @@ class ProbeResult:
     reason: str = ""
     unsafe: bool = False
     password_rejected: bool = False
+    needs_corroboration: bool = False
 
 
 @dataclass(slots=True)
@@ -234,25 +235,29 @@ class ReadinessMonitor:
                 self._ssh_failed(alias, identity)
                 return False
             safety = await self._attempt(alias, "safety")
-            if not safety.ok:
+            corroborate = safety.needs_corroboration and not safety.unsafe
+            scoped_retry = state.suspended and resume_generation == state.suspension_generation
+            may_probe_sudo = state.expects_sudo and (not state.suspended or scoped_retry)
+            if not safety.ok and (not corroborate or not may_probe_sudo):
                 self._ssh_failed(alias, safety)
                 return False
-            state.last_ssh = self._clock()
-            state.last_ssh_success = self._wall()
-            state.ssh_reason = ""
-            state.unsafe = False
-            state.last_warning = None
-            self._transitions(alias)
+            if safety.ok:
+                self._ssh_succeeded(alias)
             sudo_ok = False
-            scoped_retry = state.suspended and resume_generation == state.suspension_generation
-            if privileged is not False and state.expects_sudo and (not state.suspended or scoped_retry):
+            # Unknown noninteractive refusals need proof that the same fixed
+            # command really requires a password. Even an ordinary live
+            # check needs this evidence before refreshing SSH readiness.
+            if (privileged is not False or corroborate) and may_probe_sudo:
                 generation = state.suspension_generation
                 if scoped_retry:
                     state.recheck_generation = generation
                 try:
-                    sudo = await self._attempt(alias, "sudo")
+                    sudo = await self._attempt(alias, "sudo_challenge" if corroborate else "sudo")
                 finally:
                     state.recheck_generation = None
+                if sudo.unsafe:
+                    self._ssh_failed(alias, sudo)
+                    return False
                 if sudo.password_rejected:
                     self.suspend(alias)
                 elif generation == state.suspension_generation:
@@ -268,8 +273,22 @@ class ReadinessMonitor:
                             LOG.warning("host_sudo_check_failed host=%s reason=%s", alias, reason)
                         if not state.suspended:
                             state.sudo_reason = reason
+            if corroborate:
+                if not sudo_ok:
+                    self._ssh_failed(alias, safety)
+                    return False
+                self._ssh_succeeded(alias)
             self._transitions(alias)
             return self.active(alias) and (not privileged or sudo_ok and self.sudo_ready(alias))
+
+    def _ssh_succeeded(self, alias: str) -> None:
+        state = self._states[alias]
+        state.last_ssh = self._clock()
+        state.last_ssh_success = self._wall()
+        state.ssh_reason = ""
+        state.unsafe = False
+        state.last_warning = None
+        self._transitions(alias)
 
     def retry_interval(self, alias: str) -> int:
         state = self._states[alias]
