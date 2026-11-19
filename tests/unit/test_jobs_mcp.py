@@ -427,6 +427,12 @@ class JobHTTPTests(unittest.TestCase):
         self.assertEqual(completed["run_as"], "mcp-agent")
         self.assertEqual(completed["command"], "hostname")
         self.assertEqual(completed["output_bytes"], 10)
+        # Attribution is captured from the verified JWT at admission and
+        # survives the asynchronous task; the public MCP shape is unchanged.
+        with sqlite3.connect(os.environ["SSH_JOBS_DB"]) as db:
+            self.assertEqual(db.execute("SELECT client_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0], CLIENT)
+        self.assertNotIn("client_id", completed)
+        self.assertNotIn("agent", completed)
 
         output = self.tool("get_job_output", {
             "job_id": job_id, "cursor": 0, "max_bytes": 4,

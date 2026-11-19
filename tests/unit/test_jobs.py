@@ -127,12 +127,14 @@ class StoreTests(unittest.TestCase):
             db.execute("DROP VIEW IF EXISTS history_events")
             db.execute("ALTER TABLE jobs DROP COLUMN exit_accepted")
             db.execute("ALTER TABLE jobs DROP COLUMN effective_cwd")
+            db.execute("ALTER TABLE jobs DROP COLUMN client_id")
         upgraded = JobStore(self.path)
         saved = upgraded.get("alice", job_id)
         self.assertEqual(saved["exit_code"], 0)
         self.assertIsNone(saved["exit_accepted"])
         self.assertIsNone(saved["effective_cwd"])
         self.assertEqual(HistoryStore(upgraded).detail(job_id)["status"], "succeeded")
+        self.assertIsNone(HistoryStore(upgraded).detail(job_id)["client_id"])
 
     def test_additive_file_approval_column_migration_and_denial_validation(self):
         from app.file_audit import FileAudit
@@ -147,6 +149,7 @@ class StoreTests(unittest.TestCase):
             db.execute("DROP INDEX IF EXISTS file_operations_replay_id")
             db.execute("DROP TRIGGER IF EXISTS file_operations_rollback_replay_guard")
             db.execute("ALTER TABLE file_operations DROP COLUMN operation_id")
+            db.execute("ALTER TABLE file_operations DROP COLUMN client_id")
         reopened = JobStore(self.path)
         with reopened._connect() as db:
             fields = {row["name"] for row in
@@ -154,6 +157,7 @@ class StoreTests(unittest.TestCase):
         self.assertIn("conversation_id", fields)
         self.assertIn("approval_status", fields)
         self.assertIn("operation_id", fields)
+        self.assertIn("client_id", fields)
         self.assertEqual(HistoryStore(reopened).list({}, limit=10)["filtered_total"], 0)
 
         audit = FileAudit(reopened)

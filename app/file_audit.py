@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .conversation_access import conversation_id_context
+from .client_identity import client_id_context
 from .approval_status import approval_status_context
 
 KINDS = frozenset({"inspect", "read", "write", "patch", "patch_preview", "upload", "download"})
@@ -68,6 +69,8 @@ def init_file_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE file_operations ADD COLUMN conversation_id TEXT")
     if "approval_status" not in existing:
         db.execute("ALTER TABLE file_operations ADD COLUMN approval_status INTEGER")
+    if "client_id" not in existing:
+        db.execute("ALTER TABLE file_operations ADD COLUMN client_id TEXT")
     if "operation_id" not in existing:
         db.execute("ALTER TABLE file_operations ADD COLUMN operation_id TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS file_operations_replay_id "
@@ -121,6 +124,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
     batch_code = "approval_status" if "approval_status" in batch_columns else "NULL"
     batch_username = "ssh_username" if "ssh_username" in batch_columns else "NULL"
     batch_error = "error" if "error" in batch_columns else "NULL"
+    batch_client = "client_id" if "client_id" in batch_columns else "NULL"
     batch_sql = f"""
           UNION ALL
           SELECT 'batch_'||id,actor,server,'execute_commands',total_steps,'',
@@ -143,7 +147,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  0,0,'batch',story_id,conversation_id,
                  json_object('reason',substr(reason,1,200),'server',server,
                              'total_steps',total_steps),
-                 'batch','execute_commands',NULL,0,NULL,NULL,{batch_code}
+                 'batch','execute_commands',NULL,0,NULL,NULL,{batch_code},{batch_client}
           FROM command_batches AS b
           WHERE status IN ('denied','rejected')
             AND NOT EXISTS (
@@ -170,7 +174,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  story_id,conversation_id,request_json,
                  'command' AS record_kind,NULL AS operation_kind,NULL AS path_summary,
                  0 AS byte_count,NULL AS error_code,NULL AS result_metadata,
-                 approval_status
+                 approval_status,client_id
           FROM jobs
           UNION ALL
           SELECT 'file_'||id,actor,server,operation_kind,0,'',0,NULL,NULL,NULL,status,
@@ -184,7 +188,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  ended_at,NULL,NULL,NULL,elapsed_seconds,
                  COALESCE(error_code,''),0,0,'file',story_id,conversation_id,NULL,
                  'file',operation_kind,path_summary,byte_count,error_code,result_metadata,
-                 approval_status
+                 approval_status,client_id
           FROM file_operations
     """ + batch_sql + ";")
 
@@ -240,10 +244,10 @@ class FileAudit:
             db.execute(
                 """INSERT INTO file_operations
                 (id,actor,server,operation_kind,path_summary,story_id,conversation_id,
-                 status,created_at,updated_at,started_at)
-                VALUES(?,?,?,?,?,?,?,'awaiting_approval',?,?,?)""",
+                 status,created_at,updated_at,started_at,client_id)
+                VALUES(?,?,?,?,?,?,?,'awaiting_approval',?,?,?,?)""",
                 (identifier, actor, server, kind, path_summary(path), story_id,
-                 conversation_id_context.get(), now, now, now),
+                 conversation_id_context.get(), now, now, now, client_id_context.get()),
             )
         return identifier
 
@@ -303,11 +307,11 @@ class FileAudit:
                 db.execute(
                     "INSERT INTO file_operations "
                     "(id,actor,server,operation_kind,path_summary,story_id,conversation_id,status,"
-                    " created_at,updated_at,started_at,approval_status,operation_id)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " created_at,updated_at,started_at,approval_status,operation_id,client_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (identifier,actor,server,kind,path_summary(path),story_id,
                      conversation_id_context.get(),
-                     "running",now,now,now,approval_status_context.get(),operation_id),
+                     "running",now,now,now,approval_status_context.get(),operation_id,client_id_context.get()),
                 )
         except sqlite3.IntegrityError:
             if precreated_id is not None:

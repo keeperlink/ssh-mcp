@@ -334,6 +334,9 @@ assert "Timeout max is 36000 seconds." in next(
         result = self.prepare()
         self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "16")
         self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "end")
+        self.assertEqual(json.loads(result["MCP_CLIENT_LABELS"]), {})
+        labels = {"https://agent.example.org/client.json": "Agent"}
+        config["viewer"]["client_labels"] = labels
         config["viewer"].update({"story_id_max_chars": 9,
                                  "story_id_truncate_from": "start"})
         self.write(self.config, config)
@@ -342,6 +345,7 @@ assert "Timeout max is 36000 seconds." in next(
         result = self.prepare()
         self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "9")
         self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "start")
+        self.assertEqual(json.loads(result["MCP_CLIENT_LABELS"]), labels)
 
     def test_fail_closed_service_schema_and_security_allowlists(self):
         changes = (
@@ -375,6 +379,7 @@ assert "Timeout max is 36000 seconds." in next(
             ("viewer", "story_id_max_chars", 81),
             ("viewer", "story_id_max_chars", True),
             ("viewer", "story_id_truncate_from", "middle"),
+            ("viewer", "client_labels", {"https://agent.example.org/client.json": "Unknown"}),
         )
         for section, field, value in changes:
             with self.subTest(section=section, field=field):

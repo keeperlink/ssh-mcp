@@ -78,3 +78,14 @@ database configuration for rollback.
 **Source compatibility does not authorize production changes.** Signing,
 host filesystem changes, service replacement, credential rotation and
 volume migration require separate approval and recovery evidence.
+
+## Console client labels and audit attribution
+
+The client-attribution upgrade adds nullable `client_id` columns to jobs,
+batch manifests and file operation audit rows. Keep the same persistent
+SQLite volume; the migration does not rewrite or discard old records.
+Legacy rows retain their old actors and are resolved conservatively at read
+time. An older runtime can ignore the additive columns; restoring the newer
+runtime recreates the current history projection. If rolling back to a
+runtime that predates `viewer.client_labels`, restore the previously signed
+service configuration together with the previously signed image.

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .control import LEVELS
+from .client_identity import parse_labels
 from .readiness import ReadinessSettings
 
 CONFIG = Path("/etc/ssh-mcp/service.json")
@@ -41,7 +42,7 @@ SECTIONS = {
     "metrics": {"enabled"},
     "viewer": {"enabled", "idle_timeout_seconds", "absolute_timeout_seconds"},
 }
-VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from"}
+VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from", "client_labels"}
 HARD = {"max_timeout_seconds": 36000, "max_output_bytes": 1048576,
         "max_argument_bytes": 65536, "max_arguments": 64,
         "max_concurrent": 32, "max_hosts": 200, "max_active": 256}
@@ -125,6 +126,7 @@ def _valid_settings(settings: dict[str, Any]) -> None:
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
     ReadinessSettings.from_mapping(settings.get("readiness", {}))
+    parse_labels(settings["viewer"].get("client_labels", {}))
     logging_settings = settings.get("logging", {"level": "INFO"})
     if (type(logging_settings) is not dict or set(logging_settings) != {"level"}
             or logging_settings["level"] not in LEVELS):
@@ -302,6 +304,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "HISTORY_VIEWER_ENABLED": "true",
         "HISTORY_IDLE_TIMEOUT_SECONDS": str(cfg["viewer"]["idle_timeout_seconds"]),
         "HISTORY_ABSOLUTE_TIMEOUT_SECONDS": str(cfg["viewer"]["absolute_timeout_seconds"]),
+        "MCP_CLIENT_LABELS": json.dumps(cfg["viewer"].get("client_labels", {}), sort_keys=True),
         "HISTORY_STORY_ID_MAX_CHARS": str(cfg["viewer"].get("story_id_max_chars", 16)),
         "HISTORY_STORY_ID_TRUNCATE_FROM": cfg["viewer"].get("story_id_truncate_from", "end"),
         "MCP_METRICS_ENABLED": "true", "MCP_METRICS_TOKEN": secrets["metrics_token"],

@@ -12,6 +12,8 @@ import secrets
 import time
 from typing import Any, Awaitable, Callable, Literal
 
+from . import config
+from .client_identity import agent_label
 from .ssh_executor import SSHDenied
 from .approval_status import ApprovalCode, ApprovalRejected
 
@@ -57,7 +59,8 @@ class PendingApproval:
             "conversation_id": self.key[1] or None, "tool": self.tool,
             "scope_id": ApprovalManager.grant_id(self.key, "scope") if self.key[1] else None,
             "conversation_scope_id": ApprovalManager.conversation_scope_id(self.key),
-            "client_id": self.client_id, "timed_grants_allowed": bool(self.key[1]),
+            "client_id": self.client_id, "agent": agent_label(self.client_id, config.MCP_CLIENT_LABELS),
+            "timed_grants_allowed": bool(self.key[1]),
             "reason": self.reason, "summary": self.summary,
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
             "requires_host": self.grant_host,

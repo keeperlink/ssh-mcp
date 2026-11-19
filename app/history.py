@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from starlette.concurrency import run_in_threadpool
 
 from . import config
+from .client_identity import UNKNOWN_AGENT, agent_label, resolve_client_id
 from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
@@ -122,13 +123,28 @@ class HistoryStore:
     def __init__(self, jobs: JobStore):
         self.jobs = jobs
 
+    @staticmethod
+    def _client_id(client_id: str | None, actor: str) -> str | None:
+        return resolve_client_id(client_id, actor, config.MCP_CLIENT_LABELS,
+                                 config.MCP_OPERATOR_SUBJECT, config.MCP_CIMD_CLIENT_ID)
+
+    @staticmethod
+    def _agent_key(client_id: str | None, actor: str) -> str:
+        resolved = HistoryStore._client_id(client_id, actor)
+        return resolved if resolved is not None and resolved in config.MCP_CLIENT_LABELS else UNKNOWN_AGENT
+
     def _connect(self) -> sqlite3.Connection:
-        return self.jobs._connect()
+        db = self.jobs._connect()
+        db.create_function("history_agent_key", 2, self._agent_key, deterministic=True)
+        return db
 
     @staticmethod
     def _summary(row: sqlite3.Row) -> dict[str, Any]:
         item = JobStore._summary(row)
         item["actor"] = row["actor"]
+        client_id = HistoryStore._client_id(row["client_id"], row["actor"])
+        item["agent"] = agent_label(client_id, config.MCP_CLIENT_LABELS)
+        item["agent_key"] = HistoryStore._agent_key(row["client_id"], row["actor"])
         item["record_kind"] = row["record_kind"]
         item["operation_kind"] = row["operation_kind"]
         item["path_summary"] = row["path_summary"]
@@ -246,6 +262,12 @@ class HistoryStore:
                 raise ValueError("Invalid audit actor")
             where.append("actor=?")
             params.append(scoped_actor)
+        agent = filters.get("agent", "")
+        if agent:
+            if agent != UNKNOWN_AGENT and agent not in config.MCP_CLIENT_LABELS:
+                raise ValueError("Invalid history agent filter")
+            where.append("history_agent_key(client_id,actor)=?")
+            params.append(agent)
         record_kind = filters.get("record_kind", "all")
         if record_kind not in {"all", "command", "file", "batch"}:
             raise ValueError("Invalid record kind")
@@ -417,6 +439,10 @@ class HistoryStore:
         if row is None:
             return None
         item = self._summary(row)
+        client_id = self._client_id(row["client_id"], row["actor"])
+        # Unknown metadata URLs may include a client-supplied query. Keep
+        # that out of the browser while preserving the exact DB identity.
+        item["client_id"] = client_id.split("?", 1)[0] if client_id else None
         if row["record_kind"] == "batch":
             item["request"] = json.loads(row["request_json"]) if row["request_json"] else None
             item["terminal_command"] = item["command_preview"]
@@ -807,6 +833,11 @@ def _history_page(csrf: str) -> str:
         '<option value="24h" selected>Last 24 hours</option>'
         '<option value="7d">Last 7 days</option><option value="30d">Last 30 days</option>'
         '<option value="all">All time</option></select></label>'
+        '<label class="filter-agent">Agent<select name="agent">'
+        '<option value="">All agents</option>' + "".join(
+            f'<option value="{html.escape(client_id, quote=True)}">{html.escape(label)}</option>'
+            for client_id, label in sorted(config.MCP_CLIENT_LABELS.items(), key=lambda pair: pair[1].casefold())
+        ) + '<option value="unknown">Unknown</option></select></label>'
         '<label class="filter-story">Story ID<input name="story_id" placeholder="All stories"'
         ' maxlength="80"></label>'
         '<label class="filter-host">Host<select name="host" aria-label="Filter by registered host">'
@@ -844,13 +875,13 @@ def _history_page(csrf: str) -> str:
         '</section><div class="list-wrap" id="list-wrap"><table class="jobs-table" id="history-table" '
         f'data-story-id-max-chars="{story_chars}" '
         f'data-story-id-truncate-from="{html.escape(story_side, quote=True)}">'
-        '<colgroup><col class="col-time"><col class="col-story"><col class="col-host">'
+        '<colgroup><col class="col-time"><col class="col-agent"><col class="col-story"><col class="col-host">'
         '<col class="col-command"><col class="col-mode"><col class="col-status">'
         '<col class="col-duration"></colgroup><thead><tr>'
         '<th>Time <button id="time-toggle" class="time-toggle" type="button"'
         ' aria-label="Show relative times" aria-pressed="false"'
         ' title="Switch to relative times">⇄</button></th>'
-        '<th>Story ID</th><th>Host</th><th>Command / File</th>'
+        '<th>Agent</th><th>Story ID</th><th>Host</th><th>Command / File</th>'
         '<th>Mode</th><th>Status</th><th>Duration</th></tr></thead><tbody id="job-rows"></tbody></table>'
         '<div class="empty" id="empty">Loading history...</div>'
         '<div id="cancel-feedback" class="cancel-feedback" role="alert" hidden></div>'
@@ -1000,7 +1031,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
 
     def filters(request: Request) -> dict[str, str]:
         return {name: request.query_params.get(name, "") for name in (
-            "time_range", "story_id", "conversation_id", "host", "status", "mode", "command",
+            "time_range", "agent", "story_id", "conversation_id", "host", "status", "mode", "command",
             "privileged",
             "from_date", "to_date",
         )}

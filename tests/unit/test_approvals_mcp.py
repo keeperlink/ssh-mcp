@@ -430,6 +430,10 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         self.assertEqual([step["status"] for step in result["steps"]],
                          ["succeeded", "succeeded"])
         self.assertFalse(self.manager.root_grants)
+        rows = self.client.get("/console/api/jobs?time_range=all").json()["jobs"]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(self.client.get("/console/api/jobs/" + row["id"]).json()["job"]["client_id"], CLIENT)
 
     def test_admitted_root_batch_continues_after_host_grant_revocation(self):
         args = {
@@ -518,6 +522,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
             arguments=self._root_arguments(argv=["id", "-u"]))
         early_command = self.client.get("/console/api/jobs?time_range=all").json()["jobs"][0]
         self.assertEqual(early_command["status"], "awaiting_approval")
+        self.assertEqual(self.client.get("/console/api/jobs/" + early_command["id"]).json()["job"]["client_id"], CLIENT)
         self.assertIsNone(early_command["approval_status"])
         self.assertIsNone(early_command["started_at"])
         self.assertEqual(self._decision(request_id, "deny").status_code, 200)
@@ -530,6 +535,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
                                           "reason": "TEST-276 synthetic file denial"})
         early_file = self.client.get("/console/api/jobs?time_range=all").json()["jobs"][0]
         self.assertEqual(early_file["status"], "awaiting_approval")
+        self.assertEqual(self.client.get("/console/api/jobs/" + early_file["id"]).json()["job"]["client_id"], CLIENT)
         self.assertIsNone(early_file["approval_status"])
         self.assertIsNone(early_file["started_at"])
         self.assertEqual(self._decision(request_id, "deny").status_code, 200)
@@ -555,6 +561,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
         for row in page["jobs"]:
             detail = self.client.get("/console/api/jobs/" + row["id"]).json()["job"]
             self.assertEqual(detail["approval_status"], "denied_explicit")
+            self.assertEqual(detail["client_id"], CLIENT)
             self.assertIsNone(detail["exit_code"])
             self.assertIsNot(detail["root_started"], True)
             self.assertEqual(detail["output_bytes"], 0)
