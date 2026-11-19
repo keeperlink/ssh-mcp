@@ -254,9 +254,10 @@ _ROOT_EXEC = (
 )
 
 
-def _sudo_argv(command: list[str], marker: str, *, no_password: bool = False) -> list[str]:
+def _sudo_argv(command: list[str], marker: str, *, no_password: bool = False,
+               prompt: str = "") -> list[str]:
     """No caller input is evaluated by the fixed wrapper's shell script."""
-    return ["/usr/bin/sudo", "-n" if no_password else "-S", "-k", "-p", "", "-H", "-u", "root", "--", "/bin/sh", "-c",
+    return ["/usr/bin/sudo", "-n" if no_password else "-S", "-k", "-p", prompt, "-H", "-u", "root", "--", "/bin/sh", "-c",
             _ROOT_WRAPPER, "ssh-mcp-root", marker, *command]
 
 
@@ -310,12 +311,15 @@ def _sudo_failure_kind(diagnostic: bytes) -> str:
 
 
 async def _send_sudo_password(writer: ByteWriter, password: str,
-                              permitted: Callable[[], bool] | None = None) -> None:
+                              permitted: Callable[[], bool] | None = None,
+                              on_sent: Callable[[], None] | None = None) -> None:
     """Write a single line, close stdin; never hand it to the root command."""
     try:
         if permitted is not None and not permitted():
             return
         writer.write(password.encode("utf-8") + b"\n")
+        if on_sent is not None:
+            on_sent()
         await writer.drain()
     except (BrokenPipeError, ConnectionResetError):
         # SSH may have already failed; process.wait determines transport status.
@@ -335,6 +339,7 @@ async def _read_root_stderr(
     ready: list[bool], setup_failed: list[bool],
     ready_marker: bytes, failed_marker: bytes, captured: bytearray,
     on_confirmed: Callable[[], None] | None = None,
+    on_challenge: Callable[[bytes], None] | None = None,
 ) -> str:
     """Stream post-readiness stderr without leaking split control frames."""
     pending = bytearray()
@@ -359,6 +364,8 @@ async def _read_root_stderr(
             if where < 0:
                 if len(pending) > _ROOT_DIAGNOSTIC_CAP:
                     raise OutputLimitExceeded
+                if on_challenge is not None:
+                    on_challenge(bytes(pending))
                 continue
             diagnostic.extend(pending[:where][: _ROOT_DIAGNOSTIC_CAP])
             block = bytes(pending[where + len(marker):])
@@ -419,6 +426,7 @@ async def _read_root_stdout(
     on_output: OutputCallback | None, shared_budget: list[int],
     ready: list[bool], ready_event: asyncio.Event, marker_seen: list[bool],
     captured: bytearray,
+    on_confirmed: Callable[[], None] | None = None,
 ) -> str:
     """Discard independent SSH startup stdout; publish only framed root output."""
     output = captured
@@ -449,6 +457,8 @@ async def _read_root_stdout(
             block = bytes(pending[where + len(marker):])
             pending.clear()
             marker_seen[0] = True
+            if on_confirmed is not None:
+                on_confirmed()
         if block:
             await forward(block)
     await ready_event.wait()
@@ -719,8 +729,9 @@ class SSHExecutor:
             _check_file(host.known_hosts_file, private=False)
         except SSHDenied:
             return ProbeResult(False, "ssh_configuration")
-        password = self._sudo_passwords.get(alias) if kind == "sudo" else None
-        if kind == "sudo" and password is None:
+        password_probe = kind in {"sudo", "sudo_challenge"}
+        password = self._sudo_passwords.get(alias) if password_probe else None
+        if password_probe and password is None:
             return ProbeResult(False, "sudo_credentials_missing")
         request = ExecuteCommandRequest(
             server=alias, argv=["/usr/bin/id", "-un" if kind == "identity" else "-u"],
@@ -737,19 +748,25 @@ class SSHExecutor:
         async with self._global, self._semaphores[alias]:
             # A real command may have rejected a password while capacity was
             # being acquired. Never resume its suspension implicitly.
-            if kind == "sudo" and not password_permitted():
+            if password_probe and not password_permitted():
                 return ProbeResult(False, "sudo_authentication_suspended")
             result = await self._run(
                 host, request, time.monotonic(), None,
                 sudo_password=password, no_password=kind == "safety", probe=True,
-                password_permitted=password_permitted if kind == "sudo" else None,
+                password_permitted=password_permitted if password_probe else None,
+                challenge_password=kind == "sudo_challenge",
             )
+        if result.failure_kind == "passwordless_root":
+            return ProbeResult(False, "passwordless_root", unsafe=True)
         if kind == "safety":
             if result.root_started is True:
                 return ProbeResult(False, "passwordless_root", unsafe=True)
-            if (result.status == "command_error" and result.exit_code not in (None, 0, 255)
+            if (result.status == "command_error" and result.exit_code == 1
                     and result.failure_kind in {"sudo_password_required", "sudo_authorization"}):
                 return ProbeResult(True)
+            if (result.status == "command_error" and result.exit_code == 1
+                    and result.failure_kind == "sudo_refusal_unconfirmed"):
+                return ProbeResult(False, "root_unconfirmed", needs_corroboration=True)
         else:
             expected = host.username if kind == "identity" else "0"
             if (result.status == "succeeded" and result.exit_code == 0
@@ -858,6 +875,7 @@ class SSHExecutor:
         *, sudo_password: str | None = None, no_password: bool = False,
         probe: bool = False,
         password_permitted: Callable[[], bool] | None = None,
+        challenge_password: bool = False,
     ) -> SSHResult:
         effective_cwd: str | None = None
         command = _effective_argv(request)
@@ -879,6 +897,10 @@ class SSHExecutor:
                         if sudo_password is not None or no_password else None)
         marker = _framed_root_marker(marker_token) if marker_token is not None else None
         nonce = marker_token[len(_ROOT_MARKER_PREFIX):] if marker_token is not None else ""
+        # A unique prompt is requested explicitly via sudo -p; sudo implementations
+        # can wrap it in their own text. No English refusal text is used as proof.
+        prompt = "SSH-MCP-AUTH-" + secrets.token_hex(16) + ":" if challenge_password else ""
+        prompt_bytes = prompt.encode("ascii")
         if marker_token is not None:
             # Root-only cwd is prepared after sudo authentication inside the
             # fixed entrypoint; the gateway user never needs to traverse it.
@@ -886,7 +908,7 @@ class SSHExecutor:
             # the outer sudo wrapper emits the full START marker.
             command = _sudo_argv(
                 ["python3", "-c", _ROOT_EXEC, nonce, request.cwd or "", *command],
-                marker_token, no_password=no_password,
+                marker_token, no_password=no_password, prompt=prompt,
             )
             # The privileged timeout includes semaphore wait; never launch
             # SSH after that budget has already expired.
@@ -942,9 +964,44 @@ class SSHExecutor:
             (stdout_captured if stream == "stdout" else stderr_captured).extend(data)
             if on_output is not None:
                 await on_output(stream, data)
+        challenge_event = asyncio.Event()
+        challenge_seen = False
+        password_sent = False
+        unsafe_root = False
+
         def confirmed_root() -> None:
-            if no_password and self.readiness is not None:
-                self.readiness.mark_passwordless_root(host.alias)
+            nonlocal unsafe_root
+            if not unsafe_root and (no_password or (challenge_password and not password_sent)):
+                unsafe_root = True
+                if self.readiness is not None:
+                    self.readiness.mark_passwordless_root(host.alias)
+            challenge_event.set()
+
+        def observe_challenge(pre_root: bytes) -> None:
+            nonlocal challenge_seen
+            # The marker must be emitted in the bounded pre-root stream,
+            # not supplied by a caller, a root command or an error after it.
+            if pre_root.rstrip().endswith(prompt_bytes):
+                challenge_seen = True
+                challenge_event.set()
+
+        async def send_challenge_password(writer: ByteWriter, password: str) -> None:
+            nonlocal password_sent
+            def sent() -> None:
+                nonlocal password_sent
+                password_sent = True
+            def permitted() -> bool:
+                return challenge_seen and not unsafe_root and permit_password_write()
+            await challenge_event.wait()
+            await _send_sudo_password(writer, password, permitted, sent)
+
+        async def finish_stderr(reader: Awaitable[str]) -> str:
+            try:
+                return await reader
+            finally:
+                # An ordinary rejection or disconnect must not leave the
+                # password sender waiting for a prompt that will never arrive.
+                challenge_event.set()
 
         if marker is not None:
             stderr_reader = _read_root_stderr(
@@ -954,6 +1011,7 @@ class SSHExecutor:
                 _framed_root_marker(_ROOT_READY_PREFIX + nonce),
                 _framed_root_marker(_ROOT_FAILED_PREFIX + nonce),
                 stderr_captured, on_confirmed=confirmed_root,
+                on_challenge=observe_challenge if challenge_password else None,
             )
         elif cwd_nonce is not None:
             stderr_reader = _read_cwd_stderr(
@@ -969,13 +1027,13 @@ class SSHExecutor:
         stdout_reader = (
             _read_root_stdout(process.stdout, marker, self._output_bytes, on_output,
                               shared_budget, ready, ready_event, stdout_marker_seen,
-                              stdout_captured)
+                              stdout_captured, on_confirmed=confirmed_root)
             if marker is not None else
             _bounded_read(process.stdout, self._output_bytes, "stdout", capture_plain, shared_budget)
         )
         tasks = [
             asyncio.create_task(stdout_reader),
-            asyncio.create_task(stderr_reader),
+            asyncio.create_task(finish_stderr(stderr_reader)),
             asyncio.create_task(process.wait()),
         ]
         withheld: ReadinessDenied | None = None
@@ -992,9 +1050,10 @@ class SSHExecutor:
 
         if sudo_password is not None:
             assert process.stdin is not None
-            tasks.append(asyncio.create_task(_send_sudo_password(
-                process.stdin, sudo_password, permit_password_write,
-            )))
+            tasks.append(asyncio.create_task(
+                send_challenge_password(process.stdin, sudo_password) if challenge_password
+                else _send_sudo_password(process.stdin, sudo_password, permit_password_write)
+            ))
         try:
             completed = await asyncio.wait_for(
                 asyncio.gather(*tasks),
@@ -1129,7 +1188,8 @@ class SSHExecutor:
                         host.alias, "command_error", None, "", "Sudo rejected execution",
                         time.monotonic() - start, effective_cwd=effective_cwd,
                         root_started=None, failure_kind=kind,
-                        password_rejected=_supplied_password_rejected(bytes(diagnostic)),
+                        password_rejected=(not challenge_password or password_sent)
+                        and _supplied_password_rejected(bytes(diagnostic)),
                     )
             return SSHResult(
                 host.alias, "transport_error", None, safe_stdout, safe_stderr,
@@ -1137,11 +1197,22 @@ class SSHExecutor:
                 root_started=True if marker is not None and confirmed[0] else None,
                 failure_kind="execution_uncertain",
             )
+        if unsafe_root:
+            return SSHResult(
+                host.alias, "command_error", verified_code, "", "",
+                time.monotonic() - start, exit_accepted=False,
+                root_started=True, failure_kind="passwordless_root",
+            )
         if marker is not None and not confirmed[0]:
-            # A missing marker alone does not prove sudo rejection. Only
-            # known sudo diagnostics can justify an auth/policy classification.
-            kind = (_no_password_failure_kind(bytes(diagnostic)) if no_password
-                    else _sudo_failure_kind(bytes(diagnostic)))
+            # Unknown diagnostics are candidates for corroboration only on
+            # an exact, completely drained noninteractive failure. They
+            # never establish safety on their own.
+            if no_password and verified_code == 1 and signal_received is None and not stdout_marker_seen[0]:
+                kind = _no_password_failure_kind(bytes(diagnostic))
+                if kind == "root_unconfirmed":
+                    kind = "sudo_refusal_unconfirmed"
+            else:
+                kind = "root_unconfirmed" if no_password else _sudo_failure_kind(bytes(diagnostic))
             return SSHResult(
                 host.alias, "command_error", cast(int, exit_code), "",
                 "Sudo rejected execution" if kind != "root_unconfirmed"
@@ -1149,6 +1220,7 @@ class SSHExecutor:
                 time.monotonic() - start, effective_cwd=effective_cwd,
                 root_started=None, failure_kind=kind,
                 password_rejected=(sudo_password is not None
+                                   and (not challenge_password or password_sent)
                                    and _supplied_password_rejected(bytes(diagnostic))),
             )
         if marker is not None and setup_failed[0]:

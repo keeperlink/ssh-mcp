@@ -214,8 +214,8 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("sudo")
                 self.assertEqual(remote[1], "-S")
                 self.assertEqual(kwargs["stdin"], asyncio.subprocess.PIPE)
-                if password_error:
-                    proc = SyntheticProcess(b"", password_error, 1)
+                if password_error or safety_error == b"sudo: must have a tty\n":
+                    proc = SyntheticProcess(b"", password_error or safety_error, 1)
                     processes.append(proc)
                     return proc
             proc = SyntheticProcess(_root_stdout(token, b"0\n"), _root_stderr(token), 0)
@@ -266,6 +266,69 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await plain.readiness.check("test"))
             self.assertEqual(calls, ["identity", "safety"])
             self.assertFalse(plain.readiness.sudo_ready("test"))
+
+    async def test_unknown_sudo_diagnostic_uses_confirmed_challenge(self):
+        from app.readiness import ReadinessSettings
+        for mode in ("challenge", "no_prompt", "root_without_input", "wrong_uid", "incomplete",
+                     "missing", "unsupported", "no_credential", "ssh_only"):
+            with self.subTest(mode=mode):
+                host = self.host.model_copy(update={"privileged_access": "none"}) if mode == "ssh_only" else self.host
+                executor = SSHExecutor(
+                    {"test": host}, enabled=True,
+                    sudo_passwords={} if mode == "no_credential" else {"test": PASSWORD},
+                    readiness_settings=ReadinessSettings(authorized=True),
+                )
+                calls = []
+                challenge_processes = []
+
+                async def spawn(*args, **kwargs):
+                    remote = _remote_sudo(args[-1])
+                    if remote == ["/usr/bin/id", "-un"]:
+                        return SyntheticProcess(b"gateway\n", b"", 0)
+                    calls.append(remote[1])
+                    if remote[1] == "-n":
+                        proc = SyntheticProcess(b"", b"sudo: interactive authentication is required",
+                                                127 if mode == "missing" else 2 if mode == "unsupported" else 1)
+                        if mode == "incomplete":
+                            proc.channel_complete = False
+                        return proc
+                    token = _remote_token(remote)
+                    prompt = remote[4].encode()
+                    self.assertRegex(remote[4], r"^SSH-MCP-AUTH-[0-9a-f]{32}:$")
+                    if mode == "no_prompt":
+                        proc = SyntheticProcess(b"", b"unknown diagnostic", 1)
+                    elif mode == "root_without_input":
+                        proc = SyntheticProcess(_root_stdout(token, b"0\n"), _root_stderr(token), 0)
+                    else:
+                        proc = SyntheticProcess(b"", b"", 0)
+                        proc.stdout = asyncio.StreamReader()
+                        proc.stderr = asyncio.StreamReader()
+                        proc.stderr.feed_data(b"[sudo: authenticate] " + prompt)
+                        original = proc.stdin.write
+                        def respond(block):
+                            original(block)
+                            response = b"1000\n" if mode == "wrong_uid" else b"0\n"
+                            proc.stdout.feed_data(_root_stdout(token, response))
+                            proc.stderr.feed_data(_root_stderr(token))
+                            proc.stdout.feed_eof()
+                            proc.stderr.feed_eof()
+                        proc.stdin.write = respond
+                    challenge_processes.append(proc)
+                    return proc
+
+                with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+                    self.assertEqual(await executor.readiness.check("test", privileged=False), mode == "challenge")
+                    self.assertEqual(executor.readiness.sudo_ready("test"), mode == "challenge")
+                    if mode in {"incomplete", "missing", "unsupported", "ssh_only"}:
+                        self.assertEqual(calls, ["-n"])
+                    elif mode == "no_credential":
+                        self.assertEqual(calls, ["-n"])
+                    else:
+                        self.assertEqual(calls, ["-n", "-S"])
+                    if mode in {"no_prompt", "root_without_input"}:
+                        self.assertEqual(challenge_processes[0].stdin.content, b"")
+                    if mode == "root_without_input":
+                        self.assertEqual(executor.readiness.denial("test"), "passwordless_root")
 
     async def test_confirmed_passwordless_root_latches_before_channel_closes(self):
         from app.readiness import ReadinessSettings

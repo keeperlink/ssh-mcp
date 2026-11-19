@@ -100,6 +100,32 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.probe.side_effect = None
         self.assertTrue(await self.m.check(a))
 
+    async def test_corroborated_readiness_respects_suspension_and_recovers_from_unsafe(self):
+        a = "demo-node-a"
+        unknown = ProbeResult(False, "root_unconfirmed", needs_corroboration=True)
+        ok = ProbeResult(True)
+        self.m.mark_passwordless_root(a)
+        self.probe.side_effect = [ok, unknown, ok]
+        self.assertTrue(await self.m.check(a, privileged=False))
+        self.assertTrue(self.m.active(a))
+        self.assertTrue(self.m.sudo_ready(a))
+        self.assertEqual(self.probe.await_args_list[-1].args[1], "sudo_challenge")
+        self.m.suspend(a)
+        self.probe.reset_mock(side_effect=True)
+        self.probe.side_effect = [ok, unknown]
+        self.assertFalse(await self.m.check(a))
+        self.assertTrue(self.m.active(a))
+        self.assertFalse(self.m.sudo_ready(a))
+        self.assertEqual([c.args[1] for c in self.probe.await_args_list], ["identity", "safety"])
+        self.probe.side_effect = [ok, unknown, ok]
+        self.assertTrue((await self.m.recheck(a))["recheck_ok"])
+        self.assertFalse(self.m.password_suspended(a))
+        self.assertTrue(self.m.sudo_ready(a))
+        self.now += 300
+        self.probe.side_effect = [ok, unknown, ProbeResult(False, "probe_timeout")]
+        self.assertFalse(await self.m.check(a))
+        self.assertFalse(self.m.active(a))
+
     async def test_suspend_and_operator_recheck(self):
         a = "demo-node-a"
         self.probe.side_effect = [ProbeResult(True), ProbeResult(True),

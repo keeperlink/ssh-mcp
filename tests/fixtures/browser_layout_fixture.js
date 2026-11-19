@@ -528,6 +528,14 @@
       && hosts.textContent.includes("demo-node-a") && hosts.textContent.includes("N/A")
       && !hosts.textContent.includes("retired"),
       "Readiness popup must show only the configured hosts and N/A for unconfigured sudo");
+    const readinessRow = (alias) => [...hosts.querySelectorAll("tr")]
+      .find(row => row.cells[0]?.textContent === alias);
+    const colored = (cell, className, color) => cell.classList.contains(className)
+      && getComputedStyle(cell).color === color;
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-node-a").cells[2], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-sandbox").cells[2], "readiness-neutral", "rgb(100, 117, 139)"),
+      "Healthy SSH and sudo must be green; N/A must stay neutral");
     wrap.dispatchEvent(new MouseEvent("mouseleave"));
     assert(panel.hidden, "Unpinned popup must close when pointer leaves");
     connection.click();
@@ -545,6 +553,11 @@
     assert(hosts.textContent.includes("Recent failure · still eligible")
       && hosts.textContent.includes("Offline") && hosts.textContent.includes("sudo_authentication_suspended"),
       "Popup must distinguish transient failure, stale SSH, and suspended sudo");
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-warning", "rgb(138, 99, 0)")
+      && colored(readinessRow("demo-node-a").cells[2], "readiness-bad", "rgb(165, 46, 59)")
+      && colored(readinessRow("demo-node-b").cells[1], "readiness-bad", "rgb(165, 46, 59)")
+      && colored(readinessRow("demo-node-b").cells[2], "readiness-bad", "rgb(165, 46, 59)"),
+      "Transient SSH failure must be amber; offline SSH and unavailable sudo must be red");
     const header = [...hosts.querySelectorAll("th")].map(th => th.textContent);
     const sshColumn = header.indexOf("Last SSH success");
     const sudoColumn = header.indexOf("Last sudo success");
@@ -563,6 +576,9 @@
     assert(restored.ok, "Synthetic readiness recovery");
     await waitFor(() => connection.textContent === "Connected"
       && !connection.classList.contains("degraded"), "green recovered connection");
+    assert(colored(readinessRow("demo-node-a").cells[1], "readiness-good", "rgb(24, 116, 75)")
+      && colored(readinessRow("demo-node-b").cells[2], "readiness-good", "rgb(24, 116, 75)"),
+      "Recovered capabilities must restore green status");
   }
   async function checkApprovalControls() {
     const layer = document.getElementById("approval-layer");
