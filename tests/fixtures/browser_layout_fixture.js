@@ -192,6 +192,15 @@
   }
   async function checkUnicodeStoryFilters() {
     const story = document.getElementById("filters").elements.namedItem("story_id");
+    // Isolate live-filter polling from legitimate automatic page-size changes
+    // caused by the responsive footer when narrowing to a one-row result.
+    const size = document.getElementById("rows-per-page");
+    const previousSize = size.value;
+    assert(!size.querySelector('option[value="10"]').disabled, "Ten rows must fit");
+    size.value = "10";
+    size.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor(() => document.getElementById("page-summary").textContent ===
+      "Showing 1–10 of 250", "fixed page size before live filter checks");
     for (const [value, jobId] of [["KA-123", "synthetic-240"],
                                  ["KA-123", "synthetic-241"],
                                  ["ka-123", "synthetic-241"]]) {
@@ -215,14 +224,20 @@
       localStorage.getItem("ssh-mcp-console-filters")).story_id === padded,
     "The entered generic issue ID must remain verbatim in the form and preferences");
     const originalFetch = window.fetch;
-    let reloaded = 0;
+    const reloads = [];
+    let polls = 0;
     window.fetch = (...args) => {
-      if (String(args[0]).startsWith("/console/api/jobs?")) reloaded++;
+      const url = String(args[0]);
+      if (url.startsWith("/console/api/jobs?")) reloads.push(url);
+      if (url.startsWith("/console/api/changes?")) polls++;
       return originalFetch(...args);
     };
     try {
-      await pause(2200);
-      assert(reloaded === 0, "Untrimmed live filter is reloading History every poll");
+      // Each poll schedules its successor only after completing. Observe
+      // two completed poll cycles rather than relying on a timed sleep.
+      await waitFor(() => polls >= 3, "two completed live filter polls");
+      assert(reloads.length === 0,
+        "Untrimmed live filter is reloading History every poll: " + reloads.join(", "));
     } finally {
       window.fetch = originalFetch;
     }
@@ -230,6 +245,8 @@
     story.dispatchEvent(new Event("input", { bubbles: true }));
     await waitFor(() => document.getElementById("page-summary").textContent
       .includes("of 250"), "clear Unicode issue ID filter");
+    size.value = previousSize;
+    size.dispatchEvent(new Event("change", { bubbles: true }));
   }
   async function checkFiltersAndLiveRefresh() {
     const form = document.getElementById("filters");
