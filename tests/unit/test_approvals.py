@@ -632,6 +632,12 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         executed = []
 
         class RestrictedSSH:
+            def require_ready(self, server, *, privileged=False):
+                pass
+
+            async def check_readiness_live(self, server, *, privileged=False):
+                pass
+
             def authorized_host(self, actor, server):
                 return type("Host", (), {"access": "restricted"})()
 
@@ -1008,6 +1014,12 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pr1_gate_preserves_signed_host_and_missing_identity_denial(self):
         class Executor:
+            def require_ready(self, server, *, privileged=False):
+                pass
+
+            async def check_readiness_live(self, server, *, privileged=False):
+                pass
+
             def authorized_host(self, actor, server):
                 if actor != "ssh-mcp-operator" or server != "demo-node2":
                     raise SSHDenied("Not in signed inventory")

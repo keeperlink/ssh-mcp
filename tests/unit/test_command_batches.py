@@ -1104,6 +1104,22 @@ class BatchRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["steps"][0]["status"], "unknown")
         self.assertEqual(result["steps"][1]["status"], "not_attempted")
 
+    async def test_cwd_preflight_readiness_refusal_preserves_unattempted_steps(self):
+        from app.ssh_executor import ReadinessDenied
+        from app.history import HistoryStore
+
+        message = "Host readiness unavailable: ssh_readiness_stale"
+        with patch.object(self.fake, "preflight_cwd", side_effect=ReadinessDenied(message)):
+            result = await self.batch.execute("alice", request(cwd="/home/alice"))
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["failure_kind"], "host_readiness")
+        self.assertIsNone(result["failed_field"])
+        self.assertEqual(result["error"], message)
+        self.assertTrue(all(not s["attempted"] for s in result["steps"]))
+        detail = HistoryStore(self.store).detail("batch_" + result["batch_id"])
+        self.assertIn(message, detail["error"])
+        self.assertEqual(self.fake.calls, [])
+
     async def test_unexpected_preflight_failure_is_audited_not_retried(self):
         with patch.object(self.fake, "preflight_cwd",
                           side_effect=RuntimeError("internal failure")):

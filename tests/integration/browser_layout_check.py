@@ -99,6 +99,34 @@ LIVE_JOB = {
     },
 }
 LIVE_STATE = {"inserted": False, "touched": False, "overlap_complete": False}
+
+
+def readiness_snapshot() -> dict[str, object]:
+    hosts = {
+        alias: {
+            "status": "active", "sudo_ready": privileged,
+            "sudo_configured": privileged, "last_check": NOW,
+            "last_success": NOW, "last_sudo_success": NOW if privileged else None,
+            "ssh_reason": "", "sudo_reason": "" if privileged else "not_configured",
+            "degraded": False,
+        }
+        for alias, privileged in (("demo-node-a", True), ("demo-node-b", True),
+                                  ("demo-sandbox", False))
+    }
+    if LIVE_STATE.get("readiness_degraded"):
+        hosts["demo-node-a"].update(
+            ssh_reason="connection_failed", sudo_ready=False,
+            sudo_reason="sudo_authentication_suspended", degraded=True,
+            last_sudo_success="2020-01-01T00:00:00Z",
+        )
+        hosts["demo-node-b"].update(
+            status="offline", sudo_ready=False, ssh_reason="ssh_readiness_stale",
+            degraded=True,
+        )
+    return {"hosts": hosts, "degraded_count": sum(
+        bool(host["degraded"]) for host in hosts.values())}
+
+
 LIVE_EVENTS: list[dict[str, object]] = []
 # More than twelve 16 KiB pages: the old viewer silently stopped short.
 LARGE_OUTPUT = b"x" * (13 * 16384) + b"END_OF_CAPTURE"
@@ -146,7 +174,17 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/layout_fixture.js":
             self.send((ROOT / "tests/fixtures/browser_layout_fixture.js").read_bytes(), "text/javascript")
         elif url.path == "/console/api/hosts":
-            self.json('{"hosts":["demo-node-a","demo-node-b","demo-sandbox"]}')
+            import json
+            self.json(json.dumps({
+                "hosts": ["demo-node-a", "demo-node-b", "demo-sandbox"],
+                "readiness": readiness_snapshot(),
+            }))
+        elif url.path == "/console/api/test-readiness-degraded":
+            LIVE_STATE["readiness_degraded"] = True
+            self.json('{"ok":true}')
+        elif url.path == "/console/api/test-readiness-restored":
+            LIVE_STATE["readiness_degraded"] = False
+            self.json('{"ok":true}')
         elif url.path == "/console/api/test-publish":
             import json
             if not LIVE_STATE["inserted"]:
@@ -285,6 +323,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json(json.dumps({
                 "jobs": new, "has_more": False,
                 "changes_cursor": str(len(LIVE_EVENTS)) + ":_",
+                # Readiness changes independently of retained History events.
+                "readiness": readiness_snapshot(),
             }))
         elif url.path.startswith("/console/api/jobs/") and url.path.endswith("/output"):
             import json
@@ -369,7 +409,7 @@ def main() -> None:
                     "--disable-dev-shm-usage", "--no-first-run",
                     "--no-default-browser-check", "--hide-scrollbars",
                     "--disable-extensions", f"--window-size={window}",
-                    "--virtual-time-budget=15000",
+                    "--virtual-time-budget=20000",
                     f"--user-data-dir={user_data}", "--dump-dom",
                     f"http://127.0.0.1:{server.server_port}/console?layout={profile}&trim={trim}",
                 ], text=True, capture_output=True, timeout=65, check=False)
@@ -396,6 +436,7 @@ def main() -> None:
             JOBS[6]["output_bytes"] = 0
             LIVE_STATE["touched"] = False
             LIVE_STATE["overlap_complete"] = False
+            LIVE_STATE.pop("readiness_degraded", None)
             LIVE_EVENTS.clear()
     finally:
         server.shutdown()

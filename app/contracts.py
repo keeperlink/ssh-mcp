@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from . import config
 
-CONTRACT_VERSION = "1.9"
+CONTRACT_VERSION = "2.0"
 ArgItem = Annotated[str, Field(min_length=1, max_length=config.SSH_MAX_ARGUMENT_BYTES, strict=True)]
 JobStatus = Literal["awaiting_approval", "queued", "running", "succeeded", "failed", "cancelled", "timed_out", "transport_error", "output_limit", "interrupted", "denied"]
 
@@ -367,8 +367,13 @@ class ServerSummary(BaseModel):
     enabled: bool
 
 
+class HostReadinessResponse(BaseModel):
+    status: Literal["active", "offline", "retired"]
+    sudo_ready: bool
+
+
 class ListServersResponse(BaseModel):
-    servers: list[str]
+    servers: dict[str, HostReadinessResponse]
     history_hosts: list[str] = Field(default_factory=list)
 
 
@@ -552,6 +557,7 @@ class BatchStepResponse(BaseModel):
     exit_accepted: bool | None
     elapsed_seconds: float | None
     attempted: bool
+    error: str | None = None
     output_unavailable: bool | None = None
     stdout: str | None = None
     stderr: str | None = None
@@ -577,6 +583,7 @@ class ExecuteCommandsResponse(BaseModel):
     failure_kind: str | None = None
     failed_step: int | None = None
     failed_field: str | None = None
+    error: str | None = None
     steps_attempted: int | None = Field(default=None, ge=0, le=5)
     requested_cwd: str | None = None
     effective_cwd: str | None = None
@@ -639,7 +646,7 @@ class ToolContract:
 
 # Keep the order stable to make generated schemas reviewable and versionable.
 CONTRACTS: tuple[ToolContract, ...] = (
-    ToolContract("list_servers", "List approved logical server aliases and retained-history hosts.", ListServersRequest, ListServersResponse, True),
+    ToolContract("list_servers", "List authorized aliases and their active, offline or retired readiness states.", ListServersRequest, ListServersResponse, True),
     ToolContract("get_status", "Read local service version, readiness and job state.", ListServersRequest, GetStatusResponse, True),
     ToolContract("execute_command", "Request an audited, allowlisted command job.", ExecuteCommandRequest, ExecuteCommandResponse, False),
     ToolContract("get_job", "Read the state of one job.", GetJobRequest, GetJobResponse, True),

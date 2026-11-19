@@ -512,6 +512,58 @@
       && !toggle.classList.contains("is-active"),
     "Disabled shield must return to neutral gray");
   }
+  async function checkReadinessControls() {
+    const connection = document.getElementById("connection");
+    const wrap = document.getElementById("connection-wrap");
+    const panel = document.getElementById("connection-details");
+    const hosts = document.getElementById("readiness-hosts");
+    assert(connection.textContent === "Connected" && !connection.classList.contains("offline")
+      && !connection.classList.contains("degraded"), "Healthy readiness must be green");
+    assert(panel.hidden && connection.getAttribute("aria-expanded") === "false",
+      "Readiness popup must start closed");
+    wrap.dispatchEvent(new MouseEvent("mouseenter"));
+    assert(!panel.hidden && connection.getAttribute("aria-expanded") === "true",
+      "Hover must open host readiness popup");
+    assert(hosts.querySelectorAll("tbody tr").length === 4
+      && hosts.textContent.includes("demo-node-a") && hosts.textContent.includes("N/A")
+      && !hosts.textContent.includes("retired"),
+      "Readiness popup must show only the configured hosts and N/A for unconfigured sudo");
+    wrap.dispatchEvent(new MouseEvent("mouseleave"));
+    assert(panel.hidden, "Unpinned popup must close when pointer leaves");
+    connection.click();
+    assert(!panel.hidden, "Click must pin readiness popup");
+    wrap.dispatchEvent(new MouseEvent("mouseleave"));
+    assert(!panel.hidden, "Pinned popup must stay open");
+    connection.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", bubbles: true}));
+    assert(panel.hidden && document.activeElement === connection,
+      "Escape must close popup and restore focus");
+    const changed = await fetch("/console/api/test-readiness-degraded");
+    assert(changed.ok, "Synthetic readiness loss");
+    await waitFor(() => connection.textContent === "Degraded"
+      && connection.classList.contains("degraded"), "yellow degraded connection");
+    connection.click();
+    assert(hosts.textContent.includes("Recent failure · still eligible")
+      && hosts.textContent.includes("Offline") && hosts.textContent.includes("sudo_authentication_suspended"),
+      "Popup must distinguish transient failure, stale SSH, and suspended sudo");
+    const header = [...hosts.querySelectorAll("th")].map(th => th.textContent);
+    const sshColumn = header.indexOf("Last SSH success");
+    const sudoColumn = header.indexOf("Last sudo success");
+    const hostRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-node-a");
+    const plainRow = [...hosts.querySelectorAll("tr")].find(row => row.cells[0]?.textContent === "demo-sandbox");
+    assert(sshColumn >= 0 && sudoColumn >= 0
+      && hostRow.cells[sudoColumn].textContent === new Date("2020-01-01T00:00:00Z").toLocaleString()
+      && hostRow.cells[sshColumn].textContent !== hostRow.cells[sudoColumn].textContent
+      && plainRow.cells[sudoColumn].textContent === "N/A",
+      "Readiness popup must distinguish last successful SSH and sudo checks");
+    const bounds = panel.getBoundingClientRect();
+    assert(bounds.left >= 0 && bounds.right <= innerWidth + 1,
+      "Readiness popup must fit within the viewport");
+    connection.click();
+    const restored = await fetch("/console/api/test-readiness-restored");
+    assert(restored.ok, "Synthetic readiness recovery");
+    await waitFor(() => connection.textContent === "Connected"
+      && !connection.classList.contains("degraded"), "green recovered connection");
+  }
   async function checkApprovalControls() {
     const layer = document.getElementById("approval-layer");
     const grant = document.getElementById("approval-grant");
@@ -520,8 +572,11 @@
     const chips = document.getElementById("grant-chips");
     assert(layer.hidden && document.querySelector('[role="dialog"][aria-modal="true"]'),
       "Approval dialog must be accessible but initially hidden");
-    assert(chips.nextElementSibling?.id === "connection",
-      "Active grants belong immediately left of Connected");
+    const connectionWrap = document.getElementById("connection-wrap");
+    const connection = document.getElementById("connection");
+    assert(chips.nextElementSibling === connectionWrap && connectionWrap.contains(connection)
+      && chips.getBoundingClientRect().right <= connection.getBoundingClientRect().left + 1,
+      "Active grants belong immediately left of the connection indicator");
     assert(layer.contains(document.getElementById("approval-notifications"))
       && !document.querySelector(".topbar #approval-notifications"),
       "Notification icon must be inside the approval dialog only");
@@ -1048,6 +1103,7 @@
     await checkFiltersAndLiveRefresh();
     await checkPrivilegedHistory();
     await checkApprovalControls();
+    await checkReadinessControls();
     await checkCancelFocusAndFilteredPages();
     await checkSelectedCompletedStepFollowsActiveParent();
     await checkRetainedBatchRejectionDetails();

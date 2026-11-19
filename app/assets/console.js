@@ -11,7 +11,7 @@
     outputFullyLoaded: false, outputLoadError: null,
     totals: null, summaryFetchedAt: 0, relativeTime: false, listGeneration: 0,
     requestJson: false, responseJson: false, privilegedOnly: false,
-    cancelling: new Set()
+    cancelling: new Set(), readiness: null
   };
   const historyTable = $("history-table");
   const storyMaxChars = Number(historyTable.dataset.storyIdMaxChars || 16);
@@ -166,9 +166,56 @@
     return response.json();
   }
   function setConnection(connected) {
-    $("connection").textContent = connected ? "Connected" : "Connection lost - retrying";
-    $("connection").classList.toggle("offline", !connected);
+    const degraded = connected && Number(state.readiness?.degraded_count || 0) > 0;
+    const button = $("connection");
+    button.textContent = !connected ? "Disconnected" : degraded ? "Degraded" : "Connected";
+    button.classList.toggle("offline", !connected);
+    button.classList.toggle("degraded", degraded);
+    $("readiness-summary").textContent = !connected ? "Console disconnected" :
+      state.readiness ? state.readiness.degraded_count + " degraded host(s)" : "Host readiness unavailable";
+    const table = document.createElement("table");
+    const header = table.insertRow();
+    for (const caption of ["Host", "SSH", "Sudo", "Last check", "Last SSH success", "Last sudo success", "Reason"]) {
+      const th = document.createElement("th");
+      th.textContent = caption;
+      header.append(th);
+    }
+    const time = (value) => value ? new Date(value).toLocaleString() : "—";
+    for (const [alias, host] of Object.entries(state.readiness?.hosts || {})) {
+      const row = table.insertRow();
+      const values = [
+        alias,
+        host.status !== "active" ? "Offline" : host.ssh_reason ? "Recent failure · still eligible" : "Active",
+        !host.sudo_configured ? "N/A" : host.sudo_ready ? "Ready" : "Unavailable",
+        time(host.last_check),
+        time(host.last_success),
+        host.sudo_configured ? time(host.last_sudo_success) : "N/A",
+        [host.ssh_reason, host.sudo_configured ? host.sudo_reason : ""].filter(Boolean).join(" · ") || "—"
+      ];
+      for (const value of values) row.insertCell().textContent = value;
+    }
+    $("readiness-hosts").replaceChildren(table);
   }
+  const connection = $("connection");
+  const wrap = $("connection-wrap");
+  const details = $("connection-details");
+  let pinned = false;
+  function showReadiness(show) {
+    details.hidden = !show;
+    connection.setAttribute("aria-expanded", String(show));
+  }
+  wrap.addEventListener("mouseenter", () => showReadiness(true));
+  wrap.addEventListener("mouseleave", () => { if (!pinned) showReadiness(false); });
+  connection.addEventListener("click", () => {
+    pinned = !pinned;
+    showReadiness(pinned);
+  });
+  document.addEventListener("click", (event) => {
+    if (!wrap.contains(event.target)) { pinned = false; showReadiness(false); }
+  });
+  wrap.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { pinned = false; showReadiness(false); connection.focus(); }
+  });
   function badge(text, kind) {
     return make("span", text, "chip " + kind);
   }
@@ -783,6 +830,7 @@
           if (Array.isArray(data.pending_approvals) && Array.isArray(data.active_grants)) {
             document.dispatchEvent(new CustomEvent("ssh-mcp-approvals-snapshot", { detail: data }));
           }
+          if (data.readiness) state.readiness = data.readiness;
           state.changesCursor = data.changes_cursor;
           if (data.jobs.length) sawChanges = true;
           data.jobs.forEach((job) => {
@@ -852,6 +900,8 @@
   }
   async function loadRegisteredHosts() {
     const response = await api("/console/api/hosts");
+    if (response.readiness) state.readiness = response.readiness;
+    setConnection(true);
     const select = $("filters").elements.namedItem("host");
     select.replaceChildren(new Option("All hosts", ""));
     for (const host of response.hosts) {

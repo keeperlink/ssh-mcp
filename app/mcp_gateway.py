@@ -28,7 +28,7 @@ from starlette.requests import Request
 
 from . import config
 from .approvals import ApprovalManager
-from .approval_status import ApprovalRejected, approval_status_context
+from .approval_status import ApprovalCode, ApprovalRejected, approval_status_context
 from .approval_preview import approval_summary, approval_steps
 from .conversation_access import (
     conversation_id_context, conversation_id_from_request, require_host_access,
@@ -48,7 +48,7 @@ from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
 from .history import HistoryStore
 from .operational import service_status, service_version
 from .oauth import OAuthTokenVerifier, _supported_scopes, client_audit_actor, ActiveOrigins
-from .ssh_executor import SSHDenied, SSHExecutor
+from .ssh_executor import ReadinessDenied, SSHDenied, SSHExecutor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ TOOLS = [
 SSH_TOOLS = [
     Tool(
         name="list_servers",
-        description="List approved SSH hosts visible to your authenticated identity.",
+        description="List authorized host aliases mapped to status (active, offline, retired) and sudo_ready. Use only active hosts for execution. Retired hosts are history-only; sudo_ready is not approval.",
         input_schema=ListServersRequest.model_json_schema(),
         annotations=ToolAnnotations(
             read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -330,6 +330,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
     if probe_enabled and executor is None:
         raise RuntimeError("Binary capability probe requires SSH OAuth authorization")
     if job_registry is not None:
+        job_registry["executor"] = executor
         job_registry["jobs"] = jobs
         job_registry["batches"] = batches
     history = HistoryStore(jobs.store) if jobs is not None else None
@@ -506,9 +507,17 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     assert files is not None
                     files.audit.settle_approval(audit_id, code, denied=denied)
 
+            approved = False
+
+            def record_approval(code: ApprovalCode) -> None:
+                nonlocal approved
+                settle(int(code))
+                approved = True
+                approval_status_context.set(int(code))
+
             sid = (token.claims or {}).get("sid")
             try:
-                approval_code = await require_host_access(
+                await require_host_access(
                     executor, actor, server_name,
                     session_id=sid if isinstance(sid, str) else None,
                     conversation_id=conversation_id_context.get(),
@@ -524,10 +533,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         if _ctx is not None and isinstance(_ctx.request, Request)
                         else None
                     ),
-                    privileged=privileged,
+                    privileged=privileged, on_approved=record_approval,
                 )
-                settle(int(approval_code))
-                approval_status_context.set(int(approval_code))
             except ApprovalRejected as rejected:
                 try:
                     settle(rejected.approval_code, denied=True)
@@ -540,6 +547,33 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "steps_attempted": 0,
                     }, is_error=True)
                 return _error("SSH host access denied or requires operator approval")
+            except ReadinessDenied as exc:
+                try:
+                    if approved:
+                        assert audit_id is not None
+                        if command_request is not None and jobs is not None:
+                            jobs.store.reject_unscheduled(audit_id, str(exc))
+                        elif batch_request is not None and batches is not None:
+                            batches.store.finish(audit_id, "rejected",
+                                                 failure_kind="host_readiness", error=str(exc))
+                            data = batches.get(actor, audit_id)
+                            if data is None:
+                                raise RuntimeError("Batch audit unavailable")
+                            return _result(data, is_error=True)
+                        else:
+                            assert files is not None
+                            files.audit.reject_unscheduled(audit_id, error_code="host_readiness")
+                    else:
+                        settle(None, denied=True)
+                except (sqlite3.DatabaseError, RuntimeError, OSError, ValueError):
+                    return _error("Durable SSH approval audit unavailable")
+                if params.name == "execute_commands":
+                    return _result({
+                        "status": "rejected", "failure_kind": "host_readiness",
+                        "failed_step": None, "failed_field": None,
+                        "steps_attempted": 0, "error": str(exc),
+                    }, is_error=True)
+                return _error(str(exc))
             except (SSHDenied, ValidationError, ValueError):
                 # Manager missing/full/shutdown is operational failure, not
                 # operator Deny; store a terminal row with NULL approval code.
@@ -603,9 +637,10 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 return _result(data) if data is not None else _error("Batch unavailable")
             if params.name == "list_servers":
                 ListServersRequest.model_validate(arguments)
+                historical = history.hosts(actor=actor) if history is not None else []
                 return _result({
-                    "servers": executor.list_servers(actor),
-                    "history_hosts": history.hosts(actor=actor) if history is not None else [],
+                    "servers": executor.discover_hosts(actor, historical),
+                    "history_hosts": historical,
                 })
             if params.name == "probe_binary_file_exchange":
                 if not probe_enabled:
@@ -768,7 +803,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "failure_kind": "pre_execution_rejected",
                         "execution_started": False,
                         "exit_code": None,
-                        "error": "SSH request rejected before command execution",
+                        "error": saved["error"] or "SSH request rejected before command execution",
                     }, is_error=True)
                 return _result({
                     "job_id": job_id, "server": request.server,

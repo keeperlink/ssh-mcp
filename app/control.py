@@ -8,11 +8,13 @@ import logging
 import os
 from pathlib import Path
 import stat
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 SOCKET = Path("/run/ssh-mcp/control.sock")
-LIMIT = 1024
+LIMIT = 4096
+RECHECK_TIMEOUT = 200.0
+Recheck = Callable[[str], Awaitable[dict[str, object]]]
 TIMEOUT = 2.0
 LOGGER = logging.getLogger("app")
 
@@ -46,11 +48,20 @@ def command(request: Any, configured: str) -> dict[str, str]:
             "effective": logging.getLevelName(LOGGER.getEffectiveLevel())}
 
 
-async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, configured: str) -> None:
+async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, configured: str,
+                 recheck: Recheck | None = None) -> None:
     try:
         try:
             line = await asyncio.wait_for(reader.readuntil(b"\n"), TIMEOUT)
-            response = command(json.loads(line), configured)
+            request = json.loads(line)
+            response: dict[str, Any]
+            if (recheck is not None and isinstance(request, dict)
+                    and set(request) == {"action", "alias"} and request["action"] == "recheck-host"
+                    and isinstance(request["alias"], str)):
+                async with asyncio.timeout(RECHECK_TIMEOUT):
+                    response = {"status": "ok", "host": await recheck(request["alias"])}
+            else:
+                response = command(request, configured)
         except (ValueError, TypeError, asyncio.LimitOverrunError, asyncio.IncompleteReadError,
                 TimeoutError, RecursionError):
             response = {"status": "error", "error": "Invalid or incomplete control request"}
@@ -65,7 +76,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, con
 
 
 @asynccontextmanager
-async def control_server(configured: str, path: Path | None) -> AsyncIterator[None]:
+async def control_server(configured: str, path: Path | None,
+                         recheck: Recheck | None = None) -> AsyncIterator[None]:
     configure_logging(configured)
     if path is None:
         yield
@@ -78,7 +90,7 @@ async def control_server(configured: str, path: Path | None) -> AsyncIterator[No
     if path.exists() or path.is_symlink():
         raise RuntimeError("Control socket already exists")
     async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await handle(reader, writer, configured)
+        await handle(reader, writer, configured, recheck)
     server = await asyncio.start_unix_server(client, path=str(path), limit=LIMIT,
                                              start_serving=False)
     try:

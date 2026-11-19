@@ -56,8 +56,15 @@ with LabClient() as c:
         check("tools_list", tools_list)
 
         def servers() -> str:
-            r, payload = c.call("list_servers", {})
-            assert not r.get("isError") and payload and payload["servers"] == ["fixture"]
+            deadline = time.monotonic() + 30
+            while True:
+                r, payload = c.call("list_servers", {})
+                assert not r.get("isError") and payload, r
+                fixture = payload["servers"].get("fixture", {})
+                if fixture.get("status") == "active":
+                    break
+                assert time.monotonic() < deadline, fixture
+                time.sleep(.25)
             return "servers=fixture"
 
         check("list_servers", servers)

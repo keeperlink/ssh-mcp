@@ -874,7 +874,9 @@ class QueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.release = asyncio.Event()
         self.calls = []
 
-        async def remote(_host, command, start, _on_output, *, sudo_password=None):
+        async def remote(_host, command, start, _on_output, *, sudo_password=None,
+                         password_permitted=None):
+            self.assertIsNone(password_permitted)
             self.calls.append((command.argv[0], sudo_password is not None))
             # The transport's execution clock must begin after semaphore admission.
             self.assertLess(time.monotonic() - start, .2)

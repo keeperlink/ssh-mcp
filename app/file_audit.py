@@ -25,7 +25,7 @@ _ERRORS = frozenset({
     "output_limit", "invalid_response", "filesystem_error", "precondition_failed",
     "invalid_patch", "interrupted", "duplicate_operation", "invalid_cursor",
     "changed_file", "invalid_encoding", "response_limit", "already_exists", "partial",
-    "source_unavailable",
+    "source_unavailable", "host_readiness",
 })
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{8,120}$")
 
@@ -120,6 +120,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
     } <= batch_columns
     batch_code = "approval_status" if "approval_status" in batch_columns else "NULL"
     batch_username = "ssh_username" if "ssh_username" in batch_columns else "NULL"
+    batch_error = "error" if "error" in batch_columns else "NULL"
     batch_sql = f"""
           UNION ALL
           SELECT 'batch_'||id,actor,server,'execute_commands',total_steps,'',
@@ -128,6 +129,8 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  created_at,updated_at,
                  NULL,ended_at,NULL,NULL,NULL,NULL,
                  CASE WHEN status='denied' THEN 'Approval denied'
+                      WHEN failure_kind='host_readiness' THEN
+                           COALESCE({batch_error},'Host readiness unavailable')||'; no batch steps ran'
                       WHEN failure_kind='cwd_denied' THEN
                            'Working-directory access denied during preflight; no batch steps ran'
                       WHEN failure_kind='cwd_preflight' THEN
@@ -175,6 +178,8 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  CASE WHEN status IN ('awaiting_approval','queued','denied')
                            OR (status='failed' AND error_code IN
                                ('authorization','duplicate_operation'))
+                           OR (status='failed' AND error_code='host_readiness'
+                               AND elapsed_seconds IS NULL)
                       THEN NULL ELSE started_at END,
                  ended_at,NULL,NULL,NULL,elapsed_seconds,
                  COALESCE(error_code,''),0,0,'file',story_id,conversation_id,NULL,
@@ -206,16 +211,16 @@ class FileAudit:
             ).fetchone()
         return "file_" + str(row["id"]) if row is not None else None
 
-    def reject_unscheduled(self, identifier: str) -> None:
+    def reject_unscheduled(self, identifier: str, *, error_code: str = "authorization") -> None:
         """Terminalize an approved file request rejected before remote dispatch."""
         now = time.time()
         with self.store._connect() as db:
             updated = db.execute(
                 """UPDATE file_operations SET status='failed',
-                   error_code='authorization', updated_at=?,ended_at=?
+                   error_code=?, updated_at=?,ended_at=?
                    WHERE id=? AND status='queued'
                    AND approval_status IS NOT NULL""",
-                (now, now, identifier),
+                (error_code, now, now, identifier),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("File pre-execution audit cannot be finalized")

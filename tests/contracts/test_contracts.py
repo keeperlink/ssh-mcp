@@ -82,7 +82,7 @@ class ContractTests(unittest.TestCase):
         ]
         self.assertEqual([t.name for t in CONTRACTS], expected)
         self.assertEqual(len(CONTRACTS_BY_NAME), len(expected))
-        self.assertEqual(CONTRACT_VERSION, "1.9")
+        self.assertEqual(CONTRACT_VERSION, "2.0")
         self.assertEqual([t.read_only for t in CONTRACTS], [
             True, True, False, True, True, True, True, False,
             False, True, True, False,
@@ -90,7 +90,7 @@ class ContractTests(unittest.TestCase):
         ])
         doc = contract_document()
         self.assertEqual(doc["status"], "active")
-        self.assertEqual(doc["contract_version"], "1.9")
+        self.assertEqual(doc["contract_version"], "2.0")
         self.assertEqual([t["name"] for t in doc["tools"]], expected)
         self.assertEqual(json.loads(json.dumps(doc)), doc)
 

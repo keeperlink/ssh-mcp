@@ -29,8 +29,21 @@ CLIENT = "https://chatgpt.com/oauth/client.json"
 class FakeSSH:
     access = "always-granted"
     username = "mcp-agent"
+    def discover_hosts(self, actor, history_hosts):
+        result = {alias: {'status': 'active', 'sudo_ready': False}
+                  for alias in self.list_servers(actor)}
+        result.update({alias: {'status': 'retired', 'sudo_ready': False}
+                       for alias in history_hosts if alias not in result})
+        return result
+
     def list_servers(self, actor):
         return ["demo-node-b"] if actor == "ssh-mcp-operator" else []
+
+    def require_ready(self, server, *, privileged=False):
+        pass
+
+    async def check_readiness_live(self, server, *, privileged=False):
+        pass
 
     def authorized_host(self, actor, server):
         if actor != "ssh-mcp-operator" or server != "demo-node-b":
@@ -765,7 +778,10 @@ class JobHTTPTests(unittest.TestCase):
 
         discovered = self.tool("list_servers", {})
         hosts = json.loads(discovered["content"][0]["text"])
-        self.assertEqual(hosts["servers"], ["demo-node-b"])
+        self.assertEqual(hosts["servers"], {
+            "demo-node-b": {"status": "active", "sudo_ready": False},
+            "ssh-mcp-retired": {"status": "retired", "sudo_ready": False},
+        })
         self.assertEqual(hosts["history_hosts"], ["demo-node-b", "ssh-mcp-retired"])
         typed_round_trip("list_servers", hosts)
 
