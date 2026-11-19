@@ -177,7 +177,9 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  created_at,updated_at,
                  CASE WHEN status IN ('awaiting_approval','queued','denied')
                            OR (status='failed' AND error_code IN
-                               ('authorization','duplicate_operation','host_readiness'))
+                               ('authorization','duplicate_operation'))
+                           OR (status='failed' AND error_code='host_readiness'
+                               AND elapsed_seconds IS NULL)
                       THEN NULL ELSE started_at END,
                  ended_at,NULL,NULL,NULL,elapsed_seconds,
                  COALESCE(error_code,''),0,0,'file',story_id,conversation_id,NULL,

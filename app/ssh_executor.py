@@ -816,9 +816,22 @@ class SSHExecutor:
             self.require_ready(host.alias, privileged=True)
             if on_admitted is not None and not on_admitted():
                 raise asyncio.CancelledError
+            monitor = self.readiness
+            generation = monitor.password_generation(host.alias) if monitor is not None else None
+
+            def password_permitted() -> bool:
+                assert monitor is not None
+                self.require_ready(host.alias, privileged=True)
+                if monitor.password_generation(host.alias) != generation:
+                    raise ReadinessDenied(
+                        "Host readiness unavailable: sudo_credential_generation_changed"
+                    )
+                return True
+
             # timeout_seconds measures admitted execution, never time in queue.
             result = await self._run(host, request, time.monotonic(), on_output,
-                                     sudo_password=password)
+                                     sudo_password=password,
+                                     password_permitted=password_permitted if monitor is not None else None)
             if result.password_rejected and self.readiness is not None:
                 self.readiness.suspend(host.alias)
             return result

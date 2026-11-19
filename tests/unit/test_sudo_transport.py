@@ -353,6 +353,74 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(processes[0].stdin.closed)
                     self.assertTrue(monitor.password_suspended("test"))
 
+    async def test_delayed_privileged_command_refuses_suspended_generation(self):
+        from app.readiness import ReadinessSettings
+
+        for recover in (False, True):
+            with self.subTest(recover=recover):
+                host = self.host.model_copy(update={"max_parallel": 2})
+                executor = SSHExecutor(
+                    {"test": host}, enabled=True, sudo_passwords={"test": PASSWORD},
+                    readiness_settings=ReadinessSettings(authorized=True),
+                )
+                monitor = executor.readiness
+                store = JobStore(self.base / f"race-{recover}.sqlite")
+                manager = JobManager(executor, store)
+                connecting = asyncio.Event()
+                release = asyncio.Event()
+                processes = []
+                rejected = []
+                delayed = self.request.model_copy(update={"argv": ["/usr/bin/true"]})
+                rejecting = self.request.model_copy(update={"argv": ["/usr/bin/false"]})
+
+                async def spawn(*args, **kwargs):
+                    remote = _remote_sudo(args[-1])
+                    if remote == ["/usr/bin/id", "-un"]:
+                        return SyntheticProcess(b"gateway\n", b"", 0)
+                    if remote[1] == "-n":
+                        return SyntheticProcess(b"", b"sudo: a password is required\n", 1)
+                    if remote[-1] == "/usr/bin/true":
+                        connecting.set()
+                        await release.wait()
+                        proc = SyntheticProcess(b"", b"sudo: no password was provided\n", 1)
+                        processes.append(proc)
+                        return proc
+                    if remote[-1] == "/usr/bin/false":
+                        proc = SyntheticProcess(b"", b"sudo: 1 incorrect password attempt\n", 1)
+                        rejected.append(proc)
+                        return proc
+                    token = _remote_token(remote)
+                    return SyntheticProcess(_root_stdout(token, b"0\n"), _root_stderr(token), 0)
+
+                with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+                    self.assertTrue(await monitor.check("test", privileged=True))
+                    pending = asyncio.create_task(
+                        manager.execute_sync("operator", delayed, admitted_root=True))
+                    try:
+                        await asyncio.wait_for(connecting.wait(), 1)
+                        result = await executor._execute_approved_privileged("operator", rejecting)
+                        self.assertTrue(result.password_rejected)
+                        self.assertTrue(monitor.password_suspended("test"))
+                        self.assertEqual(bytes(rejected[0].stdin.content), PASSWORD.encode() + b"\n")
+                        if recover:
+                            self.assertTrue((await monitor.recheck("test"))["recheck_ok"])
+                        release.set()
+                        job_id, result = await pending
+                    finally:
+                        release.set()
+                        if not pending.done():
+                            pending.cancel()
+                            await asyncio.gather(pending, return_exceptions=True)
+                    self.assertIsNone(result)
+                    self.assertEqual(bytes(processes[0].stdin.content), b"")
+                    self.assertTrue(processes[0].stdin.closed)
+                    detail = HistoryStore(store).detail(job_id)
+                    self.assertEqual(detail["status"], "failed")
+                    self.assertEqual(detail["failure_kind"], "pre_execution_rejected")
+                    self.assertIsNone(detail["root_started"])
+                    self.assertIn("sudo_credential_generation_changed" if recover else
+                                  "sudo_authentication_suspended", detail["error"])
+
     async def test_public_execution_is_still_disabled(self):
         with patch("app.ssh_executor._spawn_ssh_command") as spawn:
             with self.assertRaisesRegex(SSHDenied, "not enabled"):

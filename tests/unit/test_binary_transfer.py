@@ -401,6 +401,11 @@ class ServiceBinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(target.exists())
         self.assertEqual(operations, ["upload_start", "upload_chunk", "upload_finish"])
         self.assertEqual(len(list(self.root.glob(".ssh-mcp-upload-*"))), 1)
+        history = self.viewer.detail(failed["history_id"])
+        self.assertEqual(history["status"], "failed")
+        self.assertEqual(history["error_code"], "host_readiness")
+        self.assertIsNotNone(history["started_at"])
+        self.assertIsNotNone(history["elapsed_seconds"])
 
     async def test_unauthorized_identity_does_not_start_audit(self):
         with self.assertRaises(SSHDenied):
