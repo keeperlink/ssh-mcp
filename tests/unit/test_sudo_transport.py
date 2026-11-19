@@ -421,6 +421,116 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("sudo_credential_generation_changed" if recover else
                                   "sudo_authentication_suspended", detail["error"])
 
+    async def test_post_dispatch_readiness_loss_preserves_execution_evidence(self):
+        from app.batch import BatchManager
+        from app.contracts import ExecuteCommandsRequest
+        from app.readiness import ReadinessSettings
+
+        # A real safety probe can invalidate readiness after the privileged
+        # SSH exec request has been sent, but before its stdin is available.
+        for outcome in ("success", "refused", "ambiguous", "incomplete",
+                        "root_incomplete", "timeout"):
+            for batch in (False, True):
+                with self.subTest(outcome=outcome, batch=batch):
+                    executor = SSHExecutor(
+                        {"test": self.host.model_copy(update={"max_parallel": 2})},
+                        enabled=True, sudo_passwords={"test": PASSWORD},
+                        readiness_settings=ReadinessSettings(authorized=True),
+                    )
+                    monitor = executor.readiness
+                    store = JobStore(self.base / f"dispatch-{outcome}-{batch}.sqlite")
+                    manager = JobManager(executor, store)
+                    batches = BatchManager(manager)
+                    connecting = asyncio.Event()
+                    release = asyncio.Event()
+                    processes = []
+                    unsafe = False
+                    command = self.request.model_copy(update={
+                        "argv": ["/usr/bin/true"], "timeout_seconds": 1,
+                    })
+
+                    async def spawn(*args, **kwargs):
+                        remote = _remote_sudo(args[-1])
+                        if remote == ["/usr/bin/id", "-un"]:
+                            return SyntheticProcess(b"gateway\n", b"", 0)
+                        token = _remote_token(remote)
+                        if remote[1] == "-n" and not unsafe:
+                            return SyntheticProcess(b"", b"sudo: a password is required\n", 1)
+                        if remote[-1] != "/usr/bin/true":
+                            return SyntheticProcess(_root_stdout(token, b"0\n"),
+                                                    _root_stderr(token), 0)
+                        connecting.set()
+                        await release.wait()
+                        if outcome in {"success", "root_incomplete"}:
+                            proc = SyntheticProcess(_root_stdout(token, b"executed\n"),
+                                                    _root_stderr(token), 0)
+                        elif outcome in {"refused", "incomplete"}:
+                            proc = SyntheticProcess(b"", b"sudo: no password was provided\n", 1)
+                        else:
+                            proc = SyntheticProcess(b"", b"unrecognized remote output\n", 1,
+                                                    blocked=outcome == "timeout")
+                        proc.channel_complete = outcome not in {"incomplete", "root_incomplete"}
+                        processes.append(proc)
+                        return proc
+
+                    with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+                        self.assertTrue(await monitor.check("test", privileged=True))
+                        if batch:
+                            req = ExecuteCommandsRequest(
+                                server="test", privileged=True, reason="synthetic race",
+                                commands=[{"argv": command.argv, "timeout_seconds": 1},
+                                          {"argv": ["/usr/bin/false"]}],
+                                timeout_seconds=10, stop_on_error=False,
+                            )
+                            pending = asyncio.create_task(
+                                batches.execute("operator", req, admitted_root=True))
+                        else:
+                            pending = asyncio.create_task(
+                                manager.execute_sync("operator", command, admitted_root=True))
+                        try:
+                            await asyncio.wait_for(connecting.wait(), 1)
+                            unsafe = True
+                            self.assertFalse(await monitor.check("test"))
+                            self.assertEqual(monitor.denial("test"), "passwordless_root")
+                            release.set()
+                            completed = await pending
+                        finally:
+                            release.set()
+                            if not pending.done():
+                                pending.cancel()
+                                await asyncio.gather(pending, return_exceptions=True)
+                            await batches.shutdown()
+                            await manager.shutdown()
+                    self.assertEqual(len(processes), 1)
+                    self.assertEqual(bytes(processes[0].stdin.content), b"")
+                    self.assertTrue(processes[0].stdin.closed)
+                    expected = {"success": ("succeeded", "none"),
+                                "refused": ("failed", "pre_execution_rejected"),
+                                "ambiguous": ("transport_error", "execution_uncertain"),
+                                "incomplete": ("transport_error", "execution_uncertain"),
+                                "root_incomplete": ("transport_error", "output_incomplete"),
+                                "timeout": ("timed_out", "execution_uncertain")}[outcome]
+                    if batch:
+                        first, second = completed["steps"]
+                        self.assertEqual(first["status"], "not_attempted" if outcome == "refused"
+                                         else expected[0])
+                        self.assertEqual(second["status"], "not_attempted")
+                        job_id = first["job_id"]
+                    else:
+                        job_id, result = completed
+                        if outcome == "refused":
+                            self.assertIsNone(result)
+                        else:
+                            self.assertIsNotNone(result)
+                            self.assertEqual(result.stdout, "executed\n" if outcome in
+                                             {"success", "root_incomplete"} else "")
+                    detail = HistoryStore(store).detail(job_id)
+                    self.assertEqual((detail["status"], detail["failure_kind"]), expected)
+                    self.assertEqual(detail["root_started"], True if outcome in
+                                     {"success", "root_incomplete"} else None)
+                    if outcome == "refused":
+                        self.assertIn("passwordless_root", detail["error"])
+
     async def test_public_execution_is_still_disabled(self):
         with patch("app.ssh_executor._spawn_ssh_command") as spawn:
             with self.assertRaisesRegex(SSHDenied, "not enabled"):

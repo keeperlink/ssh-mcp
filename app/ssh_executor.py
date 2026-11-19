@@ -978,10 +978,22 @@ class SSHExecutor:
             asyncio.create_task(stderr_reader),
             asyncio.create_task(process.wait()),
         ]
+        withheld: ReadinessDenied | None = None
+
+        def permit_password_write() -> bool:
+            nonlocal withheld
+            try:
+                return password_permitted is None or password_permitted()
+            except ReadinessDenied as exc:
+                # The command has already been dispatched. Close stdin without
+                # sending the credential, but keep draining the remote evidence.
+                withheld = exc
+                return False
+
         if sudo_password is not None:
             assert process.stdin is not None
             tasks.append(asyncio.create_task(_send_sudo_password(
-                process.stdin, sudo_password, password_permitted,
+                process.stdin, sudo_password, permit_password_write,
             )))
         try:
             completed = await asyncio.wait_for(
@@ -1014,7 +1026,8 @@ class SSHExecutor:
             return SSHResult(host.alias, status, confirmed_exit, stdout_partial, stderr_partial,
                              time.monotonic() - start, effective_cwd=effective_cwd,
                              root_started=(True if confirmed[0] else None),
-                             exit_accepted=False if confirmed_exit is not None else None)
+                             exit_accepted=False if confirmed_exit is not None else None,
+                             failure_kind="execution_uncertain" if withheld is not None else None)
         except (OSError, asyncssh.Error):
             if process.returncode is None:
                 process.kill()
@@ -1035,7 +1048,9 @@ class SSHExecutor:
                              exit_accepted=False if known is not None else None,
                              effective_cwd=effective_cwd,
                              root_started=True if marker is not None and confirmed[0] else None,
-                             failure_kind="output_incomplete" if known is not None else "execution_uncertain")
+                             failure_kind=("output_incomplete" if known is not None
+                                           and (withheld is None or confirmed[0])
+                                           else "execution_uncertain"))
         except BaseException:
             if process.returncode is None:
                 try:
@@ -1064,7 +1079,8 @@ class SSHExecutor:
                        and (marker is None or stdout_marker_seen[0]) else "")
         safe_stderr = cast(str, stderr) if safe_output else ""
         if not channel_complete:
-            outcome_known = verified_code is not None or signal_received is not None
+            outcome_known = ((verified_code is not None or signal_received is not None)
+                             and (withheld is None or confirmed[0]))
             return SSHResult(
                 host.alias, "transport_error", verified_code,
                 safe_stdout, safe_stderr, time.monotonic() - start,
@@ -1072,6 +1088,22 @@ class SSHExecutor:
                 effective_cwd=effective_cwd,
                 root_started=True if marker is not None and confirmed[0] else None,
                 failure_kind="output_incomplete" if outcome_known else "execution_uncertain",
+            )
+        if withheld is not None and not confirmed[0]:
+            # Only a completed, explicitly rejected sudo invocation proves
+            # that withholding the password prevented execution. Missing root
+            # frames alone (even with an exit status) cannot prove that.
+            diagnostic_lines = bytes(diagnostic).decode("utf-8", errors="replace").lower().splitlines()
+            if (not stdout_marker_seen[0] and verified_code == 1
+                    and signal_received is None
+                    and any(line.strip() in {"sudo: no password was provided",
+                                              "sudo: a password is required"}
+                            for line in diagnostic_lines)):
+                raise withheld
+            return SSHResult(
+                host.alias, "transport_error", verified_code, "", "",
+                time.monotonic() - start, effective_cwd=effective_cwd,
+                failure_kind="execution_uncertain",
             )
         if cwd_nonce is not None and cwd_failed[0]:
             return SSHResult(
