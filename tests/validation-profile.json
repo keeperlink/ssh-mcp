@@ -1,5 +1,7 @@
 {
   "version": 1,
   "type": "python-package",
-  "python": "3.14"
+  "python": "3.14",
+  "environment": "ubuntu-26.04",
+  "umask": "022"
 }
