@@ -706,6 +706,21 @@
       "Unmute preference was not saved");
     assert(!mute.classList.contains("is-off"), "Enabled sound icon must not be crossed");
 
+    // Inspect the actual Web Audio buffer and playback calls without relying
+    // on the browser's autoplay permission or physical speakers.
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    assert(Audio, "Browser must provide Web Audio");
+    const originalBufferSource = Audio.prototype.createBufferSource;
+    const played = [];
+    Audio.prototype.createBufferSource = function () {
+      const source = originalBufferSource.call(this);
+      const start = source.start.bind(source);
+      source.start = (...args) => {
+        played.push(source.buffer);
+        start(...args);
+      };
+      return source;
+    };
     const originalFetch = window.fetch;
     const posts = [];
     let serverRevision = 0, serverPending = [], serverGrants = [];
@@ -782,9 +797,29 @@
           pending_approvals: pending, active_grants: grants,
         } }));
       };
+      mute.click();
+      send(0, [{ ...requests[0], id: "synthetic-muted", conversation_id: null,
+        conversation_scope_id: null }]);
+      assert(played.length === 0, "Muted approval must not play a sound");
+      send(0, []);
+      mute.click();
       send(1, requests);
       await waitFor(() => !layer.hidden && document.getElementById("approval-host").textContent
         === "demo-node-a", "first approval appears in centered dialog");
+      assert(played.length === 1, "Concurrent prompts must play just one sonar alert");
+      const sonar = played[0];
+      assert(sonar.numberOfChannels === 1 && Math.abs(sonar.duration - 0.5) < 0.001,
+        "Sonar alert must be mono and 500ms long");
+      const waveform = sonar.getChannelData(0);
+      const maxSample = (from, to) => waveform.subarray(
+        Math.round(from * sonar.sampleRate), Math.round(to * sonar.sampleRate))
+        .reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+      assert(Math.abs(maxSample(0, 0.5) - 0.4) < 0.001
+        && maxSample(0.02, 0.12) > 0.25 && maxSample(0.18, 0.46) > 0.35
+        && maxSample(0.14, 0.16) === 0 && maxSample(0.49, 0.5) === 0,
+        "Sonar must retain its two sweeps, silent gap and bounded peak");
+      send(1, requests);
+      assert(played.length === 1, "Duplicate approvals must not replay the alert");
       const rect = document.querySelector(".approval-modal").getBoundingClientRect();
       assert(Math.abs(rect.left + rect.width / 2 - innerWidth / 2) < 15,
         "Approval modal is not horizontally centered");
@@ -1050,6 +1085,7 @@
       "New grants must reuse numbers of both live grants and pending approvals after overflow");
       send(1055, []);
     } finally {
+      Audio.prototype.createBufferSource = originalBufferSource;
       window.fetch = originalFetch;
     }
   }
