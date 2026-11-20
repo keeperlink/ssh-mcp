@@ -60,7 +60,10 @@ include 5m, 15m, 1h, 8h and 16h. Active grants appear near
 `Connected` and can be revoked; revocation blocks **future**
 operations, not ones already running. Operator audio/desktop
 notifications are opt-in and need an open browser tab; hidden-tab
-approval updates use authenticated SSE.
+approval updates use authenticated SSE. New approvals use a distinctive
+500 ms sonar alert with a bounded peak amplitude and no overlapping
+playback. The existing sound toggle and browser autoplay restrictions
+still apply.
 
 ## Eligible cancellation
 

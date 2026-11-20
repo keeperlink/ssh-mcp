@@ -13,6 +13,8 @@
   };
   let previousFocus = null;
   let audio = null;
+  let alertBuffer = null;
+  let alertUntil = 0;
   const remaining = (expiry) => Math.max(0, Math.ceil(Number(expiry) - Date.now() / 1000));
   const countdown = (seconds) => {
     if (seconds < 60) return seconds + "s";
@@ -50,6 +52,33 @@
       state.notices.delete(id);
     }
   }
+  function makeAlertBuffer(context) {
+    // Sonar alert: two short metallic sweeps, with smooth attack/release.
+    // Generate once at the browser's sample rate; no asset or network request.
+    const rate = context.sampleRate;
+    const buffer = context.createBuffer(1, Math.round(rate * 0.5), rate);
+    const samples = buffer.getChannelData(0);
+    for (const [start, duration, low, high] of [
+      [0.012, 0.12, 830, 1660],
+      [0.17, 0.31, 1020, 1450]
+    ]) {
+      const offset = Math.round(start * rate);
+      const length = Math.round(duration * rate);
+      for (let i = 0; i < length; i++) {
+        const t = i / rate;
+        const phase = 2 * Math.PI * (low * t + (high - low) * t * t / (2 * duration));
+        const attack = Math.sin(Math.PI / 2 * Math.min(t / 0.009, 1)) ** 2;
+        const release = Math.sin(Math.PI / 2 * Math.min((duration - t) / 0.018, 1)) ** 2;
+        samples[offset + i] = (Math.sin(phase) + 0.32 * Math.sin(2.01 * phase)
+          + 0.12 * Math.sin(3.03 * phase)) * Math.exp(-2 * t / duration) * attack * release;
+      }
+    }
+    const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+    if (peak > 0) {
+      for (let i = 0; i < samples.length; i++) samples[i] *= 0.4 / peak;
+    }
+    return buffer;
+  }
   function alertSound() {
     if (state.muted) return;
     try {
@@ -57,16 +86,15 @@
       if (!Audio) return;
       audio ||= new Audio();
       if (audio.state === "suspended") audio.resume().catch(() => {});
-      const oscillator = audio.createOscillator();
-      const gain = audio.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = 660;
-      gain.gain.setValueAtTime(0.0001, audio.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.085, audio.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.25);
-      oscillator.connect(gain).connect(audio.destination);
-      oscillator.start();
-      oscillator.stop(audio.currentTime + 0.26);
+      // Coalesce concurrent prompts instead of stacking loud waveforms.
+      const now = audio.currentTime;
+      if (now < alertUntil) return;
+      alertBuffer ||= makeAlertBuffer(audio);
+      const source = audio.createBufferSource();
+      source.buffer = alertBuffer;
+      source.connect(audio.destination);
+      source.start(now);
+      alertUntil = now + alertBuffer.duration;
     } catch (_) {
       // Browser autoplay policy may forbid sound until an operator gesture.
     }
