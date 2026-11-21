@@ -143,7 +143,11 @@ LARGE_OUTPUT = b"x" * (13 * 16384) + b"END_OF_CAPTURE"
 JOBS[3]["output_bytes"] = len(LARGE_OUTPUT)
 FINAL_OUTPUT = b"OUTPUT_AFTER_COMPLETION"
 def viewer_page() -> bytes:
-    with patch.object(config, "MCP_CLIENT_LABELS", {CLIENT_A: "Agent A", CLIENT_B: "Agent B"}):
+    clients = {
+        "Agent A": {"identities": [CLIENT_A], "conversation_id": {"sources": []}},
+        "Agent B": {"identities": [CLIENT_B], "conversation_id": {"sources": []}},
+    }
+    with patch.object(config, "MCP_CLIENTS", clients):
         return _history_page("synthetic-csrf").replace(
             "</body>", '<output id="layout-test-result">PENDING</output>'
             '<script src="/layout_fixture.js" defer></script></body>',
