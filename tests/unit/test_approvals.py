@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -271,6 +272,7 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         pending = self.manager.pending[request_id].public()
         self.assertFalse(pending["requires_host"])
         self.assertTrue(pending["requires_root"])
+        self.assertFalse(pending["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="5m"))
         await task
         self.assertEqual(self.manager.grants, {})
@@ -286,13 +288,16 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         task, request_id = await self._root_pending()
         self.assertFalse(self.manager.pending[request_id].grant_host)
         self.assertTrue(self.manager.pending[request_id].grant_root)
+        self.assertTrue(self.manager.pending[request_id].public()["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="1h"))
         await task
         self.assertGreaterEqual(self.manager.grants[KEY], self.manager.root_grants[KEY])
+        self.assertTrue(self.manager.revoke(self.manager.grant_id(KEY, "root")))
+        self.assertIn(KEY, self.manager.grants)
         long_expiry = time.monotonic() + 16 * 3600
         self.manager.grants[KEY] = long_expiry
-        self.manager.root_grants.pop(KEY)
         task, request_id = await self._root_pending()
+        self.assertTrue(self.manager.pending[request_id].public()["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="5m"))
         await task
         self.assertEqual(self.manager.grants[KEY], long_expiry)
@@ -1011,6 +1016,138 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SSHDenied):
             await second
         self.assertEqual(self.manager.snapshot()["active_grants"], [])
+
+    async def test_verified_agent_without_conversation_reuses_timed_grant_across_logins(self):
+        from app.approval_status import ApprovalCode
+
+        class Executor:
+            _sudo_passwords = {"demo-node2": "synthetic"}
+
+            def authorized_host(self, actor, server):
+                if actor not in ("operator@client-a", "operator@client-b") or server != "demo-node2":
+                    raise SSHDenied("Not in signed inventory")
+                return type("Host", (), {"access": "restricted",
+                                         "privileged_access": "restricted"})()
+
+            async def check_readiness_live(self, server, *, privileged=False):
+                pass
+
+            def require_ready(self, server, *, privileged=False):
+                pass
+
+        executor = Executor()
+        client_a = "https://example.invalid/client-a.json"
+        client_b = "https://example.invalid/client-b.json"
+
+        async def request(actor, client, sid, conversation=None, privileged=False):
+            return await require_host_access(
+                executor, actor, "demo-node2", session_id=sid,
+                conversation_id=conversation, approvals=self.manager,
+                client_id=client, privileged=privileged,
+                tool="execute_command", reason="Synthetic verified OAuth request",
+            )
+
+        first = asyncio.create_task(request("operator@client-a", client_a, "oauth-sid-1"))
+        await asyncio.sleep(0)
+        item = next(iter(self.manager.pending.values()))
+        self.assertEqual(item.public()["grant_scope"], "agent")
+        self.assertIsNone(item.public()["conversation_id"])
+        self.assertIsNone(item.public()["conversation_scope_id"])
+        self.assertTrue(item.public()["timed_grants_allowed"])
+        self.assertTrue(self.manager.decide(item.id, grant=True, duration="8h"))
+        self.assertEqual(await first, ApprovalCode.APPROVED_TIMED)
+        self.assertEqual(await request("operator@client-a", client_a, "oauth-sid-2"),
+                         ApprovalCode.APPROVED_TIMED)
+        self.assertFalse(self.manager.pending)
+
+        grants = self.manager.snapshot()["active_grants"]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["grant_scope"], "agent")
+        self.assertIsNone(grants[0]["conversation_id"])
+        self.assertEqual(grants[0]["scope_id"], item.public()["scope_id"])
+        self.assertEqual(len(self.manager.grants), 1)
+        self.assertNotIn("oauth-sid-1", str(grants))
+        self.assertNotIn(client_a, str(grants))
+
+        other = asyncio.create_task(request("operator@client-b", client_b, "oauth-sid-3"))
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.manager.pending), 1)
+        self.manager.decide(next(iter(self.manager.pending)), grant=False)
+        with self.assertRaises(SSHDenied):
+            await other
+
+        conversation = asyncio.create_task(request("operator@client-a", client_a,
+                                                   "oauth-sid-2", "chat-1"))
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.manager.pending), 1)
+        self.manager.decide(next(iter(self.manager.pending)), grant=False)
+        with self.assertRaises(SSHDenied):
+            await conversation
+
+        root = asyncio.create_task(request("operator@client-a", client_a,
+                                           "oauth-sid-4", privileged=True))
+        await asyncio.sleep(0)
+        pending = next(iter(self.manager.pending.values()))
+        self.assertFalse(pending.grant_host)
+        self.assertTrue(pending.grant_root)
+        self.assertTrue(pending.public()["host_grant_extension_possible"])
+        self.assertTrue(self.manager.decide(pending.id, grant=True, duration="5m"))
+        self.assertEqual(await root, ApprovalCode.APPROVED_TIMED)
+        self.assertEqual(await request("operator@client-a", client_a, "oauth-sid-5",
+                                       privileged=True), ApprovalCode.APPROVED_TIMED)
+        active = self.manager.snapshot()["active_grants"]
+        self.assertEqual(len(active), 2)
+        self.assertEqual({g["kind"] for g in active}, {"host", "root"})
+        self.assertEqual(len({g["scope_id"] for g in active}), 1)
+        root_grant = next(g for g in active if g["kind"] == "root")
+        self.assertTrue(self.manager.revoke(root_grant["id"]))
+        again = asyncio.create_task(request("operator@client-a", client_a,
+                                            "oauth-sid-6", privileged=True))
+        await asyncio.sleep(0)
+        self.assertEqual(len(self.manager.pending), 1)
+        self.manager.decide(next(iter(self.manager.pending)), grant=False)
+        with self.assertRaises(SSHDenied):
+            await again
+        host_grant = next(g for g in self.manager.snapshot()["active_grants"])
+        self.assertTrue(self.manager.revoke(host_grant["id"]))
+        self.assertEqual(self.manager.snapshot()["active_grants"], [])
+
+    async def test_two_unlabelled_agent_grants_have_distinct_stable_revoke_identities(self):
+        clients = ("https://one.example.invalid/client.json",
+                   "https://two.example.invalid/client.json")
+        with patch.object(config, "MCP_CLIENT_LABELS", {}):
+            for index, client_id in enumerate(clients):
+                key = (f"agent:operator-{index}", client_id, "demo-node2")
+                task = asyncio.create_task(self.manager.require(
+                    key, client_id=client_id, tool="execute_command",
+                    reason="Synthetic agent grant", summary="id",
+                    host_required=True, root_required=True,
+                ))
+                await asyncio.sleep(0)
+                pending = next(iter(self.manager.pending.values()))
+                fingerprint = hashlib.sha256(client_id.encode()).hexdigest()[:12]
+                self.assertEqual(pending.public()["client_disambiguator"], fingerprint)
+                self.assertTrue(self.manager.decide(pending.id, grant=True, duration="5m"))
+                await task
+            active = self.manager.snapshot()["active_grants"]
+            self.assertEqual(len(active), 4)
+            self.assertEqual({g["agent"] for g in active}, {"Unknown"})
+            fingerprints = {hashlib.sha256(x.encode()).hexdigest()[:12] for x in clients}
+            self.assertEqual({g["client_disambiguator"] for g in active}, fingerprints)
+            self.assertEqual(len({g["scope_id"] for g in active}), 2)
+            self.assertEqual(len({g["id"] for g in active}), 4)
+            for fingerprint in fingerprints:
+                pair = [g for g in active if g["client_disambiguator"] == fingerprint]
+                self.assertEqual({g["kind"] for g in pair}, {"host", "root"})
+                self.assertEqual(len({g["scope_id"] for g in pair}), 1)
+            self.assertNotIn(clients[0], str(active))
+            self.assertNotIn(clients[1], str(active))
+            target = next(g for g in active if g["kind"] == "host")
+            self.assertTrue(self.manager.revoke(target["id"]))
+            remaining = self.manager.snapshot()["active_grants"]
+            self.assertEqual(len(remaining), 2)
+            self.assertEqual({g["client_disambiguator"] for g in remaining},
+                             fingerprints - {target["client_disambiguator"]})
 
     async def test_pr1_gate_preserves_signed_host_and_missing_identity_denial(self):
         class Executor:

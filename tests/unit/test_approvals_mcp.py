@@ -229,7 +229,7 @@ class MCPApprovalHTTPTests(unittest.TestCase):
                                       extra_headers=[(header, "other")]).get("isError"))
         self.assertEqual(self.executor.calls, 3)
 
-    def test_headerless_client_can_approve_once_but_not_create_timed_grant(self):
+    def test_headerless_client_gets_agent_scoped_timed_host_and_root_grants(self):
         for privileged in (False, True):
             with self.subTest(privileged=privileged):
                 thread, box, request_id = self._start_call(
@@ -237,21 +237,27 @@ class MCPApprovalHTTPTests(unittest.TestCase):
                 )
                 pending = self.manager.pending[request_id].public()
                 self.assertIsNone(pending["conversation_id"])
-                self.assertIsNone(pending["scope_id"])
+                self.assertIsNotNone(pending["scope_id"])
+                self.assertEqual(pending["grant_scope"], "agent")
+                self.assertIsNone(pending["conversation_scope_id"])
                 self.assertEqual(pending["client_id"], CLIENT)
-                self.assertFalse(pending["timed_grants_allowed"])
-                self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 404)
-                self.assertEqual(self.manager.snapshot()["active_grants"], [])
-                self.assertEqual(self._decision(request_id, "grant").status_code, 200)
+                self.assertTrue(pending["timed_grants_allowed"])
+                self.assertEqual(self._decision(request_id, "grant", "5m").status_code, 200)
                 response = self._result(thread, box)
                 self.assertFalse(response.get("isError"), response)
                 data = json.loads(response["content"][0]["text"])
                 details = self.client.get(f"/console/api/jobs/{data['job_id']}").json()["job"]
                 self.assertIsNone(details["conversation_id"])
-                self.assertEqual(details["approval_status"], "approved_explicit")
-        self.assertEqual(self.executor.calls, 1)
-        self.assertEqual(self.executor.root_calls, 1)
-        self.assertEqual(self.manager.snapshot()["active_grants"], [])
+                self.assertEqual(details["approval_status"], "approved_timed")
+                self.assertFalse(self._rpc(conversation=None,
+                    arguments=self._root_arguments() if privileged else None).get("isError"))
+        self.assertEqual(self.executor.calls, 2)
+        self.assertEqual(self.executor.root_calls, 2)
+        grants = self.manager.snapshot()["active_grants"]
+        self.assertEqual(len(grants), 2)
+        self.assertEqual({g["kind"] for g in grants}, {"host", "root"})
+        self.assertEqual({g["grant_scope"] for g in grants}, {"agent"})
+        self.assertEqual(len({g["scope_id"] for g in grants}), 1)
 
     def test_codex_and_neutral_conversation_ids_allow_scoped_timed_grants(self):
         for conversation, header, metadata in (
@@ -310,8 +316,9 @@ class MCPApprovalHTTPTests(unittest.TestCase):
                 conversation=target, header=None, metadata=meta,
             )
             self.assertEqual(self.executor.calls, 2)
-            self.assertEqual(self.manager.pending[request_id].public()["timed_grants_allowed"],
-                             target is not None)
+            self.assertTrue(self.manager.pending[request_id].public()["timed_grants_allowed"])
+            self.assertEqual(self.manager.pending[request_id].public()["grant_scope"],
+                             "agent" if target is None else "conversation")
             self.assertEqual(self._decision(request_id, "deny").status_code, 200)
             self.assertTrue(self._result(thread, box).get("isError"))
         self.assertEqual(self.executor.calls, 2)
