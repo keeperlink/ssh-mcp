@@ -15,15 +15,12 @@
     "operator_subject": "ssh-mcp-operator",
     "access_token_ttl_seconds": 900,
     "authorization_code_ttl_seconds": 300,
-    "client_metadata_url": "https://chatgpt.com/oauth/client.json",
     "validate_client_metadata": true,
     "client_metadata_cache_seconds": 3600,
-    "allowed_redirect_uris": [
-      "https://chatgpt.com/connector_platform_oauth_redirect"
-    ],
     "login_max_failures": 5,
     "login_window_seconds": 300,
-    "session_ttl_seconds": 86400
+    "session_ttl_seconds": 86400,
+    "dcr_enabled": true
   },
   "ssh": {
     "enabled": true,
@@ -62,5 +59,28 @@
     "max_concurrent": 5,
     "stale_seconds": 300,
     "stale_retry_seconds": 120
+  },
+  "clients": {
+    "ChatGPT": {
+      "identities": [
+        "https://chatgpt.com/oauth/client.json"
+      ],
+      "conversation_id": {
+        "sources": [
+          {
+            "type": "header",
+            "name": "X-OpenAI-Session"
+          },
+          {
+            "type": "metadata",
+            "name": "x-codex-turn-metadata",
+            "field": "thread_id"
+          }
+        ]
+      },
+      "offline_redirect_uris": [
+        "https://chatgpt.com/connector_platform_oauth_redirect"
+      ]
+    }
   }
 }

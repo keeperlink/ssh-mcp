@@ -27,7 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from starlette.concurrency import run_in_threadpool
 
 from . import config
-from .client_identity import UNKNOWN_AGENT, agent_label, resolve_client_id
+from .client_identity import UNKNOWN_AGENT, agent_label
 from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
@@ -125,8 +125,9 @@ class HistoryStore:
 
     @staticmethod
     def _client_id(client_id: str | None, actor: str) -> str | None:
-        return resolve_client_id(client_id, actor, config.MCP_CLIENT_LABELS,
-                                 config.MCP_OPERATOR_SUBJECT, config.MCP_CIMD_CLIENT_ID)
+        # The one-time audit migration normalizes all historical rows.
+        # Never infer an OAuth identity from a mutable audit actor.
+        return client_id
 
     @staticmethod
     def _agent_key(client_id: str | None, actor: str) -> str:
