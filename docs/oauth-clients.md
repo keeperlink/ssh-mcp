@@ -160,6 +160,26 @@ retain their independent absolute expiry. The private backup of the existing
 database now includes DCR registrations; do not discard this database during
 upgrade or rollback.
 
+### Operator-pinned dynamically registered identities
+
+The DCR `client_name` is self-asserted. A verified exact `dcr_...` ID may be
+added under the signed top-level `clients` mapping, for example:
+
+```json
+{
+  "Grok": {
+    "identities": ["dcr_QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"],
+    "conversation_id": {"sources": []}
+  }
+}
+```
+
+This is a synthetic example, not a live registration. Client display labels
+never authorize OAuth or SSH. Separate registered IDs remain isolated even
+when grouped under one label. A newly registered ID must be independently
+verified and pinned in a separately signed configuration release.
+See [the unified client registry and migration](configuration.md).
+
 ### Administrative inspection and revocation
 
 From a trusted host/container environment with the project package available

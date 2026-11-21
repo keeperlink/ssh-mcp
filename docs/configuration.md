@@ -49,8 +49,8 @@ Never mount two service instances to the same database.
 | `MCP_ISSUER` | Public HTTPS origin, without path/trailing slash; resource equals issuer + `/mcp` |
 | `MCP_ALLOWED_HOSTS` | Explicit public host plus private localhost health checks |
 | `MCP_ALLOWED_ORIGINS` | Initial trusted HTTP Origins; active consented clients add exact approved callback origins, which persist in OAuth sessions |
-| `MCP_CIMD_CLIENT_ID` | Configured legacy client identity (default ChatGPT), preserving its existing audit actor; **not** a client allowlist in online mode |
-| `MCP_ALLOWED_REDIRECT_URIS` | Existing single-client fallback for offline/synthetic mode; not a limit for newly discovered online clients |
+| `MCP_CIMD_CLIENT_ID` | Standalone offline fallback client identity; managed signed service derives it from clients |
+| `MCP_ALLOWED_REDIRECT_URIS` | Standalone offline fallback redirects; managed service derives them from clients |
 | `MCP_CIMD_VALIDATE_REMOTE` | Keep `true` for dynamic HTTPS CIMD discovery; disabling enforces the single configured legacy client |
 | `MCP_DCR_ENABLED` | Default `true`: enable RFC 7591 public-client DCR; managed signed service optional `oauth.dcr_enabled` toggles this feature independently of CIMD |
 | `MCP_LOGIN_KEY` | Independent 32+ char OAuth login credential |
@@ -62,10 +62,8 @@ Never mount two service instances to the same database.
 | `SSH_JOBS_ENABLED`, `SSH_JOBS_DB` | Durable, auditable SSH execution with a persistent SQLite path |
 | `SSH_JOBS_RETENTION_MONTHS` | Calendar-month audit retention, 3 in sample |
 | `HISTORY_VIEWER_ENABLED` | Enable the separate password-protected `/console` |
-| `MCP_CLIENT_LABELS` | Optional JSON map of exact OAuth client metadata IDs to operator-chosen console labels; managed installations set `viewer.client_labels` in signed service.json |
 | `HISTORY_STORY_ID_MAX_CHARS`, `HISTORY_STORY_ID_TRUNCATE_FROM` | Optional console table display settings (16, end by default); managed installations set them via viewer.story_id_max_chars and viewer.story_id_truncate_from in signed service.json |
 | `MCP_METRICS_ENABLED` | Disabled in example; enabling needs a distinct 32+ char `MCP_METRICS_TOKEN` |
-| `MCP_CONVERSATION_HEADER_NAME` | Optional dedicated workflow header; default `X-OpenAI-Session` |
 | `WEB_CONCURRENCY` / `UVICORN_WORKERS` | Both must be 1; grants and approval queue are in-process |
 
 Do **not** set legacy `SSH_JOBS_RETENTION_SECONDS` alongside
@@ -74,31 +72,78 @@ issuer/resource are startup failures; no anonymous SSH fallback is
 provided. Token expiration is fixed at 15 minutes, while operator
 authorization sessions have bounded absolute lifetimes.
 
-## Console client attribution
+## Signed client identities and conversation selectors
 
-For environment-file mode set a JSON mapping, for example
-`MCP_CLIENT_LABELS='{"https://agent.example.org/client.json":"My agent"}'`.
-Managed mode uses the same mapping as the optional `viewer.client_labels`
-object. Up to 32 unique labels of 1–32 printable characters are allowed;
-`Unknown` is reserved. Use exact public HTTPS client metadata document IDs,
-not the operator subject, client-declared name, user agent, or conversation
-ID. These labels are display metadata only, never an authorization rule.
-Do not put credentials in metadata URLs or labels.
+The managed signed configuration has one top-level `clients` object, keyed
+by operator-approved display name. Standalone environment mode uses
+`MCP_CLIENTS` with the same JSON object. For example:
 
-The service persists the verified OAuth client ID at admission in the
-existing job, batch and file audit tables, including recorded denials.
-SQLite upgrades add nullable columns; no history is rewritten. Existing
-client-specific hashed actors can be mapped to configured clients, but
-the old shared operator actor is ambiguous and is displayed as Unknown.
-Unconfigured clients are also Unknown. Labels are resolved at read time,
-so updating the mapping updates older attributable records as well. Client
-IDs are visible in authenticated console details (URL queries omitted).
-MCP tools retain their existing actor-scoped response and permission
-contracts.
+```json
+{
+  "clients": {
+    "ChatGPT": {
+      "identities": ["https://chatgpt.com/oauth/client.json"],
+      "conversation_id": {"sources": [
+        {"type": "header", "name": "X-OpenAI-Session"},
+        {"type": "metadata", "name": "x-codex-turn-metadata", "field": "thread_id"}
+      ]},
+      "offline_redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"]
+    },
+    "Custom": {
+      "identities": ["https://custom.example.org/oauth/client.json"],
+      "conversation_id": {"sources": [
+        {"type": "header", "name": "X-Custom-Conversation"}
+      ]}
+    }
+  }
+}
+```
 
-The readiness popup always shows relative timestamps with absolute times
-on hover. The History time toggle adjusts the Time column width independently.
-The Agent column and filter follow Time and precede Story.
+Only exact verified CIMD/DCR client IDs may receive labels or conversation
+selectors. Client-supplied names, wildcards, user agents and guessed session
+IDs never establish client identity. The same display name can group several
+verified IDs, but tokens, audit actor and timed grants remain isolated per
+exact OAuth client ID. Missing or unconfigured selectors mean agent-wide
+operator grants. Conflicting configured sources fail closed, and unconfigured
+headers/metadata are ignored: **no global X-SSH-MCP-Conversation fallback**.
+The clients map is not an OAuth allowlist; otherwise authorized unknown clients
+show as Unknown. The global `oauth.dcr_enabled` bool defaults to true.
+
+### One-time manual audit actor migration and rollback
+
+Before activating the new application against an existing audit DB, perform
+the dry run from a trusted CLI with the *new* signed configuration:
+
+```sh
+python -m app.audit_migration --db /PATH/jobs.sqlite --config /PATH/service.json
+```
+
+Its aggregate report covers three audit tables (`jobs`, `command_batches`,
+`file_operations`), ChatGPT assumptions, recovered hashes, unknown/unrecoverable
+rows and inconsistent actor/client pairs. The original bare operator actor is
+intentionally classified as ChatGPT, including potentially ambiguous legacy
+standalone calls, as explicitly approved. Unknown hashes are not guessed.
+
+Stop **every database writer** independently; preserve the currently signed
+image/config and create a fresh owner-only SQLite backup:
+
+```sh
+python -m app.audit_migration --db /PATH/jobs.sqlite --config /PATH/service.json   --apply --backup /PATH/rollback/jobs-before-SKY-344.sqlite --confirm-stopped
+```
+
+The script performs a consistent SQLite backup (including committed WAL data),
+refuses an existing backup path, checks source fingerprints against the
+backup, updates all tables in one SQLite writer transaction, verifies updated
+rows, and supports repeatable dry-run/idempotent application. It is never
+triggered by application startup. Do not invoke it on live test/production
+without separate authorization.
+
+For rollback, stop all writers and restore the pre-migration SQLite snapshot
+using a trusted SQLite restore operation while the database is offline.
+Restore the matching original signed config and previous image as a set;
+**do not use the old image with migrated per-client actors**. Validate
+History, actor-scoped job reads, and host approvals before restoring traffic.
+Backups contain private audit data and must not be published.
 
 ## Inventory host schema
 

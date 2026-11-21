@@ -16,15 +16,21 @@ _CONVERSATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,255}$")
 conversation_id_context: ContextVar[str | None] = ContextVar("conversation_id", default=None)
 
 
-def conversation_id_from_headers(headers: Mapping[str, str] | None) -> str | None:
-    """Read the configured provider header and optional neutral workflow header."""
-    return conversation_id_from_request(headers)
+def conversation_id_from_headers(
+    headers: Mapping[str, str] | None, *, client_id: str | None = None,
+) -> str | None:
+    """Only explicitly configured sources for the authenticated client count."""
+    return conversation_id_from_request(headers, client_id=client_id)
 
 
 def conversation_id_from_request(
-    headers: Mapping[str, str] | None, metadata: Mapping[str, object] | None = None,
+    headers: Mapping[str, str] | None,
+    metadata: Mapping[str, object] | None = None,
+    *, client_id: str | None = None,
 ) -> str | None:
-    """Validate all supplied correlation sources; never resolve ambiguous IDs."""
+    """Fail closed on conflicting values from a client's explicit selectors."""
+    from .client_registry import sources_for
+
     values: list[str] = []
 
     def add(value: object) -> None:
@@ -32,27 +38,25 @@ def conversation_id_from_request(
             raise ValueError("Invalid conversation identifier")
         values.append(value)
 
-    if headers is not None:
-        for name in dict.fromkeys((
-            config.MCP_CONVERSATION_HEADER_NAME.lower(), "x-ssh-mcp-conversation",
-        )):
-            # Starlette Headers preserves repeated wire fields. Indexing would
-            # silently accept the first value and ignore a conflicting second.
+    for source in sources_for(client_id, config.MCP_CLIENTS):
+        name = source["name"]
+        if source["type"] == "header" and headers is not None:
             if isinstance(headers, Headers):
-                for value in headers.getlist(name):
-                    add(value)
-            elif name in headers:
-                add(headers[name])
-    if metadata is not None and "x-codex-turn-metadata" in metadata:
-        turn = metadata["x-codex-turn-metadata"]
-        if not isinstance(turn, dict):
-            raise ValueError("Invalid Codex conversation metadata")
-        if "thread_id" in turn:
-            add(turn["thread_id"])
-    if metadata is not None and "antigravity.google/conversation_id" in metadata:
-        # The root conversation can contain several independent conversations.
-        # Never use it as a substitute for the exact conversation ID.
-        add(metadata["antigravity.google/conversation_id"])
+                values_for_name = headers.getlist(name)
+            else:
+                values_for_name = [value for key, value in headers.items()
+                                   if key.lower() == name.lower()]
+            for value in values_for_name:
+                add(value)
+        elif source["type"] == "metadata" and metadata is not None and name in metadata:
+            raw_value = metadata[name]
+            if "field" in source:
+                if not isinstance(raw_value, dict):
+                    raise ValueError("Invalid conversation metadata")
+                if source["field"] not in raw_value:
+                    continue
+                raw_value = raw_value[source["field"]]
+            add(raw_value)
     if len(set(values)) > 1:
         raise ValueError("Conflicting conversation identifiers")
     return values[0] if values else None

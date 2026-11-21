@@ -47,7 +47,7 @@ class FakeRestrictedSSH:
         pass
 
     def authorized_host(self, actor, server):
-        if actor != "ssh-mcp-operator" or server != "demo-node2":
+        if actor != oauth.client_audit_actor(CLIENT) or server != "demo-node2":
             raise SSHDenied("Not an approved signed host")
         return self
 
@@ -59,7 +59,7 @@ class FakeRestrictedSSH:
         return result
 
     def list_servers(self, actor):
-        return ["demo-node2"] if actor == "ssh-mcp-operator" else []
+        return ["demo-node2"] if actor == oauth.client_audit_actor(CLIENT) else []
 
     async def execute(self, actor, request, *, on_output=None, on_admitted=None):
         if on_admitted is not None:
@@ -96,6 +96,20 @@ class MCPApprovalHTTPTests(unittest.TestCase):
             "SSH_JOBS_DB": str(Path(tmp.name) / "private" / "jobs.sqlite"),
             "HISTORY_VIEWER_PASSWORD": "synthetic-viewer-" + "x" * 48,
         })
+        self.client_settings = patch.object(config, "MCP_CLIENTS", {
+            "Synthetic": {
+                "identities": [CLIENT],
+                "conversation_id": {"sources": [
+                    {"type": "header", "name": "X-OpenAI-Session"},
+                    {"type": "header", "name": "X-SSH-MCP-Conversation"},
+                    {"type": "metadata", "name": "x-codex-turn-metadata",
+                     "field": "thread_id"},
+                    {"type": "metadata", "name": "antigravity.google/conversation_id"},
+                ]},
+            },
+        })
+        self.client_settings.start()
+        self.addCleanup(self.client_settings.stop)
         self.scope = patch.object(config, "MCP_SSH_TOOLS_ENABLED", True)
         self.origin = patch.object(config, "MCP_ISSUER", "https://localhost")
         self.env.start()

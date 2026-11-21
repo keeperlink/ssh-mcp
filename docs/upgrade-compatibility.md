@@ -16,10 +16,10 @@ installation before switching images or signed configuration.
 | Runtime SSH identity | `/run/ssh-mcp/` | Update inventory identity paths and writable tmpfs mount |
 | Persistent audit database | `/var/lib/ssh-mcp/jobs.sqlite` | Preserve the original SQLite volume and update its configured database path, not just the volume mount |
 | Database backup utility | `/usr/local/bin/ssh-mcp-history-db` | Update operator scripts and offline restore procedures |
-| Remote file helper | `~/.ssh-mcp-helper/helpers/` | New versioned remote helpers are installed on demand; handle previous helpers only under separate remote cleanup approval |
+| Remote file helper | ``/.ssh-mcp-helper/helpers/` | New versioned remote helpers are installed on demand; handle previous helpers only under separate remote cleanup approval |
 | Prometheus metrics | `ssh_mcp_*` | Update Prometheus rules, dashboards and alerts before switching scrape targets |
 | File result identifiers | `ssh-mcp-file://` and `ssh-mcp-probe://` | Update consumers that parse resource URI schemes |
-| Isolated test runner | `ssh-mcp-test`, `~/tools/ssh-mcp-lab/` | Keep pinned versions available until each disposable run is cleaned up |
+| Isolated test runner | `ssh-mcp-test`, ``/tools/ssh-mcp-lab/` | Keep pinned versions available until each disposable run is cleaned up |
 | Compose projects | `ssh-mcp-basic` / `ssh-mcp-standalone` | Preserve explicitly named volumes; changing a Compose project name can create an empty new state volume |
 
 ## Direct Python wheel installations
@@ -89,3 +89,14 @@ time. An older runtime can ignore the additive columns; restoring the newer
 runtime recreates the current history projection. If rolling back to a
 runtime that predates `viewer.client_labels`, restore the previously signed
 service configuration together with the previously signed image.
+
+## SKY-344 signed client registry and mandatory one-time audit conversion
+
+The updated runtime requires a top-level signed `clients` object.
+Old `viewer.client_labels` and global conversation-header configurations
+are no longer supported. Before the image upgrade on any retained audit DB,
+run the reviewed `app.audit_migration` dry run, stop the original service,
+capture an independent SQLite backup, and apply the migration once manually.
+Restore the prior SQLite snapshot **with** the prior signed image/config on
+rollback; never mix the new actor format with the previous runtime. Verify
+ChatGPT, Antigravity, Claude and Grok on test before production release.
