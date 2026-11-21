@@ -28,8 +28,8 @@ and static redirect/origin values remain for offline fixtures and existing
 ChatGPT audit compatibility; with remote validation enabled they **do not**
 limit which new CIMD clients can request authorization.
 
-MCP clients that lack HTTPS CIMD support may require a separately supported
-registration mechanism; Dynamic Client Registration is not enabled.
+MCP clients without HTTPS CIMD may use the optional default-enabled
+RFC 7591 Dynamic Client Registration compatibility endpoint described below.
 
 ## Connection procedure
 
@@ -109,3 +109,78 @@ Do not expose `/metrics`, `/ready` or `/health` publicly.
 An existing proxy must implement this allowlist itself. The
 [optional Caddy example](../examples/standalone/Caddyfile)
 demonstrates equivalent routing.
+
+## Dynamic Client Registration (DCR) compatibility
+
+OAuth 2.0 Dynamic Client Registration (RFC 7591) is an optional legacy-client
+interoperability path, **enabled by default**. The recommended method for
+modern clients remains HTTPS Client ID Metadata Documents (CIMD). Setting
+`MCP_DCR_ENABLED=false` disables DCR's endpoint and discovery advertisement,
+without disabling CIMD. Managed signed installations may set
+`oauth.dcr_enabled: false` in the non-secret service settings; absent means true.
+
+When enabled, authorization-server discovery advertises
+`registration_endpoint: https://YOUR_ISSUER/oauth/register`. This endpoint
+accepts bounded RFC 7591 `application/json` for public clients using
+`authorization_code`, `refresh_token`, `response_types: ["code"]` and
+`token_endpoint_auth_method: "none"`. It returns HTTP 201 with an opaque
+persistent `dcr_...` client ID; it returns **no client secret, access token,
+SSH privilege or approval**. Confidential-client authentication and RFC 7592
+remote registration modification/deletion are not implemented.
+
+Clients registering `grant_types: ["authorization_code"]` receive **no refresh
+token**, and subsequent refresh attempts are refused. A registration that
+includes `"refresh_token"` in its grant types can rotate refresh credentials
+within the operator-approved session. Existing CIMD refresh behavior is unchanged.
+
+Registration redirects require HTTPS except HTTP loopback callbacks for
+`application_type: "native"` clients. The server checks the client ID,
+registered callback, issuer, resource and PKCE S256 at authorization/code
+exchange. A native client's loopback IP/host, path and query must match the
+registration; only its local port may vary, including when the saved native
+loopback callback omitted a port. Untrusted LAN HTTP callbacks,
+userinfo, fragments, unspecified schemes and open redirects are rejected.
+
+On the browser authorization page, review the **exact registered client ID**,
+self-asserted name, callback and requested OAuth scopes before entering the
+separate private login key. A DCR client cannot assert ownership of a software
+brand merely by choosing a name. Its registered client ID is not a secret;
+a fresh OAuth login still requires operator consent. Unapproved registration
+alone never grants SSH access, operator or privileged permissions. Existing
+conversation-scoped or agent-wide timed grants follow the same per-operator,
+verified OAuth client identity rules as CIMD.
+
+Registrations persist in the existing private SQLite OAuth database across
+restarts. Every HTTP registration attempt (including invalid Content-Type, malformed
+JSON and oversized bodies) is charged against per-source and global minute
+limits; a registration cap prevents unbounded storage. Registrations inactive for 90
+days are removed automatically only when no active OAuth session exists.
+Successful authorization/token refresh updates last use. Existing sessions
+retain their independent absolute expiry. The private backup of the existing
+database now includes DCR registrations; do not discard this database during
+upgrade or rollback.
+
+### Administrative inspection and revocation
+
+From a trusted host/container environment with the project package available
+and the private SQLite file accessible, list registrations:
+
+```sh
+python -m app.dcr_admin --db /PATH/TO/jobs.sqlite list
+```
+
+To revoke a verified client ID and all its active OAuth sessions:
+
+```sh
+python -m app.dcr_admin --db /PATH/TO/jobs.sqlite revoke dcr_EXACT_ID --confirm-id dcr_EXACT_ID
+```
+
+Use the exact returned ID, not the self-reported display name. A successful
+administrative removal is committed with a durable, sanitized audit record
+containing only the opaque client ID and removal time. This record is retained
+for at most 365 days and bounded to the most recent 4096 removals. No ordinary
+client can invoke this administrative capability through HTTP. Revoking a DCR
+registration prevents subsequent DCR bearer verification and refresh. Existing
+CIMD registrations, OAuth tokens and consent remain unaffected. Before
+production deployment, verify database backup, upgrade/rollback compatibility,
+OAuth discovery, registration and existing CIMD clients in the test environment.

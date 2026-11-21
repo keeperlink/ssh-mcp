@@ -42,6 +42,7 @@ SECTIONS = {
     "metrics": {"enabled"},
     "viewer": {"enabled", "idle_timeout_seconds", "absolute_timeout_seconds"},
 }
+OAUTH_OPTIONAL = {"dcr_enabled"}
 VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from", "client_labels"}
 HARD = {"max_timeout_seconds": 36000, "max_output_bytes": 1048576,
         "max_argument_bytes": 65536, "max_arguments": 64,
@@ -122,7 +123,9 @@ def _valid_settings(settings: dict[str, Any]) -> None:
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
                 not (keys <= set(settings[section]) <= (keys | VIEWER_OPTIONAL)
-                     if section == "viewer" else set(settings[section]) == keys)
+                     if section == "viewer" else
+                     keys <= set(settings[section]) <= (keys | OAUTH_OPTIONAL)
+                     if section == "oauth" else set(settings[section]) == keys)
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
     ReadinessSettings.from_mapping(settings.get("readiness", {}))
@@ -151,6 +154,8 @@ def _valid_settings(settings: dict[str, Any]) -> None:
             not _positive(oauth["login_max_failures"], 100) or
             not _positive(oauth["login_window_seconds"], 3600)):
         raise ValueError("Invalid OAuth settings")
+    if type(oauth.get("dcr_enabled", True)) is not bool:
+        raise ValueError("Invalid OAuth DCR toggle")
     if (type(oauth["validate_client_metadata"]) is not bool or
             oauth["validate_client_metadata"] is not True or
             not _https_allowlist(oauth["allowed_redirect_uris"], origin_only=False)):
@@ -285,6 +290,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "MCP_CIMD_CLIENT_ID": oauth["client_metadata_url"],
         "MCP_CIMD_VALIDATE_REMOTE": "true" if oauth["validate_client_metadata"] else "false",
         "MCP_CIMD_CACHE_TTL": str(oauth["client_metadata_cache_seconds"]),
+        "MCP_DCR_ENABLED": "true" if oauth.get("dcr_enabled", True) else "false",
         "MCP_ALLOWED_REDIRECT_URIS": ",".join(oauth["allowed_redirect_uris"]),
         "MCP_LOGIN_MAX_FAILURES": str(oauth["login_max_failures"]),
         "MCP_LOGIN_WINDOW_SECONDS": str(oauth["login_window_seconds"]),
