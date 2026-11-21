@@ -79,24 +79,23 @@ database configuration for rollback.
 host filesystem changes, service replacement, credential rotation and
 volume migration require separate approval and recovery evidence.
 
-## Console client labels and audit attribution
+## Current client-scoped audit identity
 
-The client-attribution upgrade adds nullable `client_id` columns to jobs,
-batch manifests and file operation audit rows. Keep the same persistent
-SQLite volume; the migration does not rewrite or discard old records.
-Legacy rows retain their old actors and are resolved conservatively at read
-time. An older runtime can ignore the additive columns; restoring the newer
-runtime recreates the current history projection. If rolling back to a
-runtime that predates `viewer.client_labels`, restore the previously signed
-service configuration together with the previously signed image.
+Current audit rows in `jobs`, `command_batches` and `file_operations` include
+an exact verified OAuth `client_id` and an actor derived from that ID. The
+signed top-level `clients` registry provides display labels and optional
+conversation selectors; neither legacy `viewer.client_labels` nor global
+conversation-header configuration is supported.
 
-## SKY-344 signed client registry and mandatory one-time audit conversion
+The one-time SKY-344 conversion on the managed test and production databases
+is complete. The previous migration utility is not shipped. Fresh
+installations use the current schema. Deployments carrying audit history
+from an older actor format require a separately reviewed offline database
+conversion with all writers stopped, an integrity-checked SQLite snapshot and
+a coordinated application/configuration cutover. Do not guess an OAuth
+identity from a former actor name.
 
-The updated runtime requires a top-level signed `clients` object.
-Old `viewer.client_labels` and global conversation-header configurations
-are no longer supported. Before the image upgrade on any retained audit DB,
-run the reviewed `app.audit_migration` dry run, stop the original service,
-capture an independent SQLite backup, and apply the migration once manually.
-Restore the prior SQLite snapshot **with** the prior signed image/config on
-rollback; never mix the new actor format with the previous runtime. Verify
-ChatGPT, Antigravity, Claude and Grok on test before production release.
+Rollback across the actor-schema cutover requires restoring the **matching**
+pre-conversion database snapshot together with the compatible signed image
+and configuration. Do not run a previous image against a database containing
+client-specific actors.

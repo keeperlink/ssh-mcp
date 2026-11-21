@@ -146,16 +146,13 @@ class DurablePrivilegeAudit(unittest.TestCase):
                          "mcp-agent")
         self.assertEqual(history.detail("batch_" + elevated_batch)["run_as"], "root")
 
-    def test_additive_migration_of_legacy_job_and_batch_rows(self):
+    def test_recent_ssh_username_migration_preserves_job_and_batch_rows(self):
         original = self.store.create("alice", command())
         batches = BatchStore(self.store)
         original_batch = batches.create("alice", batch())
         with self.store._connect() as db:
             db.execute("DROP VIEW IF EXISTS history_events")
-            db.execute("ALTER TABLE jobs DROP COLUMN privileged")
-            db.execute("ALTER TABLE jobs DROP COLUMN root_started")
             db.execute("ALTER TABLE jobs DROP COLUMN ssh_username")
-            db.execute("ALTER TABLE command_batches DROP COLUMN privileged")
             db.execute("ALTER TABLE command_batches DROP COLUMN ssh_username")
         upgraded = JobStore(self.path)
         self.assertIs(upgraded.get("alice", original)["privileged"], False)

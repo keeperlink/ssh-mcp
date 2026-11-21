@@ -20,9 +20,7 @@ sessions. Signing out deletes/revokes the active Console session.
 
 The older `/history` browser route is **removed**, not redirected.
 Upgrades require fresh login and reset stored browser preferences.
-Sessions from the old cookie name are revoked when a legacy cookie
-is presented during successful login or sign-out; never use a
-browser cookie as an API bearer token.
+Console session cookies are not API bearer tokens.
 
 ## Browsing and diagnostics
 
