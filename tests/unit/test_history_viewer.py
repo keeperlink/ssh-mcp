@@ -24,7 +24,6 @@ from app import config
 from app.contracts import ExecuteCommandRequest
 from app.history import (
     ABSOLUTE_SECONDS, CSRF_COOKIE, IDLE_SECONDS, SESSION_COOKIE,
-    LEGACY_SESSION_COOKIE, LEGACY_CSRF_COOKIE,
     ASSETS, HistoryStore, ViewerAuth, _cursor, _date_epoch, _plain_command, _history_page,
     create_history_router,
 )
@@ -536,31 +535,6 @@ class HistoryStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             JobStore(self.path, retention_months=13)
 
-    def test_existing_schema_upgrades_without_erasing_old_audit(self):
-        self.path.unlink()
-        with sqlite3.connect(self.path) as db:
-            db.executescript("""
-                CREATE TABLE jobs (
-                  id TEXT PRIMARY KEY,actor TEXT NOT NULL,server TEXT NOT NULL,
-                  command TEXT NOT NULL,argv_count INTEGER NOT NULL,command_sha256 TEXT NOT NULL,
-                  status TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL,
-                  started_at REAL,ended_at REAL,exit_code INTEGER,elapsed_seconds REAL,
-                  error TEXT NOT NULL DEFAULT '',output_bytes INTEGER NOT NULL DEFAULT 0,
-                  cancel_requested INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE output (job_id TEXT,offset INTEGER,stream TEXT,data BLOB,
-                                     PRIMARY KEY(job_id,offset));
-                INSERT INTO jobs(id,actor,server,command,argv_count,command_sha256,status,
-                  created_at,updated_at,ended_at)
-                VALUES('legacy-job-209','alice','demo-node-b','hostname',2,'abc','succeeded',
-                  2000000000,2000000000,2000000000);
-            """)
-        self.path.chmod(0o600)
-        restored = JobStore(self.path, retention_seconds=366 * 86400)
-        legacy = HistoryStore(restored).detail("legacy-job-209")
-        self.assertEqual(legacy["mode"], "async")
-        self.assertIsNone(legacy["request"])
-        self.assertIsNone(legacy["story_id"])
 
 
 class SyncAuditTests(unittest.IsolatedAsyncioTestCase):
@@ -741,69 +715,6 @@ class BrowserTests(unittest.TestCase):
         done = self.client.post("/console/logout", data={"csrf": csrf},
                                 headers={"Origin": config.MCP_ISSUER})
         self.assertEqual(done.status_code, 303)
-        self.assertEqual(self.client.get("/console/api/jobs").status_code, 401)
-
-    def test_upgrade_login_retires_legacy_session_before_rollback(self):
-        # The old and new application versions use the same retained SQLite DB.
-        before_upgrade = ViewerAuth(HistoryStore(self.store), self.secret)
-        legacy_token = before_upgrade.login("synthetic-operator", self.secret)
-        self.assertIsNotNone(legacy_token)
-        self.assertTrue(before_upgrade.valid(legacy_token, touch=False))
-        self.client.cookies.set(LEGACY_SESSION_COOKIE, legacy_token,
-                                domain="lab.example.net", path="/")
-        self.client.cookies.set(LEGACY_CSRF_COOKIE, "synthetic-old-csrf",
-                                domain="lab.example.net", path="/")
-        self.assertEqual(self.client.get("/console").status_code, 303)
-
-        signed_in = self.login()
-        self.assertEqual(signed_in.status_code, 303)
-        new_token = self.client.cookies[SESSION_COOKIE]
-        self.assertTrue(before_upgrade.valid(new_token, touch=False))
-        self.assertFalse(before_upgrade.valid(legacy_token, touch=False))
-        for name in (LEGACY_SESSION_COOKIE, LEGACY_CSRF_COOKIE):
-            self.assertNotIn(name, self.client.cookies)
-            self.assertTrue(any(
-                item.startswith(name + "=") and "max-age=0" in item.lower()
-                and "secure" in item.lower() and "httponly" in item.lower()
-                for item in signed_in.headers.get_list("set-cookie")
-            ), name)
-        # Simulate a rollback/restart to the old service with the same database
-        # and password: the previously authenticated token stays revoked.
-        rollback_auth = ViewerAuth(HistoryStore(self.store), self.secret)
-        self.assertFalse(rollback_auth.valid(legacy_token, touch=False))
-        self.assertTrue(rollback_auth.valid(new_token, touch=False))
-
-    def test_console_logout_revokes_old_and_new_sessions_on_same_database(self):
-        self.assertEqual(self.login().status_code, 303)
-        new_token = self.client.cookies[SESSION_COOKIE]
-        before_upgrade = ViewerAuth(HistoryStore(self.store), self.secret)
-        legacy_token = before_upgrade.login("synthetic-operator", self.secret)
-        self.assertIsNotNone(legacy_token)
-        self.client.cookies.set(LEGACY_SESSION_COOKIE, legacy_token,
-                                domain="lab.example.net", path="/")
-        self.client.cookies.set(LEGACY_CSRF_COOKIE, "synthetic-old-csrf",
-                                domain="lab.example.net", path="/")
-        csrf = self.client.cookies[CSRF_COOKIE]
-
-        forbidden = self.client.post("/console/logout", data={"csrf": csrf})
-        self.assertEqual(forbidden.status_code, 403)
-        self.assertTrue(before_upgrade.valid(new_token, touch=False))
-        self.assertTrue(before_upgrade.valid(legacy_token, touch=False))
-        signed_out = self.client.post(
-            "/console/logout", data={"csrf": csrf},
-            headers={"Origin": config.MCP_ISSUER},
-        )
-        self.assertEqual(signed_out.status_code, 303)
-        self.assertNotIn(SESSION_COOKIE, self.client.cookies)
-        for name in (LEGACY_SESSION_COOKIE, LEGACY_CSRF_COOKIE):
-            self.assertNotIn(name, self.client.cookies)
-            self.assertTrue(any(
-                item.startswith(name + "=") and "max-age=0" in item.lower()
-                for item in signed_out.headers.get_list("set-cookie")
-            ), name)
-        rollback_auth = ViewerAuth(HistoryStore(self.store), self.secret)
-        self.assertFalse(rollback_auth.valid(new_token, touch=False))
-        self.assertFalse(rollback_auth.valid(legacy_token, touch=False))
         self.assertEqual(self.client.get("/console/api/jobs").status_code, 401)
 
     def test_compact_navigation_uses_validated_environment(self):

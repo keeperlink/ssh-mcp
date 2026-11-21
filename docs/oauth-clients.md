@@ -28,7 +28,7 @@ the designated configured client identity and redirect allowlist are used
 only for that fallback; with remote validation enabled they **do not**
 limit which newly verified CIMD clients can request authorization.
 Historical shared audit actors are normalized through the documented
-manual database migration, not runtime ChatGPT-specific exceptions.
+an explicitly reviewed offline conversion for retained older databases, not runtime ChatGPT-specific exceptions.
 
 MCP clients without HTTPS CIMD may use the optional default-enabled
 RFC 7591 Dynamic Client Registration compatibility endpoint described below.
@@ -182,7 +182,7 @@ This is a synthetic example, not a live registration. Client display labels
 never authorize OAuth or SSH. Separate registered IDs remain isolated even
 when grouped under one label. A newly registered ID must be independently
 verified and pinned in a separately signed configuration release.
-See [the unified client registry and migration](configuration.md).
+See [the unified client registry and current audit model](configuration.md).
 
 ### Administrative inspection and revocation
 

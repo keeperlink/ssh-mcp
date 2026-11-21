@@ -49,8 +49,6 @@ class BatchCanceller(Protocol):
 
 SESSION_COOKIE = "__Host-ssh-mcp-console"
 CSRF_COOKIE = "__Host-ssh-mcp-console-csrf"
-LEGACY_SESSION_COOKIE = "__Host-skym-history"
-LEGACY_CSRF_COOKIE = "__Host-skym-history-csrf"
 IDLE_SECONDS = int(os.getenv('HISTORY_IDLE_TIMEOUT_SECONDS', str(8 * 3600)))
 ABSOLUTE_SECONDS = int(os.getenv('HISTORY_ABSOLUTE_TIMEOUT_SECONDS', str(24 * 3600)))
 LOGIN_WINDOW = 300
@@ -1082,11 +1080,6 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                             samesite="strict", path="/")
         return response
 
-    def clear_legacy_cookies(response: Response) -> None:
-        # Both cookies were host-only Secure cookies at Path=/ in the old UI.
-        for name in (LEGACY_SESSION_COOKIE, LEGACY_CSRF_COOKIE):
-            response.delete_cookie(name, path="/", secure=True, httponly=True, samesite="strict")
-
     @router.post("/console/login")
     async def login(request: Request) -> Response:
         try:
@@ -1099,13 +1092,9 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         session = auth.login(ip, data.get("password", ""))
         if session is None:
             return HTMLResponse(_login_page(data["csrf"], failed=True), status_code=401, headers=_headers())
-        # The former /history cookie may still authorize a row in the same
-        # SQLite store. Revoke it before completing migration to /console.
-        await run_in_threadpool(auth.logout, request.cookies.get(LEGACY_SESSION_COOKIE))
         response = RedirectResponse("/console", status_code=303, headers=_headers())
         response.set_cookie(SESSION_COOKIE, session, max_age=ABSOLUTE_SECONDS,
                             secure=True, httponly=True, samesite="strict", path="/")
-        clear_legacy_cookies(response)
         return response
 
     @router.post("/console/logout")
@@ -1118,10 +1107,8 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
             return _json({"error": "Request forbidden"}, 403)
         async with decision_lock:
             await run_in_threadpool(auth.logout, request.cookies.get(SESSION_COOKIE))
-            await run_in_threadpool(auth.logout, request.cookies.get(LEGACY_SESSION_COOKIE))
         response = RedirectResponse("/console/login", status_code=303, headers=_headers())
         response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
-        clear_legacy_cookies(response)
         return response
 
     @router.get("/console")

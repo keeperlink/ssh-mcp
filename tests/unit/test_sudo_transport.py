@@ -1295,15 +1295,6 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["failure_kind"], "sudo_authentication")
         self.assertNotIn("SECRET DETAIL", json.dumps(detail))
 
-    async def test_failure_kind_column_migrates_legacy_jobs(self):
-        store = JobStore(self.base / "legacy" / "jobs.sqlite")
-        old_id = store.create("operator", self.request)
-        with store._connect() as db:
-            db.execute("DROP VIEW history_events")
-            db.execute("ALTER TABLE jobs DROP COLUMN failure_kind")
-        restored = JobStore(store.path)
-        self.assertEqual(restored.get("operator", old_id)["failure_kind"], "none")
-        self.assertEqual(HistoryStore(restored).detail(old_id)["failure_kind"], "none")
 
 
 class SudoWrapperTests(unittest.TestCase):

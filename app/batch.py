@@ -91,18 +91,14 @@ class BatchStore:
                 );
             """)
             existing = {row["name"] for row in db.execute("PRAGMA table_info(command_batches)")}
+            # Keep only additive columns introduced on/after 2026-11-15.
+            # Other historical columns are included in CREATE TABLE above.
             if "error" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN error TEXT")
-            if "approval_status" not in existing:
-                db.execute("ALTER TABLE command_batches ADD COLUMN approval_status INTEGER")
-            if "conversation_id" not in existing:
-                db.execute("ALTER TABLE command_batches ADD COLUMN conversation_id TEXT")
-            if "privileged" not in existing:
-                db.execute("ALTER TABLE command_batches ADD COLUMN privileged INTEGER NOT NULL DEFAULT 0")
-            if "client_id" not in existing:
-                db.execute("ALTER TABLE command_batches ADD COLUMN client_id TEXT")
             if "ssh_username" not in existing:
                 db.execute("ALTER TABLE command_batches ADD COLUMN ssh_username TEXT")
+            if "client_id" not in existing:
+                db.execute("ALTER TABLE command_batches ADD COLUMN client_id TEXT")
             # Startup recovery never runs work again. A remote command might
             # have completed without the process recording acknowledgement.
             now = time.time()

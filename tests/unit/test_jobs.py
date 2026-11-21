@@ -118,15 +118,13 @@ class StoreTests(unittest.TestCase):
         listing = HistoryStore(reopened).list({"record_kind": "command"}, limit=10)
         self.assertIs(listing["jobs"][0]["exit_accepted"], True)
 
-    def test_additive_job_schema_migration_keeps_old_history(self):
+    def test_recent_client_id_schema_migration_keeps_history(self):
         from app.history import HistoryStore
         job_id = self.store.create("alice", request("id"))
         self.store.begin(job_id)
         self.store.finish(job_id, "succeeded", exit_code=0)
         with self.store._connect() as db:
             db.execute("DROP VIEW IF EXISTS history_events")
-            db.execute("ALTER TABLE jobs DROP COLUMN exit_accepted")
-            db.execute("ALTER TABLE jobs DROP COLUMN effective_cwd")
             db.execute("ALTER TABLE jobs DROP COLUMN client_id")
         upgraded = JobStore(self.path)
         saved = upgraded.get("alice", job_id)
@@ -136,19 +134,14 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(HistoryStore(upgraded).detail(job_id)["status"], "succeeded")
         self.assertIsNone(HistoryStore(upgraded).detail(job_id)["client_id"])
 
-    def test_additive_file_approval_column_migration_and_denial_validation(self):
+    def test_recent_file_client_id_migration_and_denial_validation(self):
         from app.file_audit import FileAudit
         from app.history import HistoryStore
 
-        # Simulate an existing privately backed SQLite file from before both
-        # conversation and approval columns without destroying the audit DB.
+        # Simulate an existing SQLite file from before the recent client-ID
+        # addition without dropping the older, now-baseline audit columns.
         with self.store._connect() as db:
             db.execute("DROP VIEW IF EXISTS history_events")
-            db.execute("ALTER TABLE file_operations DROP COLUMN conversation_id")
-            db.execute("ALTER TABLE file_operations DROP COLUMN approval_status")
-            db.execute("DROP INDEX IF EXISTS file_operations_replay_id")
-            db.execute("DROP TRIGGER IF EXISTS file_operations_rollback_replay_guard")
-            db.execute("ALTER TABLE file_operations DROP COLUMN operation_id")
             db.execute("ALTER TABLE file_operations DROP COLUMN client_id")
         reopened = JobStore(self.path)
         with reopened._connect() as db:

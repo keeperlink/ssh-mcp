@@ -475,24 +475,12 @@ class StoreCompressionTests(unittest.TestCase):
             self.assertFalse(self.store.read_output("alice", ident)["truncated"])
         asyncio.run(run())
 
-    def test_legacy_schema_migration_does_not_rewrite_raw_rows(self):
+    def test_current_raw_rows_are_not_rewritten_on_reopen(self):
         legacy = self.root / "old.sqlite"
+        # The original raw-output schema is now the minimum supported
+        # baseline; exercise stored raw chunks in that current schema.
+        JobStore(legacy)
         with closing(sqlite3.connect(legacy)) as db:
-            db.execute("""CREATE TABLE jobs (
-                id TEXT PRIMARY KEY, actor TEXT NOT NULL, server TEXT NOT NULL,
-                command TEXT NOT NULL, argv_count INTEGER NOT NULL,
-                command_sha256 TEXT NOT NULL, status TEXT NOT NULL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL,
-                started_at REAL, ended_at REAL, exit_code INTEGER,
-                elapsed_seconds REAL, error TEXT NOT NULL DEFAULT '',
-                output_bytes INTEGER NOT NULL DEFAULT 0,
-                cancel_requested INTEGER NOT NULL DEFAULT 0)""")
-            db.execute("""CREATE TABLE output (
-                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                offset INTEGER NOT NULL,
-                stream TEXT NOT NULL CHECK(stream IN ('stdout','stderr')),
-                data BLOB NOT NULL,
-                PRIMARY KEY(job_id,offset))""")
             current = time.time()
             blob = b"legacy" * 350
             db.execute("""INSERT INTO jobs
@@ -501,7 +489,7 @@ class StoreCompressionTests(unittest.TestCase):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 ("legacy", "alice", "demo-node-b", "echo", 1, "0" * 64,
                  "succeeded", current, current, current, len(blob)))
-            db.execute("INSERT INTO output VALUES(?,?,?,?)", ("legacy", 0, "stdout", blob))
+            db.execute("INSERT INTO output(job_id,offset,stream,data) VALUES(?,?,?,?)", ("legacy", 0, "stdout", blob))
             db.commit()
         legacy.chmod(0o600)
         from ops.history_db import measure

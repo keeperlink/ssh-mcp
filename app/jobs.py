@@ -170,34 +170,18 @@ class JobStore:
                     WHERE target_type='job' AND target_id=OLD.id;
                 END;
             """)
-            # Additive migration: legacy output rows default to raw and NULL
-            # original length (read via length(data)). Never recompress history.
-            # Serialize DDL under SQLite's writer lock for concurrent startup.
+            # Older schema changes are part of CREATE TABLE above. Keep only
+            # columns added within the last week for existing SQLite volumes.
+            # Serialize additive DDL for concurrent startup.
             db.execute("BEGIN IMMEDIATE")
-            output_columns = {row["name"] for row in db.execute("PRAGMA table_info(output)")}
-            if "encoding" not in output_columns:
-                db.execute("ALTER TABLE output ADD COLUMN encoding TEXT NOT NULL DEFAULT 'raw'")
-            if "raw_length" not in output_columns:
-                db.execute("ALTER TABLE output ADD COLUMN raw_length INTEGER")
-            db.execute("COMMIT")
-            # Upgrade existing databases in place without losing job/output history.
             existing = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             for name, declaration in (
-                ("mode", "TEXT NOT NULL DEFAULT 'async'"),
-                ("story_id", "TEXT"),
-                ("request_json", "TEXT"),
-                ("exit_accepted", "INTEGER"),
-                ("effective_cwd", "TEXT"),
-                ("conversation_id", "TEXT"),
-                ("privileged", "INTEGER NOT NULL DEFAULT 0"),
                 ("ssh_username", "TEXT"),
-                ("root_started", "INTEGER"),
-                ("failure_kind", "TEXT NOT NULL DEFAULT 'none'"),
-                ("approval_status", "INTEGER"),
                 ("client_id", "TEXT"),
             ):
                 if name not in existing:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            db.execute("COMMIT")
             db.execute("CREATE INDEX IF NOT EXISTS jobs_updated ON jobs(updated_at, id)")
             db.execute("CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at DESC, id DESC)")
             db.executescript("""

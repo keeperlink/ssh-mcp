@@ -65,14 +65,10 @@ def init_file_schema(db: sqlite3.Connection) -> None:
             ON file_operations(updated_at,id);
     """)
     existing = {row["name"] for row in db.execute("PRAGMA table_info(file_operations)")}
-    if "conversation_id" not in existing:
-        db.execute("ALTER TABLE file_operations ADD COLUMN conversation_id TEXT")
-    if "approval_status" not in existing:
-        db.execute("ALTER TABLE file_operations ADD COLUMN approval_status INTEGER")
+    # Only the 2026-11-19 client-ID addition remains upgradeable; older
+    # columns are defined directly in CREATE TABLE for new installations.
     if "client_id" not in existing:
         db.execute("ALTER TABLE file_operations ADD COLUMN client_id TEXT")
-    if "operation_id" not in existing:
-        db.execute("ALTER TABLE file_operations ADD COLUMN operation_id TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS file_operations_replay_id "
                "ON file_operations(operation_id) WHERE operation_id IS NOT NULL")
     # Rollback images retain jobs.sqlite but used the caller replay ID as the

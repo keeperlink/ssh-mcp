@@ -109,41 +109,26 @@ headers/metadata are ignored: **no global X-SSH-MCP-Conversation fallback**.
 The clients map is not an OAuth allowlist; otherwise authorized unknown clients
 show as Unknown. The global `oauth.dcr_enabled` bool defaults to true.
 
-### One-time manual audit actor migration and rollback
+### Audit actor isolation and database upgrades
 
-Before activating the new application against an existing audit DB, perform
-the dry run from a trusted CLI with the *new* signed configuration:
+The current release associates each audit record with the verified OAuth
+`client_id`. Its authorization `actor` is
+`ssh-mcp-operator@SHA256(client_id)`, regardless of the client's display name.
+The signed `clients` registry maps exact OAuth IDs to display labels; it does
+not grant additional authorization.
 
-```sh
-python -m app.audit_migration --db /PATH/jobs.sqlite --config /PATH/service.json
-```
+All SKY-344 historical audit-actor corrections on the managed test and
+production installations have been completed and independently verified.
+The old one-time migrator is no longer distributed or invoked at startup.
 
-Its aggregate report covers three audit tables (`jobs`, `command_batches`,
-`file_operations`), ChatGPT assumptions, recovered hashes, unknown/unrecoverable
-rows and inconsistent actor/client pairs. The original bare operator actor is
-intentionally classified as ChatGPT, including potentially ambiguous legacy
-standalone calls, as explicitly approved. Unknown hashes are not guessed.
-
-Stop **every database writer** independently; preserve the currently signed
-image/config and create a fresh owner-only SQLite backup:
-
-```sh
-python -m app.audit_migration --db /PATH/jobs.sqlite --config /PATH/service.json   --apply --backup /PATH/rollback/jobs-before-SKY-344.sqlite --confirm-stopped
-```
-
-The script performs a consistent SQLite backup (including committed WAL data),
-refuses an existing backup path, checks source fingerprints against the
-backup, updates all tables in one SQLite writer transaction, verifies updated
-rows, and supports repeatable dry-run/idempotent application. It is never
-triggered by application startup. Do not invoke it on live test/production
-without separate authorization.
-
-For rollback, stop all writers and restore the pre-migration SQLite snapshot
-using a trusted SQLite restore operation while the database is offline.
-Restore the matching original signed config and previous image as a set;
-**do not use the old image with migrated per-client actors**. Validate
-History, actor-scoped job reads, and host approvals before restoring traffic.
-Backups contain private audit data and must not be published.
+For a new installation, initialize a fresh SQLite volume with the current
+application. If retaining a database from before client-scoped actors, do
+not use it with the new runtime unchanged: stop all writers, verify the exact
+historical actors and client IDs, take a consistent SQLite backup, and
+coordinate a separately reviewed offline data conversion and image/config
+transition. There is no supported automatic legacy-actor reassignment.
+Downgrading the runtime likewise requires restoring a matching database
+snapshot and signed configuration together, not merely changing the image.
 
 ## Inventory host schema
 
