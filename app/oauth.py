@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from mcp.server.auth.provider import AccessToken
 
 from . import config
-from .oauth_sessions import SessionStore
+from .oauth_sessions import SessionStore, ClientRegistrationRevoked
 from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
 from .dcr_registry import DCRStore, RegistrationError
 from .form_body import read_bounded_body
@@ -513,15 +513,23 @@ async def oauth_authorization_server_metadata() -> JSONResponse:
 async def oauth_register(request: Request) -> JSONResponse:
     if not config.MCP_DCR_ENABLED:
         return _oauth_error("invalid_request", "Dynamic registration is disabled", status_code=404)
+    # Every request consumes admission capacity, including invalid JSON,
+    # unsupported Content-Type and oversized payloads.
+    try:
+        dcr_store().charge_attempt(
+            request.client.host if request.client else "unknown",
+            signing_salt=config.MCP_TOKEN_SIGNING_SECRET,
+        )
+    except RegistrationError as exc:
+        return _oauth_error(exc.error, str(exc), status_code=exc.status)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError):
+        return _oauth_error("server_error", "Registration store unavailable", status_code=503)
     if request.headers.get("content-type", "").split(";", 1)[0].lower().strip() != "application/json":
         return _oauth_error("invalid_client_metadata", "Content-Type must be application/json")
     try:
         body = await read_bounded_body(request, max_bytes=16384)
         payload = json.loads(body)
-        entry = dcr_store().register(
-            payload, request.client.host if request.client else "unknown",
-            signing_salt=config.MCP_TOKEN_SIGNING_SECRET,
-        )
+        entry = dcr_store().register(payload)
     except (ValueError, UnicodeError) as exc:
         if isinstance(exc, RegistrationError):
             return _oauth_error(exc.error, str(exc), status_code=exc.status)
@@ -695,8 +703,6 @@ async def oauth_authorize_post(request: Request) -> Response:
         resource=resource,
         session_ttl_seconds=session_ttl_seconds,
     )
-    if client_id.startswith("dcr_"):
-        dcr_store().used(client_id)
     params = {"code": code, "iss": MCP_ISSUER}
     if state is not None:
         params["state"] = str(state)
@@ -720,8 +726,11 @@ async def oauth_token(request: Request) -> JSONResponse:
             return _oauth_error("invalid_request", "Missing or invalid refresh grant fields")
         try:
             if client_id.startswith("dcr_"):
-                if not config.MCP_DCR_ENABLED or dcr_store().get(client_id) is None:
+                metadata = dcr_store().get(client_id) if config.MCP_DCR_ENABLED else None
+                if metadata is None:
                     raise ValueError("Unknown registered client")
+                if "refresh_token" not in metadata["grant_types"]:
+                    return _oauth_error("unauthorized_client", "Refresh grant not registered")
             else:
                 _parts(client_id, metadata=True)
         except ValueError:
@@ -733,6 +742,7 @@ async def oauth_token(request: Request) -> JSONResponse:
                 refresh_token=token, client_id=client_id, resource=MCP_RESOURCE,
                 scopes=scope, signing_key_id=_signing_key_id(),
                 expected_subject=config.MCP_OPERATOR_SUBJECT,
+                registered_client=client_id.startswith("dcr_"),
             )
         except (OSError, sqlite3.Error, RuntimeError, ValueError):
             return _oauth_error("server_error", "OAuth session store unavailable", status_code=503)
@@ -746,8 +756,6 @@ async def oauth_token(request: Request) -> JSONResponse:
             )
         except ValueError:
             return _oauth_error("invalid_grant", "OAuth authorization is no longer allowed")
-        if client_id.startswith("dcr_"):
-            dcr_store().used(client_id)
         return _json_no_store({
             "access_token": access_token,
             "token_type": "Bearer",
@@ -768,7 +776,7 @@ async def oauth_token(request: Request) -> JSONResponse:
         return _oauth_error("invalid_request", "Missing required token request field")
 
     try:
-        await _validate_client(client_id, redirect_uri)
+        client_metadata = await _validate_client(client_id, redirect_uri)
     except ValueError:
         return _oauth_error("invalid_client", "OAuth client validation failed", status_code=401)
 
@@ -796,31 +804,37 @@ async def oauth_token(request: Request) -> JSONResponse:
         if item.session_expires_at <= _now():
             _AUTH_CODES.pop(code, None)
             return _oauth_error("invalid_grant", "Authorization session expired")
-        # Consume the code only after every binding/PKCE check succeeds.
+        # Keep the code available if a registration is revoked or SQLite fails
+        # before committing. The lock prevents concurrent replay while issuing.
+        try:
+            session_id, refresh_token = session_store().issue(
+                client_id=client_id,
+                subject=config.MCP_OPERATOR_SUBJECT,
+                scopes=" ".join(item.scopes),
+                resource=item.resource,
+                expires_at=item.session_expires_at,
+                signing_key_id=_signing_key_id(),
+                redirect_origin=redirect_origin(redirect_uri),
+                registered_client=client_id.startswith("dcr_"),
+                allow_refresh=(not client_id.startswith("dcr_")
+                               or "refresh_token" in client_metadata["grant_types"]),
+            )
+            access_token, expires_at = issue_access_token(
+                client_id, item.scopes, session_id=session_id,
+                session_expires_at=item.session_expires_at,
+            )
+        except ClientRegistrationRevoked:
+            return _oauth_error("invalid_client", "OAuth registration was revoked", status_code=401)
+        except (OSError, sqlite3.Error, RuntimeError, ValueError):
+            return _oauth_error("server_error", "OAuth session store unavailable", status_code=503)
         _AUTH_CODES.pop(code, None)
 
-    try:
-        session_id, refresh_token = session_store().issue(
-            client_id=client_id,
-            subject=config.MCP_OPERATOR_SUBJECT,
-            scopes=" ".join(item.scopes),
-            resource=item.resource,
-            expires_at=item.session_expires_at,
-            signing_key_id=_signing_key_id(),
-            redirect_origin=redirect_origin(redirect_uri),
-        )
-        access_token, expires_at = issue_access_token(
-            client_id, item.scopes, session_id=session_id,
-            session_expires_at=item.session_expires_at,
-        )
-    except (OSError, sqlite3.Error, RuntimeError, ValueError):
-        return _oauth_error("server_error", "OAuth session store unavailable", status_code=503)
-    if client_id.startswith("dcr_"):
-        dcr_store().used(client_id)
-    return _json_no_store({
+    result: dict[str, Any] = {
         "access_token": access_token,
         "token_type": "Bearer",
-        "refresh_token": refresh_token,
         "expires_in": max(0, expires_at - _now()),
         "scope": " ".join(item.scopes),
-    })
+    }
+    if refresh_token is not None:
+        result["refresh_token"] = refresh_token
+    return _json_no_store(result)

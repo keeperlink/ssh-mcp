@@ -1,6 +1,7 @@
 """Public OAuth Dynamic Client Registration tests with synthetic clients and secrets."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -318,6 +319,158 @@ class DCRProtocolTests(unittest.TestCase):
         self.assertEqual(store.list_clients(), [])
         self.assertEqual(store.revoke("dcr_" + "B" * 43), 0)
 
+
+    def test_malformed_http_attempts_are_rate_limited(self):
+        from app import dcr_registry
+        with patch.object(dcr_registry, "PER_IP_RATE", 3):
+            self.assertEqual(self.app.post("/oauth/register", content="{}",
+                headers={"content-type": "text/plain"}).status_code, 400)
+            self.assertEqual(self.app.post("/oauth/register", content="{bad",
+                headers={"content-type": "application/json"}).status_code, 400)
+            self.assertEqual(self.app.post("/oauth/register", content="x" * 16385,
+                headers={"content-type": "application/json"}).status_code, 400)
+            self.assertEqual(self.register().status_code, 429)
+        self.assertEqual(oauth.dcr_store().list_clients(), [])
+
+    def test_original_redirect_rejects_controls_and_empty_fragment(self):
+        for value in (URI + "#", " \t" + URI, URI + "\r", URI + "\n", URI + "\t",
+                      "\x01" + URI):
+            with self.subTest(redirect=repr(value)):
+                self.assertEqual(self.register(redirect_uris=[value]).status_code, 400)
+        self.assertEqual(oauth.dcr_store().list_clients(), [])
+
+    def test_surrogate_name_is_rejected_before_persistence(self):
+        payload = {"client_name": chr(0xD800), "redirect_uris": [URI],
+                   "application_type": "native"}
+        response = self.app.post("/oauth/register",
+            content=json.dumps(payload).encode("ascii"),
+            headers={"content-type": "application/json"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_client_metadata")
+        self.assertEqual(oauth.dcr_store().list_clients(), [])
+
+    def test_portless_loopback_registration_supports_ephemeral_port(self):
+        client = self.register(redirect_uris=["http://127.0.0.1/callback"]).json()["client_id"]
+        callback = "http://127.0.0.1:49493/callback"
+        self.assertEqual(self.authorize(client, callback).status_code, 200)
+        self.assertEqual(self.authorize(client, "http://localhost:49493/callback").status_code, 400)
+        self.assertEqual(self.authorize(client, "http://127.0.0.1:49493/other").status_code, 400)
+        code = self.login(client, callback)
+        self.assertEqual(self.exchange(client, code, callback).status_code, 200)
+        self.assertEqual(self.authorize(client, "http://127.0.0.1/callback").status_code, 200)
+
+    def test_authorization_code_only_never_issues_refresh_grant(self):
+        client = self.register(grant_types=["authorization_code"]).json()["client_id"]
+        result = self.exchange(client, self.login(client))
+        self.assertEqual(result.status_code, 200)
+        self.assertNotIn("refresh_token", result.json())
+        with oauth.session_store()._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM oauth_refresh t JOIN oauth_sessions s ON t.session_id=s.id "
+                "WHERE s.client_id=?", (client,)).fetchone()[0], 0)
+        rejected = self.app.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "client_id": client,
+            "refresh_token": "unused",
+            "resource": config.MCP_RESOURCE,
+        })
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["error"], "unauthorized_client")
+        # CIMD still issues refresh credentials under its unchanged policy.
+        cimd_code = self.login(config.MCP_CIMD_CLIENT_ID,
+                               "https://chatgpt.com/connector_platform_oauth_redirect")
+        cimd = self.exchange(config.MCP_CIMD_CLIENT_ID, cimd_code,
+                             "https://chatgpt.com/connector_platform_oauth_redirect")
+        self.assertEqual(cimd.status_code, 200, cimd.text)
+        self.assertIn("refresh_token", cimd.json())
+
+    def test_session_issue_touch_failure_preserves_code_and_session(self):
+        client = self.register().json()["client_id"]
+        code = self.login(client)
+        registry = oauth.dcr_store()
+        with registry._connect() as db:
+            db.execute("""CREATE TRIGGER dcr_fail_touch BEFORE UPDATE OF last_used_at
+                          ON oauth_dcr_clients BEGIN SELECT RAISE(FAIL,'fixture_failure'); END""")
+        failed = self.exchange(client, code)
+        self.assertEqual(failed.status_code, 503)
+        with oauth.session_store()._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM oauth_sessions "
+                                        "WHERE client_id=?", (client,)).fetchone()[0], 0)
+        with registry._connect() as db:
+            db.execute("DROP TRIGGER dcr_fail_touch")
+        self.assertEqual(self.exchange(client, code).status_code, 200)
+
+    def test_refresh_touch_failure_does_not_consume_old_token(self):
+        client = self.register().json()["client_id"]
+        initial = self.exchange(client, self.login(client)).json()
+        old_token = initial["refresh_token"]
+        registry = oauth.dcr_store()
+        with registry._connect() as db:
+            db.execute("""CREATE TRIGGER dcr_fail_refresh BEFORE UPDATE OF last_used_at
+                          ON oauth_dcr_clients BEGIN SELECT RAISE(FAIL,'fixture_failure'); END""")
+        payload = {"grant_type": "refresh_token", "client_id": client,
+                   "refresh_token": old_token, "resource": config.MCP_RESOURCE}
+        self.assertEqual(self.app.post("/oauth/token", data=payload).status_code, 503)
+        with registry._connect() as db:
+            db.execute("DROP TRIGGER dcr_fail_refresh")
+        ok = self.app.post("/oauth/token", data=payload)
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertNotEqual(ok.json()["refresh_token"], old_token)
+
+    def test_revocation_race_leaves_no_active_registered_client_session(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from app.oauth_sessions import ClientRegistrationRevoked
+        client = self.register().json()["client_id"]
+        gate = Barrier(2)
+        store = oauth.session_store()
+        registry = oauth.dcr_store()
+
+        def issue():
+            gate.wait(timeout=5)
+            try:
+                return store.issue(client_id=client, subject=config.MCP_OPERATOR_SUBJECT,
+                    scopes="mcp.access", resource=config.MCP_RESOURCE,
+                    expires_at=int(time.time()) + 3600, signing_key_id=oauth._signing_key_id(),
+                    registered_client=True)
+            except ClientRegistrationRevoked:
+                return None
+
+        def revoke():
+            gate.wait(timeout=5)
+            return registry.revoke(client)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a = pool.submit(issue)
+            b = pool.submit(revoke)
+            a.result(timeout=10)
+            self.assertEqual(b.result(timeout=10), 1)
+        self.assertIsNone(registry.get(client))
+        with store._connect() as db:
+            active = db.execute(
+                "SELECT COUNT(*) FROM oauth_sessions WHERE client_id=? AND revoked_at IS NULL",
+                (client,)).fetchone()[0]
+        self.assertEqual(active, 0)
+
+    def test_administrative_removals_have_bounded_sanitized_audit(self):
+        from app import dcr_registry
+        registry = oauth.dcr_store()
+        with patch.object(dcr_registry, "MAX_REMOVAL_AUDIT", 2):
+            clients = [self.register(client_name="Synthetic Sensitive Name").json()["client_id"]
+                       for _ in range(3)]
+            for client in clients:
+                self.assertEqual(registry.revoke(client), 1)
+        with registry._connect() as db:
+            records = db.execute(
+                "SELECT client_id,removed_at FROM oauth_dcr_removals ORDER BY id"
+            ).fetchall()
+            self.assertEqual([row["client_id"] for row in records], clients[1:])
+            self.assertTrue(all(row["removed_at"] > 0 for row in records))
+            self.assertNotIn("Synthetic Sensitive Name", str([dict(row) for row in records]))
+        with patch("app.dcr_registry.time.time", return_value=time.time() + 366 * 86400):
+            registry.prune()
+        with registry._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM oauth_dcr_removals").fetchone()[0], 0)
 
 if __name__ == "__main__":
     unittest.main()

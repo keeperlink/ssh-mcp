@@ -17,6 +17,11 @@ from .sqlite_support import _ClosingConnection, _prepare_path
 REFRESH_REPLAY_GRACE_SECONDS = 10
 
 
+class ClientRegistrationRevoked(ValueError):
+    """DCR client was removed before the session transaction could commit."""
+
+
+
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -90,16 +95,27 @@ class SessionStore:
                 (int(time.time()) - REFRESH_REPLAY_GRACE_SECONDS,)
             ).rowcount
 
+    @staticmethod
+    def _touch_dcr_client(db: sqlite3.Connection, client_id: str, now: int) -> bool:
+        """Check registration and record use inside the session's write transaction."""
+        return db.execute(
+            "UPDATE oauth_dcr_clients SET last_used_at=? WHERE client_id=? RETURNING client_id",
+            (now, client_id),
+        ).fetchone() is not None
+
     def issue(self, *, client_id: str, subject: str, scopes: str, resource: str,
               expires_at: int, signing_key_id: str,
-              redirect_origin: str | None = None) -> tuple[str, str]:
+              redirect_origin: str | None = None, registered_client: bool = False,
+              allow_refresh: bool = True) -> tuple[str, str | None]:
         now = int(time.time())
         if expires_at <= now:
             raise ValueError("OAuth session already expired")
         session_id = secrets.token_urlsafe(24)
-        refresh_token = _refresh_token()
+        refresh_token = _refresh_token() if allow_refresh else None
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if registered_client and not self._touch_dcr_client(db, client_id, now):
+                raise ClientRegistrationRevoked("OAuth registration was revoked")
             db.execute(
                 """INSERT INTO oauth_sessions
                    (id,client_id,subject,scopes,resource,expires_at,created_at,signing_key_id,redirect_origin)
@@ -107,15 +123,16 @@ class SessionStore:
                 (session_id, client_id, subject, scopes, resource, expires_at,
                  now, signing_key_id, redirect_origin),
             )
-            db.execute(
-                "INSERT INTO oauth_refresh(token_hash,session_id,created_at) VALUES(?,?,?)",
-                (_digest(refresh_token), session_id, now),
-            )
+            if refresh_token is not None:
+                db.execute(
+                    "INSERT INTO oauth_refresh(token_hash,session_id,created_at) VALUES(?,?,?)",
+                    (_digest(refresh_token), session_id, now),
+                )
         return session_id, refresh_token
 
     def rotate(self, *, refresh_token: str, client_id: str, resource: str,
                scopes: str | None, signing_key_id: str,
-               expected_subject: str) -> dict[str, Any] | None:
+               expected_subject: str, registered_client: bool = False) -> dict[str, Any] | None:
         """Return only one successor; late replay revokes family atomically.
 
         Invalid or concurrent uses return None, never token values. A duplicate
@@ -165,6 +182,11 @@ class SessionStore:
                         (now, row["id"]),
                     )
             else:
+                # Serialize with administrative DCR revocation and update activity
+                # before consuming the old refresh credential. If another writer
+                # removed the registration, leave the token family untouched.
+                if registered_client and not self._touch_dcr_client(db, client_id, now):
+                    return None
                 db.execute("UPDATE oauth_refresh SET consumed_at=? WHERE token_hash=?",
                            (now, _digest(refresh_token)))
                 db.execute(

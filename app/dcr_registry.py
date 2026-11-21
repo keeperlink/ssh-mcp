@@ -13,12 +13,14 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from .client_metadata import _parts
 from .sqlite_support import _ClosingConnection, _prepare_path
 
 MAX_REGISTRATIONS = 4096
+MAX_REMOVAL_AUDIT = 4096
+REMOVAL_AUDIT_SECONDS = 365 * 86400
 INACTIVE_SECONDS = 90 * 86400
 RATE_WINDOW_SECONDS = 60
 PER_IP_RATE = 12
@@ -38,12 +40,11 @@ def _valid_redirect(value: Any, *, native: bool) -> None:
     if not isinstance(value, str) or not 1 <= len(value) <= 2048:
         raise RegistrationError("invalid_redirect_uri", "Invalid redirect URI")
     try:
-        parts = urlsplit(value)
-        # _parts rejects userinfo, fragment, whitespace and ambiguous authorities.
-        checked = urlunsplit(parts._replace(path=parts.path or "/"))
-        _parts(checked)
-        if parts.port is not None and not 1 <= parts.port <= 65535:
-            raise ValueError("Invalid port")
+        # Validate the original bytes: urlsplit strips leading C0 controls
+        # and would otherwise accept a different URI than the one stored.
+        parts = _parts(value)
+        if "#" in value:  # Includes an empty fragment component.
+            raise ValueError("Fragments are forbidden")
     except ValueError as exc:
         raise RegistrationError("invalid_redirect_uri", "Invalid redirect URI") from exc
     if parts.scheme == "http" and (not native or parts.hostname not in _LOOPBACK):
@@ -80,6 +81,10 @@ def _validated_document(document: Any) -> dict[str, Any]:
     if (not isinstance(client_name, str) or not 1 <= len(client_name) <= 160
             or any(ord(c) < 32 for c in client_name)):
         raise RegistrationError("invalid_client_metadata", "Invalid client_name")
+    try:
+        client_name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise RegistrationError("invalid_client_metadata", "Invalid client_name") from exc
     # No client-supplied client_id/secret can overwrite the issued registration.
     if any(key in document for key in ("client_id", "client_secret", "registration_access_token",
                                        "registration_client_uri")):
@@ -108,8 +113,7 @@ def _redirect_matches(meta: dict[str, Any], redirect: str) -> bool:
         registered = urlsplit(saved)
         if (registered.scheme == requested.scheme and registered.hostname == requested.hostname
                 and registered.hostname in _LOOPBACK and registered.path == requested.path
-                and registered.query == requested.query and registered.port is not None
-                and requested.port is not None):
+                and registered.query == requested.query and requested.port is not None):
             return True
     return False
 
@@ -133,6 +137,11 @@ class DCRStore:
                     window_start INTEGER NOT NULL,
                     count INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS oauth_dcr_removals (
+                    id INTEGER PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    removed_at INTEGER NOT NULL
+                );
             """)
 
     def _connect(self) -> sqlite3.Connection:
@@ -155,6 +164,8 @@ class DCRStore:
               )
         """, (now - INACTIVE_SECONDS, now))
         db.execute("DELETE FROM oauth_dcr_rates WHERE window_start < ?", (now - 2 * RATE_WINDOW_SECONDS,))
+        db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
+                   (now - REMOVAL_AUDIT_SECONDS,))
         return result.rowcount
 
     def prune(self) -> int:
@@ -174,18 +185,20 @@ class DCRStore:
         else:
             db.execute("UPDATE oauth_dcr_rates SET count=count+1 WHERE identity=?", (identity,))
 
-    def register(self, document: Any, remote_ip: str, *, signing_salt: str) -> dict[str, Any]:
+    def charge_attempt(self, remote_ip: str, *, signing_salt: str) -> None:
+        """Count every HTTP registration attempt, even invalid content or JSON."""
         now = int(time.time())
-        # Do not persist client IPs in registration or rate-limit tables.
+        # Do not persist source IPs; only a keyed digest.
         identity = hashlib.sha256((signing_salt + remote_ip).encode()).hexdigest()
-        # Charge the persistent limit before parsing metadata. Invalid requests
-        # must not be able to bypass the bound by rolling back rate counters.
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM oauth_dcr_rates WHERE window_start < ?",
                        (now - 2 * RATE_WINDOW_SECONDS,))
             self._rate_check(db, "global", GLOBAL_RATE, now)
             self._rate_check(db, "ip:" + identity, PER_IP_RATE, now)
+
+    def register(self, document: Any) -> dict[str, Any]:
+        now = int(time.time())
         metadata = _validated_document(document)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -218,11 +231,6 @@ class DCRStore:
             return None
         return {**metadata, "client_id": client_id}
 
-    def used(self, client_id: str) -> None:
-        with self._connect() as db:
-            db.execute("UPDATE oauth_dcr_clients SET last_used_at=? WHERE client_id=?",
-                       (int(time.time()), client_id))
-
     def list_clients(self) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute(
@@ -238,6 +246,16 @@ class DCRStore:
         """Administrative cancellation; invalidates registration and related OAuth sessions."""
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
             db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL",
-                       (int(time.time()), client_id))
-            return db.execute("DELETE FROM oauth_dcr_clients WHERE client_id=?", (client_id,)).rowcount
+                       (now, client_id))
+            removed = db.execute("DELETE FROM oauth_dcr_clients WHERE client_id=?", (client_id,)).rowcount
+            if removed:
+                db.execute("INSERT INTO oauth_dcr_removals(client_id,removed_at) VALUES (?,?)",
+                           (client_id, now))
+                db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
+                           (now - REMOVAL_AUDIT_SECONDS,))
+                db.execute("""DELETE FROM oauth_dcr_removals WHERE id NOT IN
+                              (SELECT id FROM oauth_dcr_removals ORDER BY id DESC LIMIT ?)""",
+                           (MAX_REMOVAL_AUDIT,))
+            return removed

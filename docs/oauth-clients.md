@@ -128,11 +128,17 @@ persistent `dcr_...` client ID; it returns **no client secret, access token,
 SSH privilege or approval**. Confidential-client authentication and RFC 7592
 remote registration modification/deletion are not implemented.
 
+Clients registering `grant_types: ["authorization_code"]` receive **no refresh
+token**, and subsequent refresh attempts are refused. A registration that
+includes `"refresh_token"` in its grant types can rotate refresh credentials
+within the operator-approved session. Existing CIMD refresh behavior is unchanged.
+
 Registration redirects require HTTPS except HTTP loopback callbacks for
 `application_type: "native"` clients. The server checks the client ID,
 registered callback, issuer, resource and PKCE S256 at authorization/code
 exchange. A native client's loopback IP/host, path and query must match the
-registration; only its local port may vary. Untrusted LAN HTTP callbacks,
+registration; only its local port may vary, including when the saved native
+loopback callback omitted a port. Untrusted LAN HTTP callbacks,
 userinfo, fragments, unspecified schemes and open redirects are rejected.
 
 On the browser authorization page, review the **exact registered client ID**,
@@ -145,8 +151,9 @@ conversation-scoped or agent-wide timed grants follow the same per-operator,
 verified OAuth client identity rules as CIMD.
 
 Registrations persist in the existing private SQLite OAuth database across
-restarts. Attempts are bounded by per-IP and global minute limits; a
-registration cap prevents unbounded storage. Registrations inactive for 90
+restarts. Every HTTP registration attempt (including invalid Content-Type, malformed
+JSON and oversized bodies) is charged against per-source and global minute
+limits; a registration cap prevents unbounded storage. Registrations inactive for 90
 days are removed automatically only when no active OAuth session exists.
 Successful authorization/token refresh updates last use. Existing sessions
 retain their independent absolute expiry. The private backup of the existing
@@ -168,7 +175,10 @@ To revoke a verified client ID and all its active OAuth sessions:
 python -m app.dcr_admin --db /PATH/TO/jobs.sqlite revoke dcr_EXACT_ID --confirm-id dcr_EXACT_ID
 ```
 
-Use the exact returned ID, not the self-reported display name. No ordinary
+Use the exact returned ID, not the self-reported display name. A successful
+administrative removal is committed with a durable, sanitized audit record
+containing only the opaque client ID and removal time. This record is retained
+for at most 365 days and bounded to the most recent 4096 removals. No ordinary
 client can invoke this administrative capability through HTTP. Revoking a DCR
 registration prevents subsequent DCR bearer verification and refresh. Existing
 CIMD registrations, OAuth tokens and consent remain unaffected. Before
