@@ -89,8 +89,15 @@ async def require_host_access(
         async def before_prompt() -> None:
             await executor.check_readiness_live(server, privileged=privileged)
 
+        # A verified OAuth client without a chat identifier gets an agent-wide
+        # grant, reusable across that operator's OAuth sessions. The actor is
+        # derived from the verified operator subject and OAuth client identity.
+        # A client that supplies a conversation ID keeps its session-scoped key.
+        key = ((session_id, conversation_id, server) if conversation_id else
+               (f"agent:{actor}", client_id, server) if client_id else
+               (session_id, "", server))
         code = await approvals.require(
-            (session_id, conversation_id or "", server),
+            key,
             tool=tool, reason=reason, client_id=client_id,
             summary=summary,
             steps=steps,

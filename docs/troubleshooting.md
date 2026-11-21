@@ -48,7 +48,8 @@ network errors without reconciling their durable IDs.
 - **Restricted SSH denied without a dialog:** review the signed/approved
   host policy, current OAuth session, and any malformed or conflicting
   conversation identifiers. A client with no conversation identifier can
-  receive one-request approval, but cannot receive a timed grant.
+  receive an agent-wide timed grant **only** with a verified OAuth client
+  identity; approval is otherwise limited to one request.
 - **Console cannot sign in:** use the independent
   Console password via HTTPS and correct same-origin
   CSRF form; an OAuth login credential is not valid

@@ -56,11 +56,11 @@ Refresh tokens are hashed in private SQLite and bound to their
 originating client/session; revocation blocks renewal. Previously
 issued access tokens can remain active until their own expiry.
 
-## Workflow-scoped grants
+## Conversation- and agent-scoped grants
 
 Restricted host or root operations always require a verified OAuth session
-and operator approval. Timed grants additionally require a validated
-workflow identifier from one of these sources:
+and operator approval. When a client supplies a validated conversation
+identifier from one of these sources, timed grants are conversation-scoped:
 
 - The configured dedicated header (`X-OpenAI-Session` by default).
 - Codex tool-call `params._meta["x-codex-turn-metadata"].thread_id`.
@@ -75,11 +75,21 @@ Timed grants are scoped to the authenticated OAuth session, exact
 conversation ID, host and permission type. Give each workflow its own
 identifier; a static custom header does not separate conversations.
 
-If a client sends no conversation identifier, the existing approval
-popup allows **one request** only. Timed choices are disabled and the
-server rejects attempts to create a timed grant. No session-wide grant
-or implicit conversation is created. This applies equally to host and
-root approvals. Generic binary upload remains a separate enhancement.
+If a client sends **no conversation identifier**, timed grants instead apply
+to the authenticated **operator + OAuth client identity**, across that agent's
+conversations and OAuth logins, for the selected host and duration. The Console
+shows the agent without a conversation number (for example, `demo-node-a[Claude]`)
+and explains the wider scope. Other agents never inherit that grant. When a
+conversation ID is present, grants remain bound to the **specific OAuth
+session + conversation**; the Console shows a local numeric label such as
+`demo-node-b[ChatGPT-1]`. These labels are for display, not authorization.
+
+Host and root grants remain independently approved, expiring and revocable.
+Agent-wide root grants are as broad as agent-wide host grants, so review
+duration accordingly. Without a verified OAuth client identity, timed grants
+remain unavailable and an explicit one-request approval is required.
+Transport sessions, IPs, request IDs and untrusted client headers are never
+used as grant identities. Generic binary upload remains a separate enhancement.
 
 ## Reverse proxy
 

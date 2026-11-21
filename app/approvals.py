@@ -17,7 +17,12 @@ from .client_identity import agent_label
 from .ssh_executor import SSHDenied
 from .approval_status import ApprovalCode, ApprovalRejected
 
-GrantKey = tuple[str, str, str]  # verified OAuth sid, conversation (empty = once only), signed alias
+GrantKey = tuple[str, str, str]  # OAuth sid + conversation OR agent:actor + client_id, signed alias
+
+
+def agent_scoped(key: GrantKey) -> bool:
+    """Only verified-client keys created by the host-access gate use this namespace."""
+    return key[0].startswith("agent:")
 Duration = Literal["once", "5m", "15m", "1h", "8h", "16h"]
 DURATIONS: dict[str, int | None] = {
     "once": None, "5m": 300, "15m": 900, "1h": 3600,
@@ -56,10 +61,12 @@ class PendingApproval:
     def public(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.id, "host": self.key[2],
-            "conversation_id": self.key[1] or None, "tool": self.tool,
+            "conversation_id": (None if agent_scoped(self.key)
+                                else self.key[1] or None), "tool": self.tool,
             "scope_id": ApprovalManager.grant_id(self.key, "scope") if self.key[1] else None,
             "conversation_scope_id": ApprovalManager.conversation_scope_id(self.key),
             "client_id": self.client_id, "agent": agent_label(self.client_id, config.MCP_CLIENT_LABELS),
+            "grant_scope": "agent" if agent_scoped(self.key) else "conversation" if self.key[1] else "request",
             "timed_grants_allowed": bool(self.key[1]),
             "reason": self.reason, "summary": self.summary,
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
@@ -78,6 +85,8 @@ class ApprovalManager:
         self.pending: dict[str, PendingApproval] = {}
         self.grants: dict[GrantKey, float] = {}
         self.root_grants: dict[GrantKey, float] = {}
+        # Presentation only; never used to authorize access.
+        self._grant_clients: dict[GrantKey, str] = {}
         # Bounded nonsecret generation counters to distinguish an explicit
         # operator revoke from automatic timed-grant expiry during an await.
         self._revoke_generations: dict[tuple[GrantKey, str], int] = {}
@@ -126,6 +135,9 @@ class ApprovalManager:
                 self.root_grants.pop(key, None)
                 self._invalidate_dependents(key, root=True, expired=True)
                 self._signal()
+        for key in tuple(self._grant_clients):
+            if key not in self.grants and key not in self.root_grants:
+                del self._grant_clients[key]
         for request_id, request in tuple(self.pending.items()):
             if request.deadline <= now:
                 self._finish(request_id, "denied_expired")
@@ -147,18 +159,24 @@ class ApprovalManager:
         return {
             "pending_approvals": [x.public() for x in self.pending.values()],
             "active_grants": [
-                {"host": key[2], "conversation_id": key[1],
+                {"host": key[2],
+                 "conversation_id": None if agent_scoped(key) else key[1],
                  "id": self.grant_id(key),
                  "scope_id": self.grant_id(key, "scope"),
                  "conversation_scope_id": self.conversation_scope_id(key),
+                 "grant_scope": "agent" if agent_scoped(key) else "conversation",
+                 "agent": agent_label(self._grant_clients.get(key), config.MCP_CLIENT_LABELS),
                  "kind": "host",
                  "expires_at": time.time() + max(0, expires_at - time.monotonic())}
                 for key, expires_at in self.grants.items()
             ] + [
-                {"host": key[2], "conversation_id": key[1],
+                {"host": key[2],
+                 "conversation_id": None if agent_scoped(key) else key[1],
                  "id": self.grant_id(key, "root"), "kind": "root",
                  "scope_id": self.grant_id(key, "scope"),
                  "conversation_scope_id": self.conversation_scope_id(key),
+                 "grant_scope": "agent" if agent_scoped(key) else "conversation",
+                 "agent": agent_label(self._grant_clients.get(key), config.MCP_CLIENT_LABELS),
                  "expires_at": time.time() + max(0, expires_at - time.monotonic())}
                 for key, expires_at in self.root_grants.items()
             ],
@@ -181,7 +199,7 @@ class ApprovalManager:
     @staticmethod
     def conversation_scope_id(key: GrantKey) -> str | None:
         # Display correlation only: keep OAuth sessions distinct, regardless of host.
-        if not key[1]:
+        if not key[1] or agent_scoped(key):
             return None
         source = "\x00".join(("conversation", key[0], key[1]))
         return hashlib.sha256(source.encode("utf-8")).hexdigest()[:24]
@@ -424,7 +442,7 @@ class ApprovalManager:
         seconds = DURATIONS[duration]
         if seconds is not None:
             if not request.key[1]:
-                return False  # No conversation means no reusable grant.
+                return False  # No verified OAuth client or conversation.
             count = len(self.grants) + len(self.root_grants)
             additional = int(request.grant_host and request.key not in self.grants)
             additional += int(request.grant_root and request.key not in self.root_grants)
@@ -437,6 +455,8 @@ class ApprovalManager:
                 self.root_grants[request.key] = max(
                     self.root_grants.get(request.key, 0), expiry,
                 )
+            if request.client_id:
+                self._grant_clients[request.key] = request.client_id
             # A root grant must never outlive a restricted host grant.
             if request.host_required and request.root_required:
                 self.grants[request.key] = max(
@@ -478,6 +498,8 @@ class ApprovalManager:
                 if root_removed:
                     self._note_revoke(key, "root")
                 self._invalidate_dependents(key, host=True, root=root_removed)
+                if key not in self.root_grants:
+                    self._grant_clients.pop(key, None)
                 self._signal()
                 return True
         for key in tuple(self.root_grants):
@@ -485,6 +507,8 @@ class ApprovalManager:
                 del self.root_grants[key]
                 self._note_revoke(key, "root")
                 self._invalidate_dependents(key, root=True)
+                if key not in self.grants:
+                    self._grant_clients.pop(key, None)
                 self._signal()
                 return True
         return False
@@ -495,4 +519,5 @@ class ApprovalManager:
             self._finish(request_id, "")
         self.grants.clear()
         self.root_grants.clear()
+        self._grant_clients.clear()
         self._signal()

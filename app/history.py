@@ -980,7 +980,7 @@ def _history_page(csrf: str) -> str:
         '<label><input type="radio" name="approval-duration" value="8h"> 8 h</label>'
         '<label><input type="radio" name="approval-duration" value="16h"> 16 h</label>'
         '</div><p id="approval-duration-warning" class="approval-duration-warning" hidden>'
-        'Timed grants are disabled because this client did not provide a conversation ID.'
+        'Timed grants require an authenticated OAuth client or conversation ID.'
         ' Only one request can be authorized.</p></fieldset>'
         '<button id="approval-deny" type="button" class="approval-deny">Deny</button>'
         '<button id="approval-grant" type="button" class="approval-grant">Grant</button>'

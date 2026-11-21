@@ -171,9 +171,10 @@ callback on the consent screen before authorizing. The OAuth page accepts
 `HISTORY_VIEWER_PASSWORD`.
 
 The sample SSH host requires operator approval in an authenticated
-OAuth session. A validated conversation ID enables timed approvals;
-clients without a conversation identifier can receive an explicit
-one-request approval only. OAuth callback CSP origins are
+OAuth session. A validated conversation ID enables conversation-scoped timed
+approvals; verified clients without a conversation identifier can also receive
+timed grants scoped to their operator and OAuth client identity across logins.
+OAuth callback CSP origins are
 derived from validated client metadata, not an unrestricted wildcard.
 See [OAuth clients](oauth-clients.md).
 

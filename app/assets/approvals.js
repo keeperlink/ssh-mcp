@@ -195,10 +195,12 @@
       if (layer.hidden) previousFocus = document.activeElement;
       $("approval-host").textContent = request.host || "Unknown";
       const number = conversationNumber(request.conversation_scope_id);
-      $("approval-conversation").textContent = number ? "Conversation #" + number : "Not provided";
+      $("approval-conversation").textContent = number ? "Conversation #" + number
+        : request.grant_scope === "agent" ? "Agent-wide" : "Not provided";
       $("approval-client").textContent = request.agent || "Unknown";
       $("approval-client").title = (request.client_id || "").split("?", 1)[0];
-      const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
+      const timedAllowed = request.timed_grants_allowed !== false &&
+        (Boolean(request.conversation_id) || request.grant_scope === "agent");
       $("approval-duration-warning").hidden = timedAllowed;
       $("approval-tool").textContent = request.tool || "Operation";
       $("approval-reason").textContent = request.reason || "Not specified";
@@ -210,7 +212,9 @@
         ? (request.requires_host
           ? "Approve SSH host access and root execution for this exact request."
           : "Approve execution as root for this exact request.")
-          + (timedAllowed ? " A timed grant also authorizes subsequent root requests in this conversation and host." : "")
+          + (timedAllowed ? (request.grant_scope === "agent"
+            ? " A timed grant also authorizes this agent's requests to this host across conversations and logins."
+            : " A timed grant also authorizes subsequent root requests in this conversation and host.") : "")
         : "An agent is waiting for your approval. Access will not be granted automatically.";
       renderPreview(request);
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
@@ -222,7 +226,8 @@
   }
   function grantName(grant) {
     const number = conversationNumber(grant.conversation_scope_id);
-    return grant.host + (number ? " [" + number + "]" : "");
+    const agent = grant.agent || "Unknown";
+    return grant.host + "[" + agent + (number ? "-" + number : "") + "]";
   }
   function revokeButton(grant, name) {
     const button = document.createElement("button");
@@ -337,7 +342,8 @@
     $("approval-grant").disabled = state.busy || seconds === 0;
     $("approval-deny").disabled = state.busy;
     $("approval-close").disabled = state.busy;
-    const timedAllowed = Boolean(request.conversation_id) && request.timed_grants_allowed !== false;
+    const timedAllowed = request.timed_grants_allowed !== false &&
+      (Boolean(request.conversation_id) || request.grant_scope === "agent");
     for (const control of layer.querySelectorAll('input[name="approval-duration"]'))
       control.disabled = state.busy || seconds === 0 || (!timedAllowed && control.value !== "once");
   }
