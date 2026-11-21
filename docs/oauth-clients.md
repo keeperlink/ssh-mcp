@@ -160,6 +160,28 @@ retain their independent absolute expiry. The private backup of the existing
 database now includes DCR registrations; do not discard this database during
 upgrade or rollback.
 
+### Operator-verified labels for dynamically registered clients
+
+A DCR registration returns a stable opaque `dcr_...` client ID; the
+registered `client_name` is **self-asserted**. For trustworthy labels in
+History, approvals, and filters, an operator must independently confirm
+the exact ID associated with the authenticated OAuth client and add that ID
+to signed nonsecret `viewer.client_labels`, for example:
+
+```json
+{
+  "dcr_QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ": "Grok"
+}
+```
+
+The example is synthetic; never copy it into a real deployment. Only exact
+RFC 7591 opaque client IDs or valid HTTPS CIMD IDs are accepted; partial
+IDs, wildcards, client-supplied names, or prefixes are not trusted.
+The labels are **display-only** and never authorize OAuth login or SSH host
+grants. A new DCR registration yields a new ID and requires another explicit
+label review. Keep host-specific IDs out of the public source repository;
+signed deployment configuration must be changed and re-signed separately.
+
 ### Administrative inspection and revocation
 
 From a trusted host/container environment with the project package available

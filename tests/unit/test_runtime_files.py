@@ -335,7 +335,8 @@ assert "Timeout max is 36000 seconds." in next(
         self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "16")
         self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "end")
         self.assertEqual(json.loads(result["MCP_CLIENT_LABELS"]), {})
-        labels = {"https://agent.example.org/client.json": "Agent"}
+        labels = {"https://agent.example.org/client.json": "Agent",
+                  "dcr_" + "Q" * 43: "Grok"}
         config["viewer"]["client_labels"] = labels
         config["viewer"].update({"story_id_max_chars": 9,
                                  "story_id_truncate_from": "start"})

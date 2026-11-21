@@ -4,9 +4,10 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
 os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
@@ -14,6 +15,7 @@ os.environ.setdefault("MCP_TOKEN_SIGNING_SECRET", "synthetic-test-signing-" + "b
 os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 
 from app import config
+from app.approvals import PendingApproval
 from app.batch import BatchStore
 from app.client_identity import (agent_disambiguator, client_id_context,
                                  parse_labels, labels_from_environment)
@@ -26,6 +28,7 @@ from app.oauth import client_audit_actor
 A = "https://agent-a.example.org/client.json"
 B = "https://agent-b.example.org/client.json"
 C = "https://agent-c.example.org/client.json?private=synthetic"
+DCR = "dcr_" + "Q" * 43
 LABELS = {A: "Agent A", B: "Agent B"}
 
 
@@ -52,12 +55,17 @@ class ClientIdentityTests(unittest.TestCase):
 
     def test_configuration_is_bounded_and_validated(self):
         self.assertEqual(parse_labels(LABELS), LABELS)
+        self.assertEqual(parse_labels({**LABELS, DCR: "Grok"}), {**LABELS, DCR: "Grok"})
         self.assertEqual(labels_from_environment("{}"), {})
         for bad in (
             [], {A: "Unknown"}, {A: "Agent", B: "agent"}, {A: "Agent\n"},
             {A: "x" * 33}, {"http://agent.example.org/client.json": "Agent"},
             {"https://user@agent.example.org/client.json": "Agent"},
             {"https://agent.example.org:bad/client.json": "Agent"},
+            {"dcr_Q": "Grok"}, {"dcr_" + "Q" * 31: "Grok"},
+            {"dcr_" + "Q" * 65: "Grok"}, {"dcr_" + "Q" * 42 + ".": "Grok"},
+            {"dcr_*": "Grok"}, {"dcr_" + "Q" * 42 + "/": "Grok"},
+            {"dcr_" + "Q" * 43: "Unknown"}, {5: "Grok"},
             {A: 12}, {f"https://agent-{i}.example.org/client.json": str(i) for i in range(33)},
         ):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -113,6 +121,39 @@ class ClientIdentityTests(unittest.TestCase):
         page = _history_page("synthetic")
         self.assertIn('value="' + A + '">Agent A</option>', page)
         self.assertIn('value="unknown">Unknown</option>', page)
+
+    def test_exact_dcr_identity_labels_history_and_agent_filter(self):
+        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
+            actor = client_audit_actor(DCR)
+            context = client_id_context.set(DCR)
+            try:
+                job = self.command(actor)
+            finally:
+                client_id_context.reset(context)
+            items = self.history.list({"agent": DCR})["jobs"]
+            self.assertEqual({item["id"] for item in items}, {job})
+            self.assertEqual(items[0]["agent"], "Grok")
+            self.assertEqual(self.history.detail(job)["agent"], "Grok")
+            self.assertEqual(agent_disambiguator(DCR, config.MCP_CLIENT_LABELS), None)
+            self.assertEqual(self.history.list({"agent": A})["filtered_total"], 0)
+        self.assertEqual(self.history.detail(job)["agent"], "Unknown")
+
+    def test_exact_dcr_approval_display_is_agent_scoped_and_display_only(self):
+        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
+            pending = PendingApproval(
+                id="synthetic-approval", key=("agent:operator", DCR, "demo-node-a"),
+                tool="execute_command", reason="synthetic", summary="hostname",
+                expires_at=time.time() + 40, deadline=time.monotonic() + 40,
+                future=MagicMock(), waiter=None, client_id=DCR,
+            )
+            display = pending.public()
+            self.assertEqual(display["agent"], "Grok")
+            self.assertEqual(display["client_id"], DCR)
+            self.assertEqual(display["grant_scope"], "agent")
+            self.assertIsNone(display["conversation_id"])
+            self.assertIsNone(display["client_disambiguator"])
+        display = pending.public()
+        self.assertEqual(display["agent"], "Unknown")
 
     def test_all_durable_kinds_retain_identity_at_admission_and_after_reopen(self):
         actor = client_audit_actor(B)

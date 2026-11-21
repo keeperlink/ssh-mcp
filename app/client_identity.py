@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 from .client_metadata import _parts
+from .dcr_registry import DCR_CLIENT_ID_PATTERN
 
 client_id_context: ContextVar[str | None] = ContextVar("oauth_client_id", default=None)
 UNKNOWN_AGENT = "unknown"
@@ -18,7 +19,12 @@ def parse_labels(raw: Any) -> dict[str, str]:
     labels: dict[str, str] = {}
     names = {"unknown"}
     for client_id, label in raw.items():
-        _parts(client_id, metadata=True)
+        # Only explicit, operator-pinned exact DCR IDs can receive labels.
+        # A registration's self-asserted client_name grants no identity trust.
+        if not isinstance(client_id, str):
+            raise ValueError("Invalid client label ID")
+        if DCR_CLIENT_ID_PATTERN.fullmatch(client_id) is None:
+            _parts(client_id, metadata=True)
         if (not isinstance(label, str) or not 1 <= len(label) <= 32
                 or label != label.strip() or not label.isprintable()
                 or label.casefold() in names):

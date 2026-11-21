@@ -25,7 +25,8 @@ INACTIVE_SECONDS = 90 * 86400
 RATE_WINDOW_SECONDS = 60
 PER_IP_RATE = 12
 GLOBAL_RATE = 120
-_CLIENT_ID = re.compile(r"dcr_[A-Za-z0-9_-]{32,64}\Z", re.ASCII)
+DCR_CLIENT_ID_PATTERN = re.compile(r"dcr_[A-Za-z0-9_-]{32,64}\Z", re.ASCII)
+_CLIENT_ID = DCR_CLIENT_ID_PATTERN  # Preserve existing registry-internal reference.
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
