@@ -13,6 +13,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
@@ -25,6 +26,7 @@ from mcp.server.auth.provider import AccessToken
 from . import config
 from .oauth_sessions import SessionStore
 from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
+from .dcr_registry import DCRStore, RegistrationError
 from .form_body import read_bounded_body
 from .config import (
     MCP_ACCESS_TOKEN_TTL,
@@ -187,6 +189,29 @@ async def _validate_cimd(client_id: str, redirect_uri: str) -> dict[str, Any]:
         client_id, redirect_uri, timeout=REQUEST_TIMEOUT,
         cache_ttl=MCP_CIMD_CACHE_TTL,
     )
+
+
+@lru_cache(maxsize=4)
+def _dcr_store(path: str) -> DCRStore:
+    return DCRStore(Path(path))
+
+
+def dcr_store() -> DCRStore:
+    path = os.getenv("SSH_JOBS_DB") or os.getenv("MCP_OAUTH_DB")
+    if not path:
+        raise RuntimeError("Private SQLite OAuth session database is required")
+    return _dcr_store(path)
+
+
+async def _validate_client(client_id: str, redirect_uri: str) -> dict[str, Any]:
+    if client_id.startswith("dcr_"):
+        if not config.MCP_DCR_ENABLED:
+            raise ValueError("Dynamic client registration is disabled")
+        item = dcr_store().get(client_id, redirect_uri)
+        if item is None:
+            raise ValueError("Unknown client or unregistered redirect_uri")
+        return item
+    return await _validate_cimd(client_id, redirect_uri)
 
 
 def _make_authorization_request_token(
@@ -430,6 +455,9 @@ class OAuthTokenVerifier:
                 return None
             if config.MCP_SSH_SCOPE in scopes and not config.MCP_SSH_TOOLS_ENABLED:
                 return None
+            if str(claims["client_id"]).startswith("dcr_"):
+                if not config.MCP_DCR_ENABLED or dcr_store().get(str(claims["client_id"])) is None:
+                    return None
             sid = claims.get("sid")
             if sid is not None and (
                 not isinstance(sid, str) or not 16 <= len(sid) <= 128
@@ -474,9 +502,34 @@ async def oauth_authorization_server_metadata() -> JSONResponse:
             "scopes_supported": _supported_scopes(),
             "token_endpoint_auth_methods_supported": ["none"],
             "client_id_metadata_document_supported": True,
+            **({"registration_endpoint": f"{MCP_ISSUER}/oauth/register"}
+               if config.MCP_DCR_ENABLED else {}),
             "authorization_response_iss_parameter_supported": True,
         }
     )
+
+
+@router.post("/oauth/register")
+async def oauth_register(request: Request) -> JSONResponse:
+    if not config.MCP_DCR_ENABLED:
+        return _oauth_error("invalid_request", "Dynamic registration is disabled", status_code=404)
+    if request.headers.get("content-type", "").split(";", 1)[0].lower().strip() != "application/json":
+        return _oauth_error("invalid_client_metadata", "Content-Type must be application/json")
+    try:
+        body = await read_bounded_body(request, max_bytes=16384)
+        payload = json.loads(body)
+        entry = dcr_store().register(
+            payload, request.client.host if request.client else "unknown",
+            signing_salt=config.MCP_TOKEN_SIGNING_SECRET,
+        )
+    except (ValueError, UnicodeError) as exc:
+        if isinstance(exc, RegistrationError):
+            return _oauth_error(exc.error, str(exc), status_code=exc.status)
+        return _oauth_error("invalid_client_metadata", "Invalid registration JSON")
+    except (OSError, sqlite3.Error, RuntimeError):
+        return _oauth_error("server_error", "Registration store unavailable", status_code=503)
+    return JSONResponse(entry, status_code=201,
+                        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 @router.get("/oauth/authorize")
@@ -493,7 +546,7 @@ async def oauth_authorize_get(request: Request) -> Response:
 
     # Validate the redirect target before ever redirecting errors to it.
     try:
-        client_metadata = await _validate_cimd(client_id, redirect_uri)
+        client_metadata = await _validate_client(client_id, redirect_uri)
     except ValueError as exc:
         return HTMLResponse(
             f"<h1>Invalid OAuth request</h1><p>{html.escape(str(exc))}</p>",
@@ -533,6 +586,7 @@ async def oauth_authorize_get(request: Request) -> Response:
     # Metadata is client-declared, not a brand-identity attestation.
     client_name = html.escape(str(client_metadata.get("client_name", "Unknown client")))
     client_address = html.escape(client_id)
+    client_identity_label = "Registered client ID" if client_id.startswith("dcr_") else "Verified metadata URL"
     callback_address = html.escape(redirect_uri)
     lifetime_labels = ("1 hour", "8 hours", "24 hours", "7 days", "30 days")
     lifetime_options = "".join(
@@ -558,7 +612,7 @@ async def oauth_authorize_get(request: Request) -> Response:
   <h1>SSH-MCP Authorization</h1>
   <p>Enter the private MCP login key to authorize this MCP client.</p>
   <p>Requesting client: <strong>{client_name}</strong></p>
-  <p class="note">Verified metadata URL: {client_address}</p>
+  <p class="note">{client_identity_label}: {client_address}</p>
   <p class="note">Authorization callback: {callback_address}</p>
   <p class="note">The displayed name is supplied by the client, not independently verified.</p>
   <form method="post" action="/oauth/authorize" autocomplete="off">
@@ -607,7 +661,7 @@ async def oauth_authorize_post(request: Request) -> Response:
         resource = str(payload["resource"])
         scopes = _normalize_scopes(str(payload["scope"]))
         session_ttl_seconds = _selected_session_ttl(form.get("session_ttl_seconds"))
-        await _validate_cimd(client_id, redirect_uri)
+        await _validate_client(client_id, redirect_uri)
     except (ValueError, KeyError, jwt.PyJWTError):
         return HTMLResponse(
             "<h1>Invalid or expired authorization request</h1><p>Start the connection again from your MCP client.</p>",
@@ -641,6 +695,8 @@ async def oauth_authorize_post(request: Request) -> Response:
         resource=resource,
         session_ttl_seconds=session_ttl_seconds,
     )
+    if client_id.startswith("dcr_"):
+        dcr_store().used(client_id)
     params = {"code": code, "iss": MCP_ISSUER}
     if state is not None:
         params["state"] = str(state)
@@ -663,7 +719,11 @@ async def oauth_token(request: Request) -> JSONResponse:
         if not token or len(token) > 256 or not client_id:
             return _oauth_error("invalid_request", "Missing or invalid refresh grant fields")
         try:
-            _parts(client_id, metadata=True)
+            if client_id.startswith("dcr_"):
+                if not config.MCP_DCR_ENABLED or dcr_store().get(client_id) is None:
+                    raise ValueError("Unknown registered client")
+            else:
+                _parts(client_id, metadata=True)
         except ValueError:
             return _oauth_error("invalid_client", "OAuth client validation failed", status_code=401)
         if resource != MCP_RESOURCE:
@@ -686,6 +746,8 @@ async def oauth_token(request: Request) -> JSONResponse:
             )
         except ValueError:
             return _oauth_error("invalid_grant", "OAuth authorization is no longer allowed")
+        if client_id.startswith("dcr_"):
+            dcr_store().used(client_id)
         return _json_no_store({
             "access_token": access_token,
             "token_type": "Bearer",
@@ -706,7 +768,7 @@ async def oauth_token(request: Request) -> JSONResponse:
         return _oauth_error("invalid_request", "Missing required token request field")
 
     try:
-        await _validate_cimd(client_id, redirect_uri)
+        await _validate_client(client_id, redirect_uri)
     except ValueError:
         return _oauth_error("invalid_client", "OAuth client validation failed", status_code=401)
 
@@ -753,6 +815,8 @@ async def oauth_token(request: Request) -> JSONResponse:
         )
     except (OSError, sqlite3.Error, RuntimeError, ValueError):
         return _oauth_error("server_error", "OAuth session store unavailable", status_code=503)
+    if client_id.startswith("dcr_"):
+        dcr_store().used(client_id)
     return _json_no_store({
         "access_token": access_token,
         "token_type": "Bearer",

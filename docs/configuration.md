@@ -52,6 +52,7 @@ Never mount two service instances to the same database.
 | `MCP_CIMD_CLIENT_ID` | Configured legacy client identity (default ChatGPT), preserving its existing audit actor; **not** a client allowlist in online mode |
 | `MCP_ALLOWED_REDIRECT_URIS` | Existing single-client fallback for offline/synthetic mode; not a limit for newly discovered online clients |
 | `MCP_CIMD_VALIDATE_REMOTE` | Keep `true` for dynamic HTTPS CIMD discovery; disabling enforces the single configured legacy client |
+| `MCP_DCR_ENABLED` | Default `true`: enable RFC 7591 public-client DCR; managed signed service optional `oauth.dcr_enabled` toggles this feature independently of CIMD |
 | `MCP_LOGIN_KEY` | Independent 32+ char OAuth login credential |
 | `MCP_TOKEN_SIGNING_SECRET` | Different 32+ char JWT signing secret |
 | `HISTORY_VIEWER_PASSWORD` | Different 16+ char operator-console password |

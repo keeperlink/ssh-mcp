@@ -31,6 +31,7 @@ tag or an immutable digest for reproducible deployments.
   with scoped and expiring access grants.
 - Display history, approvals and cancellation in the password-protected
   **Operator Console** (`/console`).
+- Connect legacy RFC 7591 DCR public OAuth clients through an optional default-enabled registration endpoint.
 - Connect multiple dynamically discovered OAuth CIMD clients without a
   predefined client allowlist, retaining separate operator authorization.
 

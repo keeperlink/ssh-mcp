@@ -19,7 +19,7 @@ from .jobs import JobStore
 validate_mcp_config()
 
 from .mcp_gateway import create_mcp_server  # noqa: E402
-from .oauth import router as oauth_router, session_store  # noqa: E402
+from .oauth import router as oauth_router, session_store, dcr_store  # noqa: E402
 
 _job_registry: dict = {}
 _approvals = ApprovalManager()
@@ -36,6 +36,8 @@ async def _prune_loop(store: JobStore | None) -> None:
             if store is not None:
                 store.prune()
             session_store().prune()
+            if os.getenv("SSH_JOBS_DB") or os.getenv("MCP_OAUTH_DB"):
+                dcr_store().prune()
         except Exception:
             logging.getLogger(__name__).warning("history_retention_prune_failed")
 
@@ -58,6 +60,8 @@ async def lifespan(_app: FastAPI):
         jobs = _job_registry.get("jobs")
         # Fail at startup if private session storage cannot initialize.
         session_store()
+        if os.getenv("SSH_JOBS_DB") or os.getenv("MCP_OAUTH_DB"):
+            dcr_store()
         cleanup = asyncio.create_task(_prune_loop(jobs.store if jobs is not None else None))
         if readiness is not None:
             readiness.start()

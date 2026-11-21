@@ -38,9 +38,9 @@ def _parts(value: str, *, metadata: bool = False) -> SplitResult:
         # Zone-scoped IPv6 literals and escaped/ambiguous authorities must not
         # enter the browser CSP or the MCP transport Origin allowlist.
         raise ValueError("Invalid OAuth URL")
-    if not parts.path.startswith("/") or not _CLIENT_PATH.fullmatch(parts.path):
+    if parts.path and (not parts.path.startswith("/") or not _CLIENT_PATH.fullmatch(parts.path)):
         raise ValueError("Invalid OAuth URL")
-    if metadata and (parts.scheme != "https" or parts.path == "/"):
+    if metadata and (parts.scheme != "https" or parts.path in ("", "/")):
         raise ValueError("OAuth client_id must be an HTTPS metadata document URL")
     if parts.scheme not in {"https", "http"} or (metadata and parts.scheme != "https"):
         raise ValueError("Invalid OAuth URL scheme")

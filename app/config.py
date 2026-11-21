@@ -52,6 +52,7 @@ MCP_CIMD_CLIENT_ID = os.getenv("MCP_CIMD_CLIENT_ID", "https://chatgpt.com/oauth/
 MCP_CLIENT_LABELS = labels_from_environment(os.getenv("MCP_CLIENT_LABELS", "{}"))
 MCP_CIMD_VALIDATE_REMOTE = os.getenv("MCP_CIMD_VALIDATE_REMOTE", "true").lower() != "false"
 MCP_CIMD_CACHE_TTL = int(os.getenv("MCP_CIMD_CACHE_TTL", "3600"))
+MCP_DCR_ENABLED = os.getenv("MCP_DCR_ENABLED", "true").lower() == "true"
 MCP_ALLOWED_REDIRECT_URIS = set(
     _csv_env("MCP_ALLOWED_REDIRECT_URIS", "https://chatgpt.com/connector_platform_oauth_redirect")
 )
