@@ -308,7 +308,11 @@ class Handler(BaseHTTPRequestHandler):
                                             str(job.get(attr) or "").isascii() and
                                             str(job.get(attr) or "").upper() == requested]
                                 continue
-                        filtered = [job for job in filtered if job.get(attr) == requested]
+                        filtered = [job for job in filtered
+                                    if (job.get("agent") == requested or
+                                        job.get("agent_key") == requested)
+                                    ] if key == "agent" else [
+                                        job for job in filtered if job.get(attr) == requested]
             command = q.get("command", [""])[0].lower()
             if command:
                 filtered = [job for job in filtered if command in
