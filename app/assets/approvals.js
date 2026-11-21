@@ -223,7 +223,17 @@
         : timedAllowed && root
           ? " A timed grant also authorizes subsequent root requests in this conversation and host."
           : "";
-      $("approval-explainer").textContent = explanation + timedExplanation;
+      const hostExtensionExplanation = timedAllowed && root
+        && request.host_grant_extension_possible === true
+        ? " If the selected timed duration outlasts your existing SSH host grant,"
+          + " that host grant is also extended to the root grant expiry and remains"
+          + " active if only the root grant is revoked."
+          + (request.grant_scope === "agent"
+            ? " Extended SSH host access applies across this agent's conversations and OAuth logins."
+            : "")
+        : "";
+      $("approval-explainer").textContent = explanation + timedExplanation
+        + hostExtensionExplanation;
       renderPreview(request);
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
       $("approval-feedback").hidden = true;

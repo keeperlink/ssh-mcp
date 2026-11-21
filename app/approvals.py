@@ -73,6 +73,12 @@ class PendingApproval:
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
             "requires_host": self.grant_host,
             "requires_root": self.grant_root,
+            # Root approval can extend an already-active prerequisite host
+            # grant to the root expiry even when no new host approval is due.
+            "host_grant_extension_possible": (
+                self.host_required and self.root_required
+                and not self.grant_host and self.grant_root
+            ),
         }
         if self.steps is not None:
             data["steps"] = self.steps

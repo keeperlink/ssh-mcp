@@ -89,6 +89,10 @@ of the OAuth client ID to distinguish their individual grant/revoke controls;
 the original client ID is not shown in the chip.
 
 Host and root grants remain independently approved, expiring and revocable.
+When approving timed root access on a restricted host with an existing shorter
+SSH host grant, that prerequisite host grant is extended to the root grant's
+expiry. It remains active if the root grant alone is revoked; revoke the host
+grant separately to end SSH access. The approval dialog discloses this.
 Agent-wide root grants are as broad as agent-wide host grants, so review
 duration accordingly. Without a verified OAuth client identity, timed grants
 remain unavailable and an explicit one-request approval is required.

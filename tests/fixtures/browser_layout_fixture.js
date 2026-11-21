@@ -1033,13 +1033,32 @@
       const rootOnlyConsent = document.getElementById("approval-explainer").textContent;
       assert(rootOnlyConsent.includes("future root execution")
         && rootOnlyConsent.includes("across conversations and OAuth logins")
-        && !rootOnlyConsent.includes("future SSH host access"),
-      "Root-only timed approval must describe only the permission being extended");
+        && !rootOnlyConsent.includes("existing SSH host grant"),
+      "Root-only approval with no prerequisite host grant must not imply SSH extension");
+      // A short, already-active SSH host grant is a prerequisite for this
+      // root-only approval. Choosing one hour will extend that 5m host grant.
+      send(19, [{ ...requests[0], id: "synthetic-agent-short-host-root",
+        conversation_id: null, conversation_scope_id: null, grant_scope: "agent",
+        requires_host: false, requires_root: true,
+        host_grant_extension_possible: true, timed_grants_allowed: true,
+        expires_at: Date.now() / 1000 + 28 }], [{
+        id: "synthetic-short-host-grant", kind: "host", host: "demo-node-a",
+        agent: "Claude", grant_scope: "agent", scope_id: "agent-existing-host",
+        conversation_scope_id: null, expires_at: Date.now() / 1000 + 5 * 60,
+      }]);
+      duration("1h").click();
+      const extensionConsent = document.getElementById("approval-explainer").textContent;
+      assert(extensionConsent.includes("future root execution")
+        && extensionConsent.includes("existing SSH host grant")
+        && extensionConsent.includes("extended to the root grant expiry")
+        && extensionConsent.includes("remains active if only the root grant is revoked")
+        && extensionConsent.includes("across this agent's conversations and OAuth logins"),
+      "Root-only 1h grant must disclose extension of an existing 5m SSH host grant");
       send(19, [{ ...requests[0], id: "synthetic-headerless",
         conversation_id: null, scope_id: "agent-scope-claude", conversation_scope_id: null,
         grant_scope: "agent", timed_grants_allowed: true,
         client_id: "https://example.invalid/client.json", agent: "Claude",
-        expires_at: Date.now() / 1000 + 28 }]);
+        expires_at: Date.now() / 1000 + 28 }], []);
       duration("1h").click();
       grant.click();
       await waitFor(() => layer.hidden && posts.length === 9, "Agent approval completes");

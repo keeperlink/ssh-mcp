@@ -272,6 +272,7 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         pending = self.manager.pending[request_id].public()
         self.assertFalse(pending["requires_host"])
         self.assertTrue(pending["requires_root"])
+        self.assertFalse(pending["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="5m"))
         await task
         self.assertEqual(self.manager.grants, {})
@@ -287,13 +288,16 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         task, request_id = await self._root_pending()
         self.assertFalse(self.manager.pending[request_id].grant_host)
         self.assertTrue(self.manager.pending[request_id].grant_root)
+        self.assertTrue(self.manager.pending[request_id].public()["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="1h"))
         await task
         self.assertGreaterEqual(self.manager.grants[KEY], self.manager.root_grants[KEY])
+        self.assertTrue(self.manager.revoke(self.manager.grant_id(KEY, "root")))
+        self.assertIn(KEY, self.manager.grants)
         long_expiry = time.monotonic() + 16 * 3600
         self.manager.grants[KEY] = long_expiry
-        self.manager.root_grants.pop(KEY)
         task, request_id = await self._root_pending()
+        self.assertTrue(self.manager.pending[request_id].public()["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(request_id, grant=True, duration="5m"))
         await task
         self.assertEqual(self.manager.grants[KEY], long_expiry)
@@ -1086,6 +1090,7 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         pending = next(iter(self.manager.pending.values()))
         self.assertFalse(pending.grant_host)
         self.assertTrue(pending.grant_root)
+        self.assertTrue(pending.public()["host_grant_extension_possible"])
         self.assertTrue(self.manager.decide(pending.id, grant=True, duration="5m"))
         self.assertEqual(await root, ApprovalCode.APPROVED_TIMED)
         self.assertEqual(await request("operator@client-a", client_a, "oauth-sid-5",
