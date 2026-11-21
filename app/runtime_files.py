@@ -130,6 +130,15 @@ def _valid_settings(settings: dict[str, Any]) -> None:
         raise ValueError("Invalid service setting schema")
     ReadinessSettings.from_mapping(settings.get("readiness", {}))
     clients = parse_clients(settings["clients"])
+    for definition in clients.values():
+        for identity in definition["identities"]:
+            # Retain DNS-only, no-IP, no-single-label and no-backslash
+            # managed HTTPS policy from the previous signed settings.
+            if identity.startswith("https://") and not _https_url(identity):
+                raise ValueError("Invalid signed OAuth client identity URL")
+        for redirect in definition.get("offline_redirect_uris", []):
+            if not _https_url(redirect) or "," in redirect:
+                raise ValueError("Invalid signed OAuth offline redirect URL")
     if offline_client(clients) is None:
         raise ValueError("Managed service requires an explicit offline fallback client")
     logging_settings = settings.get("logging", {"level": "INFO"})

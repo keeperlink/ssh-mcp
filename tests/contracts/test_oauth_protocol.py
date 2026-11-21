@@ -118,9 +118,6 @@ class OAuthAndMCPTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "must be distinct"):
                         config.validate_mcp_config()
 
-    def test_custom_conversation_header_config_is_valid(self):
-            config.validate_mcp_config()
-
     def test_pkce_rfc7636(self):
         self.assertEqual(oauth._pkce_s256(VERIFIER), CHALLENGE)
 

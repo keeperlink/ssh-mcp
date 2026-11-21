@@ -447,18 +447,7 @@ assert "Timeout max is 36000 seconds." in next(
             ("oauth", "issuer", "https://127.0.0.1"),
             ("oauth", "operator_subject", "legacy-operator"),
             ("oauth", "operator_subject", "agent"),
-            ("oauth", "client_metadata_url", "http://agent.example.com/client.json"),
-            ("oauth", "client_metadata_url", "https://user@agent.example.com/client.json"),
-            ("oauth", "client_metadata_url", "https://agent.example.com/client.json#fragment"),
-            ("oauth", "client_metadata_url", "https://agent.example.com:bad/client.json"),
-            ("oauth", "allowed_redirect_uris", []),
-            ("oauth", "allowed_redirect_uris", ["*"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb#fragment"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/a,b"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb?x=a,b"]),
             ("http", "allowed_origins", ["https://agent,example.com"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb"] * 2),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb", 42]),
             ("http", "allowed_origins", []),
             ("http", "allowed_origins", ["*"]),
             ("http", "allowed_origins", ["http://agent.example.com"]),
@@ -477,6 +466,46 @@ assert "Timeout max is 36000 seconds." in next(
                 with self.assertRaises(ValueError):
                     prepare(self.config, self.secrets, self.inventory, self.known, target)
                 self.assertEqual(list(target.iterdir()), [])
+
+        # These must reach URL validation inside the new signed clients map,
+        # not fail early merely because legacy OAuth keys were removed.
+        for field, values in (
+            ("identities", [
+                ["http://agent.example.com/client.json"],
+                ["https://127.0.0.1/client.json"],
+                ["https://169.254.169.254/client.json"],
+                ["https://localhost/client.json"],
+                ["https://agent/client.json"],
+                ["https://user@agent.example.com/client.json"],
+                ["https://agent.example.com:bad/client.json"],
+                ["https://agent.example.com/client.json#fragment"],
+                ["https://agent.example.com\\evil/client.json"],
+            ]),
+            ("offline_redirect_uris", [
+                [],
+                ["http://127.0.0.1/cb"],
+                ["https://127.0.0.1/cb"],
+                ["https://localhost/cb"],
+                ["https://agent/cb"],
+                ["https://user@agent.example.com/cb"],
+                ["https://agent.example.com/cb#fragment"],
+                ["https://agent.example.com/a,b"],
+                ["https://agent.example.com/cb?x=a,b"],
+                ["https://agent.example.com\\evil/cb"],
+                ["https://agent.example.com/cb"] * 2,
+            ]),
+        ):
+            for index, value in enumerate(values):
+                with self.subTest(field=field, case=index):
+                    cfg = json.loads(json.dumps(self.settings))
+                    cfg["clients"]["ChatGPT"][field] = value
+                    self.write(self.config, cfg)
+                    target = self.root / f"reject-client-{field}-{index}"
+                    target.mkdir(mode=0o700)
+                    with self.assertRaises(ValueError):
+                        prepare(self.config, self.secrets, self.inventory,
+                                self.known, target)
+                    self.assertEqual(list(target.iterdir()), [])
 
     def test_signed_client_registry_rejects_untrusted_sources(self):
         invalid = (

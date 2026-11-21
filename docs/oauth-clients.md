@@ -23,10 +23,12 @@ The login page derives a narrow `form-action` CSP origin from the **verified
 callback for that request**, not from untrusted parameters or a global
 allowlist. Origins associated with valid authorized sessions survive restart.
 The metadata fetch is bounded, pins publicly routable IPs and rejects HTTP,
-redirects and private-network endpoints. The configured legacy client ID
-and static redirect/origin values remain for offline fixtures and existing
-ChatGPT audit compatibility; with remote validation enabled they **do not**
-limit which new CIMD clients can request authorization.
+redirects and private-network endpoints. In standalone/offline mode,
+the designated configured client identity and redirect allowlist are used
+only for that fallback; with remote validation enabled they **do not**
+limit which newly verified CIMD clients can request authorization.
+Historical shared audit actors are normalized through the documented
+manual database migration, not runtime ChatGPT-specific exceptions.
 
 MCP clients without HTTPS CIMD may use the optional default-enabled
 RFC 7591 Dynamic Client Registration compatibility endpoint described below.
@@ -36,8 +38,8 @@ RFC 7591 Dynamic Client Registration compatibility endpoint described below.
 1. Put the server behind authenticated HTTPS, set `MCP_ISSUER` to
    the exact proxy origin, and connect to issuer + `/mcp`.
 2. Keep remote CIMD metadata validation **enabled**. The example's
-   ChatGPT settings remain backward-compatible, but other HTTPS CIMD
-   clients no longer require adding a client ID or origin to configuration.
+   client registry provides an explicit offline fallback, but other HTTPS
+   CIMD clients do not need preconfigured identity or origin entries.
    Unknown clients must pass metadata and redirect checks and must be
    approved separately on the OAuth consent page.
 3. Request `mcp.access` for `ping` and `ssh.execute` for SSH,
@@ -60,13 +62,15 @@ issued access tokens can remain active until their own expiry.
 
 Restricted host or root operations always require a verified OAuth session
 and operator approval. When a client supplies a validated conversation
-identifier from one of these sources, timed grants are conversation-scoped:
-
-- The configured dedicated header (`X-OpenAI-Session` by default).
-- Codex tool-call `params._meta["x-codex-turn-metadata"].thread_id`.
-- Antigravity tool-call `params._meta["antigravity.google/conversation_id"]`
-  (not the root conversation ID).
-- The optional `X-SSH-MCP-Conversation` header, if a client supplies it.
+identifier from a source explicitly declared for the authenticated OAuth
+client in the signed `clients.<label>.conversation_id.sources` registry,
+timed grants are conversation-scoped. A source can be a dedicated HTTP
+header or an exact JSON-RPC `params._meta` name with an optional
+nested field. For example, ChatGPT can declare `X-OpenAI-Session`
+and Codex thread metadata; Antigravity can declare its exact conversation
+metadata (not the root ID). No source is accepted globally. The generic
+`X-SSH-MCP-Conversation` header is accepted only for a client that
+explicitly configures it.
 
 The identifier is **correlation**, not authentication. Malformed or
 conflicting supplied identifiers are rejected; no transport session ID,
@@ -103,7 +107,7 @@ used as grant identities. Generic binary upload remains a separate enhancement.
 
 Allow `/mcp`, `/oauth/*`, OAuth `/.well-known/oauth-*` and
 `/console` with its subpaths. Preserve incoming HTTPS scheme and
-Host, and forward the client-supplied conversation header unchanged.
+Host, and forward any configured client-specific conversation header unchanged.
 Never substitute `X-Forwarded-For` or a request ID for a conversation.
 Do not expose `/metrics`, `/ready` or `/health` publicly.
 An existing proxy must implement this allowlist itself. The

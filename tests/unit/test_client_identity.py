@@ -42,11 +42,14 @@ class ClientIdentityTests(unittest.TestCase):
         self.files = FileAudit(self.jobs)
         self.history = HistoryStore(self.jobs)
         labels = patch.object(config, "MCP_CLIENT_LABELS", LABELS)
-        default = patch.object(config, "MCP_CIMD_CLIENT_ID", A)
+        clients = patch.object(config, "MCP_CLIENTS", {
+            name: {"identities": [cid], "conversation_id": {"sources": []}}
+            for cid, name in LABELS.items()
+        })
         labels.start()
-        default.start()
+        clients.start()
         self.addCleanup(labels.stop)
-        self.addCleanup(default.stop)
+        self.addCleanup(clients.stop)
 
     def command(self, actor=None):
         return self.jobs.create(actor or config.MCP_OPERATOR_SUBJECT,
@@ -112,7 +115,35 @@ class ClientIdentityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.history.list({"agent": "unconfigured"})
         page = _history_page("synthetic")
-        self.assertIn('value="' + A + '">Agent A</option>', page)
+        self.assertIn('value="Agent A">Agent A</option>', page)
+
+    def test_multi_identity_agent_filter_groups_display_only(self):
+        extra_id = "https://agent-a2.example.org/client.json"
+        from app.client_registry import labels
+        clients = {
+            "Agent A": {"identities": [A, extra_id],
+                        "conversation_id": {"sources": []}},
+            "Agent B": {"identities": [B], "conversation_id": {"sources": []}},
+        }
+        with patch.object(config, "MCP_CLIENTS", clients), patch.object(
+                config, "MCP_CLIENT_LABELS", labels(clients)):
+            created = {}
+            for name, cid in (("first", A), ("second", extra_id), ("third", B)):
+                token = client_id_context.set(cid)
+                try:
+                    created[name] = self.command(client_audit_actor(cid))
+                finally:
+                    client_id_context.reset(token)
+            ids = {x["id"] for x in self.history.list({"agent": "Agent A"})["jobs"]}
+            self.assertEqual(ids, {created["first"], created["second"]})
+            self.assertEqual({x["id"] for x in self.history.list({"agent": A})["jobs"]},
+                             {created["first"]})
+            self.assertEqual({x["id"] for x in self.history.list({"agent": "Agent B"})["jobs"]},
+                             {created["third"]})
+            page = _history_page("synthetic")
+            self.assertEqual(page.count('value="Agent A">Agent A</option>'), 1)
+            self.assertNotIn('value="' + extra_id + '">Agent A</option>', page)
+            self.assertNotEqual(client_audit_actor(A), client_audit_actor(extra_id))
 
     def test_exact_dcr_identity_labels_history_and_agent_filter(self):
         with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):

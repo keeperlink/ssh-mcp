@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 import sqlite3
 
+from .client_registry import offline_client, parse_clients
+
 TABLES = ("jobs", "command_batches", "file_operations")
 SUBJECT = "ssh-mcp-operator"
 
@@ -24,17 +26,14 @@ def actor_for(client_id: str) -> str:
 
 def _configured(config_path: Path) -> tuple[str, dict[str, str]]:
     document = json.loads(config_path.read_text(encoding="utf-8"))
-    entries = document["clients"]
-    labels = {}
-    for label, spec in entries.items():
-        for client_id in spec["identities"]:
-            if client_id in labels:
-                raise ValueError("Duplicate client in supplied config")
-            labels[client_id] = label
-    chat = entries["ChatGPT"]["identities"][0]
-    if not chat.startswith("https://"):
-        raise ValueError("ChatGPT migration identity must be HTTPS CIMD")
-    return chat, labels
+    entries = parse_clients(document["clients"])
+    legacy = offline_client(entries)
+    if legacy is None:
+        raise ValueError("Migration requires an explicit HTTPS offline legacy client")
+    client_id, _redirects = legacy
+    known = {identity: name for name, spec in entries.items()
+             for identity in spec["identities"]}
+    return client_id, known
 
 
 def _tables(db: sqlite3.Connection) -> list[str]:
@@ -100,13 +99,13 @@ def _fingerprints(db: sqlite3.Connection, tables: list[str]) -> dict[str, str]:
 def migrate(db_path: Path, config_path: Path, *, apply: bool = False,
             backup_path: Path | None = None, confirm_stopped: bool = False
             ) -> dict[str, dict[str, int]]:
-    chat, known = _configured(config_path)
+    legacy_client, known = _configured(config_path)
     if not db_path.is_file() or not db_path.resolve().is_file():
         raise ValueError("Existing SQLite DB path required")
     if not apply:
         uri = db_path.resolve().as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True) as db:
-            changed, stats = _changes(db, chat, known)
+            changed, stats = _changes(db, legacy_client, known)
             assert sum(s["updates"] for s in stats.values()) == len(changed)
         return {table: dict(counter) for table, counter in stats.items()}
     if not confirm_stopped or backup_path is None:
@@ -130,11 +129,11 @@ def migrate(db_path: Path, config_path: Path, *, apply: bool = False,
             try:
                 if _fingerprints(db, tables) != expected:
                     raise ValueError("Audit source changed since backup; retry from stopped service")
-                changes, stats = _changes(db, chat, known)
+                changes, stats = _changes(db, legacy_client, known)
                 for table, row_id, new_actor, client_id in changes:
                     db.execute(f"UPDATE {table} SET actor=?,client_id=? WHERE id=?",
                                (new_actor, client_id, row_id))
-                if _changes(db, chat, known)[0]:
+                if _changes(db, legacy_client, known)[0]:
                     raise ValueError("Post-migration verification failed")
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise ValueError("Post-migration database integrity failed")

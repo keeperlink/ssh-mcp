@@ -1394,6 +1394,45 @@ class HistoryCancellationTests(unittest.TestCase):
         self.assertTrue(detail["cancellation_request"]["requested_at"])
         self.assertEqual(self.cancel(own).status_code, 409)
 
+    def test_hashed_oauth_client_jobs_and_batch_steps_can_cancel(self):
+        from app.oauth import client_audit_actor
+        from app.contracts import ExecuteCommandsRequest
+        first_actor = client_audit_actor("https://first.example.org/client.json")
+        second_actor = client_audit_actor("https://second.example.org/client.json")
+        first = self.job(actor=first_actor)
+        second = self.job(actor=second_actor)
+        spoofed = self.job(actor=config.MCP_OPERATOR_SUBJECT + "@bad")
+        unapproved = self.job(actor=first_actor, server="elsewhere")
+        batch = self.batches.store.create(first_actor, ExecuteCommandsRequest.model_validate({
+            "server": "demo-node-b", "reason": "synthetic batch",
+            "commands": [{"argv": ["sleep", "10"]}],
+        }))
+        self.assertTrue(self.batches.store.begin(batch))
+        child = self.job(actor=first_actor, running=True)
+        self.batches.store.record_step(batch, 0, child)
+        self.batches.store.admitted_step(batch, 0, child)
+        class PendingTask:
+            def done(self): return False
+            def cancel(self): self.called = True
+        pending = PendingTask()
+        self.batches._tasks[batch] = pending
+        self.login()
+        rows = {item["id"]: item for item in
+                self.client.get("/console/api/jobs").json()["jobs"]}
+        for target in (first, second, child):
+            self.assertTrue(rows[target]["cancel_available"], target)
+        self.assertFalse(rows[spoofed]["cancel_available"])
+        self.assertFalse(rows[unapproved]["cancel_available"])
+        self.assertEqual(self.cancel(spoofed).status_code, 404)
+        self.assertEqual(self.cancel(unapproved).status_code, 404)
+        self.assertEqual(self.cancel(second).status_code, 200)
+        self.assertEqual(self.store.get(second_actor, second)["status"], "cancelled")
+        self.assertEqual(self.cancel(first).status_code, 200)
+        self.assertEqual(self.store.get(first_actor, first)["status"], "cancelled")
+        self.assertEqual(self.cancel(child).status_code, 200)
+        self.assertTrue(pending.called)
+        self.assertEqual(self.store.get(first_actor, child)["status"], "running")
+
     def test_changes_eligibility_query_does_not_block_approval_event_loop(self):
         import threading
         import httpx

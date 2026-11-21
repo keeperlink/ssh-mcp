@@ -21,7 +21,9 @@ class AuditActorMigrationTests(unittest.TestCase):
         self.dbpath = self.root / "jobs.sqlite"
         self.config = self.root / "service.json"
         self.config.write_text(json.dumps({"clients": {
-            "ChatGPT": {"identities": [CHAT]}, "Other": {"identities": [OTHER]},
+             "ChatGPT": {"identities": [CHAT], "conversation_id": {"sources": []},
+                        "offline_redirect_uris": ["https://chat.example.test/callback"]},
+            "Other": {"identities": [OTHER], "conversation_id": {"sources": []}},
         }}))
         with sqlite3.connect(self.dbpath) as db:
             for table in ("jobs", "command_batches", "file_operations"):
@@ -90,9 +92,10 @@ class AuditActorMigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             migrate(self.root / "missing.sqlite", self.config)
         self.config.write_text(json.dumps({"clients": {
-            "ChatGPT": {"identities": ["dcr_" + "A" * 43]},
+            "ChatGPT": {"identities": ["dcr_" + "A" * 43], "conversation_id": {"sources": []},
+                        "offline_redirect_uris": ["https://chat.example.test/callback"]},
         }}))
-        with self.assertRaisesRegex(ValueError, "HTTPS CIMD"):
+        with self.assertRaisesRegex(ValueError, "Invalid offline client"):
             migrate(self.dbpath, self.config)
 
     def test_requires_explicit_stop_and_backup(self) -> None:

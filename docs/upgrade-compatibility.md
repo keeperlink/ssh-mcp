@@ -16,10 +16,10 @@ installation before switching images or signed configuration.
 | Runtime SSH identity | `/run/ssh-mcp/` | Update inventory identity paths and writable tmpfs mount |
 | Persistent audit database | `/var/lib/ssh-mcp/jobs.sqlite` | Preserve the original SQLite volume and update its configured database path, not just the volume mount |
 | Database backup utility | `/usr/local/bin/ssh-mcp-history-db` | Update operator scripts and offline restore procedures |
-| Remote file helper | ``/.ssh-mcp-helper/helpers/` | New versioned remote helpers are installed on demand; handle previous helpers only under separate remote cleanup approval |
+| Remote file helper | `~/.ssh-mcp-helper/helpers/` | New versioned remote helpers are installed on demand; handle previous helpers only under separate remote cleanup approval |
 | Prometheus metrics | `ssh_mcp_*` | Update Prometheus rules, dashboards and alerts before switching scrape targets |
 | File result identifiers | `ssh-mcp-file://` and `ssh-mcp-probe://` | Update consumers that parse resource URI schemes |
-| Isolated test runner | `ssh-mcp-test`, ``/tools/ssh-mcp-lab/` | Keep pinned versions available until each disposable run is cleaned up |
+| Isolated test runner | `ssh-mcp-test`, `~/tools/ssh-mcp-lab/` | Keep pinned versions available until each disposable run is cleaned up |
 | Compose projects | `ssh-mcp-basic` / `ssh-mcp-standalone` | Preserve explicitly named volumes; changing a Compose project name can create an empty new state volume |
 
 ## Direct Python wheel installations
