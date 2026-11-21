@@ -21,78 +21,77 @@ from app.jobs import JobStore
 from app.ssh_executor import SSHDenied
 
 
+CHAT = "https://chat.example.org/client.json"
+ANTI = "https://anti.example.org/client.json"
+CUSTOM = "https://custom.example.org/client.json"
+
+
 class ConversationAccessTests(unittest.TestCase):
-    def test_http_header_is_correlation_not_authorization(self):
-        self.assertIsNone(conversation_id_from_headers(None))
-        self.assertIsNone(conversation_id_from_headers({}))
-        self.assertEqual(
-            conversation_id_from_headers({"x-openai-session": "v1/dialog-123_AB"}),
-            "v1/dialog-123_AB",
-        )
-        for invalid in ("", " spaces ", "v1/\nentry", "x" * 257, "é", "../?"):
+    def setUp(self):
+        clients = {
+            "ChatGPT": {"identities": [CHAT], "conversation_id": {
+                "sources": [{"type": "header", "name": "X-OpenAI-Session"},
+                            {"type": "metadata", "name": "x-codex-turn-metadata",
+                             "field": "thread_id"}]}},
+            "Antigravity": {"identities": [ANTI], "conversation_id": {
+                "sources": [{"type": "metadata", "name": "antigravity.google/conversation_id"}]}},
+            "Custom": {"identities": [CUSTOM], "conversation_id": {
+                "sources": [{"type": "header", "name": "X-SSH-MCP-Conversation"}]}},
+        }
+        patcher = patch.object(config, "MCP_CLIENTS", clients)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_only_configured_client_header_is_used(self):
+        self.assertIsNone(conversation_id_from_headers(None, client_id=CHAT))
+        self.assertIsNone(conversation_id_from_headers({}, client_id=CHAT))
+        self.assertEqual(conversation_id_from_headers(
+            {"x-openai-session": "v1/dialog-123_AB"}, client_id=CHAT), "v1/dialog-123_AB")
+        self.assertIsNone(conversation_id_from_headers(
+            {"x-openai-session": "v1/dialog-123_AB"}, client_id=None))
+        self.assertIsNone(conversation_id_from_headers(
+            {"x-ssh-mcp-conversation": "v1/dialog-123_AB"}, client_id=CHAT))
+        self.assertEqual(conversation_id_from_headers(
+            {"x-ssh-mcp-conversation": "custom-5"}, client_id=CUSTOM), "custom-5")
+        for invalid in ("", " spaces ", "v1/\\nentry", "x" * 257, "é", "../?"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                conversation_id_from_headers({"x-openai-session": invalid})
+                conversation_id_from_headers({"x-openai-session": invalid}, client_id=CHAT)
+        self.assertIsNone(conversation_id_from_headers(
+            {"x-openai-session": "valid"}, client_id="https://unknown.example/client.json"))
 
-    def test_configured_conversation_header_is_used_without_fallback(self):
-        with patch.object(config, "MCP_CONVERSATION_HEADER_NAME", "X-SSH-MCP-Conversation"):
-            self.assertEqual(
-                conversation_id_from_headers({"x-ssh-mcp-conversation": "agent/workflow-7"}),
-                "agent/workflow-7",
-            )
-            # Do not accept a different provider header as a fallback.
-            self.assertIsNone(
-                conversation_id_from_headers({"x-openai-session": "v1/old"})
-            )
-            with self.assertRaises(ValueError):
-                conversation_id_from_headers({"x-ssh-mcp-conversation": "bad value"})
-
-    def test_neutral_and_codex_sources_are_validated_and_conflicts_rejected(self):
+    def test_codex_metadata_and_header_agreement(self):
         codex = {"x-codex-turn-metadata": {"thread_id": "thread-123", "turn_id": "turn-1"}}
-        self.assertEqual(conversation_id_from_request(None, codex), "thread-123")
-        self.assertEqual(conversation_id_from_request({"x-ssh-mcp-conversation": "thread-123"}), "thread-123")
+        self.assertEqual(conversation_id_from_request(None, codex, client_id=CHAT), "thread-123")
         self.assertEqual(conversation_id_from_request(
-            {"x-openai-session": "thread-123", "x-ssh-mcp-conversation": "thread-123"}, codex),
-            "thread-123")
-        self.assertIsNone(conversation_id_from_request(None, {"x-codex-turn-metadata": {"turn_id": "turn-only"}}))
-        self.assertIsNone(conversation_id_from_request({"mcp-session-id": "transport-only"}, {}))
-        for headers, metadata in (
+            {"x-openai-session": "thread-123"}, codex, client_id=CHAT), "thread-123")
+        self.assertIsNone(conversation_id_from_request(None, codex, client_id=ANTI))
+        self.assertIsNone(conversation_id_from_request(None, {"x-codex-turn-metadata": {
+            "turn_id": "turn-only"}}, client_id=CHAT))
+        for headers, meta in (
             ({"x-openai-session": "different"}, codex),
-            ({"x-openai-session": "thread-1", "x-ssh-mcp-conversation": "thread-2"}, None),
-            ({"x-openai-session": "thread-123", "x-ssh-mcp-conversation": ""}, codex),
             (None, {"x-codex-turn-metadata": "not-an-object"}),
             (None, {"x-codex-turn-metadata": {"thread_id": None}}),
             (None, {"x-codex-turn-metadata": {"thread_id": "bad id"}}),
         ):
-            with self.subTest(headers=headers, metadata=metadata), self.assertRaises(ValueError):
-                conversation_id_from_request(headers, metadata)
+            with self.subTest(headers=headers, meta=meta), self.assertRaises(ValueError):
+                conversation_id_from_request(headers, meta, client_id=CHAT)
 
-    def test_antigravity_uses_exact_conversation_not_root(self):
-        conversation = "12345678-1234-4234-8234-123456789abc"
+    def test_antigravity_exact_conversation_only(self):
+        cid = "12345678-1234-4234-8234-123456789abc"
         metadata = {
-            "antigravity.google/conversation_id": conversation,
+            "antigravity.google/conversation_id": cid,
             "antigravity.google/root_conversation_id": "different-root",
-            "antigravity.google/artifacts_dir": "/synthetic/brain",
         }
-        self.assertEqual(conversation_id_from_request(None, metadata), conversation)
         self.assertEqual(conversation_id_from_request(
-            {"x-ssh-mcp-conversation": conversation}, metadata), conversation)
-        self.assertEqual(conversation_id_from_request(
-            {"x-openai-session": conversation}, metadata), conversation)
+            None, metadata, client_id=ANTI), cid)
         self.assertIsNone(conversation_id_from_request(None, {
-            "antigravity.google/root_conversation_id": conversation,
-        }))
+            "antigravity.google/root_conversation_id": cid}, client_id=ANTI))
+        self.assertEqual(conversation_id_from_request(
+            {"x-openai-session": "different"}, metadata, client_id=ANTI), cid)
         for invalid in ("", None, 42, {}, "bad id", "x" * 257):
             with self.subTest(value=invalid), self.assertRaises(ValueError):
                 conversation_id_from_request(None, {
-                    **metadata, "antigravity.google/conversation_id": invalid,
-                })
-        for headers, extra in (
-            ({"x-openai-session": "different"}, {}),
-            ({"x-ssh-mcp-conversation": "different"}, {}),
-            (None, {"x-codex-turn-metadata": {"thread_id": "different"}}),
-        ):
-            with self.subTest(headers=headers, extra=extra), self.assertRaises(ValueError):
-                conversation_id_from_request(headers, {**metadata, **extra})
+                    **metadata, "antigravity.google/conversation_id": invalid}, client_id=ANTI)
 
     def test_restricted_host_fails_closed_for_every_auth_identity(self):
         class FakeSSH:

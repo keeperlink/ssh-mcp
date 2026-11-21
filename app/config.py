@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 from .control import LEVELS
-from .client_identity import labels_from_environment
+from .client_registry import clients_from_environment, labels, offline_client
 
 # Production mounts are all-or-nothing. Lab environment-file mode remains
 # supported by the exact same single image, without separate bootstrap code.
@@ -42,19 +42,20 @@ MCP_SCOPES = ["mcp.access"]
 MCP_SSH_SCOPE = "ssh.execute"
 MCP_SSH_TOOLS_ENABLED = os.getenv("MCP_SSH_TOOLS_ENABLED", "false").lower() == "true"
 MCP_OPERATOR_SUBJECT = os.getenv("MCP_OPERATOR_SUBJECT", "ssh-mcp-operator")
-# One optional request-correlation header; the value is not an auth principal.
-MCP_CONVERSATION_HEADER_NAME = os.getenv("MCP_CONVERSATION_HEADER_NAME", "X-OpenAI-Session")
 MCP_SESSION_LIFETIMES = (3600, 28800, 86400, 604800, 2592000)
 MCP_SESSION_TTL_DEFAULT = int(os.getenv("MCP_SESSION_TTL_DEFAULT", "86400"))
 MCP_ACCESS_TOKEN_TTL = int(os.getenv("MCP_ACCESS_TOKEN_TTL", "900"))
 MCP_AUTH_CODE_TTL = int(os.getenv("MCP_AUTH_CODE_TTL", "300"))
-MCP_CIMD_CLIENT_ID = os.getenv("MCP_CIMD_CLIENT_ID", "https://chatgpt.com/oauth/client.json")
-MCP_CLIENT_LABELS = labels_from_environment(os.getenv("MCP_CLIENT_LABELS", "{}"))
+MCP_CLIENTS = clients_from_environment(os.getenv("MCP_CLIENTS", "{}"))
+_OFFLINE = offline_client(MCP_CLIENTS)
+MCP_CIMD_CLIENT_ID = (_OFFLINE[0] if _OFFLINE else os.getenv("MCP_CIMD_CLIENT_ID", "https://chatgpt.com/oauth/client.json"))
+MCP_CLIENT_LABELS = labels(MCP_CLIENTS)
 MCP_CIMD_VALIDATE_REMOTE = os.getenv("MCP_CIMD_VALIDATE_REMOTE", "true").lower() != "false"
 MCP_CIMD_CACHE_TTL = int(os.getenv("MCP_CIMD_CACHE_TTL", "3600"))
 MCP_DCR_ENABLED = os.getenv("MCP_DCR_ENABLED", "true").lower() == "true"
 MCP_ALLOWED_REDIRECT_URIS = set(
-    _csv_env("MCP_ALLOWED_REDIRECT_URIS", "https://chatgpt.com/connector_platform_oauth_redirect")
+    _OFFLINE[1] if _OFFLINE else _csv_env(
+        "MCP_ALLOWED_REDIRECT_URIS", "https://chatgpt.com/connector_platform_oauth_redirect")
 )
 MCP_LOGIN_MAX_FAILURES = int(os.getenv("MCP_LOGIN_MAX_FAILURES", "5"))
 MCP_LOGIN_WINDOW_SECONDS = int(os.getenv("MCP_LOGIN_WINDOW_SECONDS", "300"))
@@ -114,19 +115,6 @@ def validate_mcp_config() -> None:
         raise RuntimeError("Client metadata and redirect allowlist must be configured")
     if MCP_OPERATOR_SUBJECT != "ssh-mcp-operator":
         raise RuntimeError("OAuth subject must be the approved operator identity")
-    conversation_header = MCP_CONVERSATION_HEADER_NAME.lower()
-    # Header-based grant isolation requires a dedicated client conversation ID,
-    # never a value inserted by a reverse proxy (such as a client IP).
-    proxy_headers = {
-        "x-real-ip", "x-client-ip", "x-remote-ip",
-        "x-true-client-ip", "x-cluster-client-ip", "x-proxyuser-ip",
-    }
-    if (not re.fullmatch(
-            r"X-[A-Za-z0-9][A-Za-z0-9-]{0,62}",
-            MCP_CONVERSATION_HEADER_NAME, re.ASCII | re.IGNORECASE,
-        ) or conversation_header.startswith(("x-forwarded-", "x-original-"))
-            or conversation_header in proxy_headers):
-        raise RuntimeError("MCP_CONVERSATION_HEADER_NAME must be a dedicated ASCII X- header")
     if (not 1 <= SSH_DEFAULT_TIMEOUT_SECONDS <= SSH_MAX_TIMEOUT_SECONDS <= 36000
             or not 1 <= SSH_OUTPUT_LIMIT_BYTES <= 1048576
             or not 1 <= SSH_MAX_ARGUMENT_BYTES <= 65536

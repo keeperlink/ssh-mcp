@@ -334,9 +334,18 @@ assert "Timeout max is 36000 seconds." in next(
         result = self.prepare()
         self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "16")
         self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "end")
-        self.assertEqual(json.loads(result["MCP_CLIENT_LABELS"]), {})
-        labels = {"https://agent.example.org/client.json": "Agent"}
-        config["viewer"]["client_labels"] = labels
+        self.assertIn("ChatGPT", json.loads(result["MCP_CLIENTS"]))
+        definitions = {
+            "Agent": {
+                "identities": ["https://agent.example.org/client.json"],
+                "conversation_id": {"sources": []},
+            },
+            "Grok": {
+                "identities": ["dcr_" + "Q" * 43],
+                "conversation_id": {"sources": []},
+            },
+        }
+        config["clients"].update(definitions)
         config["viewer"].update({"story_id_max_chars": 9,
                                  "story_id_truncate_from": "start"})
         self.write(self.config, config)
@@ -345,7 +354,7 @@ assert "Timeout max is 36000 seconds." in next(
         result = self.prepare()
         self.assertEqual(result["HISTORY_STORY_ID_MAX_CHARS"], "9")
         self.assertEqual(result["HISTORY_STORY_ID_TRUNCATE_FROM"], "start")
-        self.assertEqual(json.loads(result["MCP_CLIENT_LABELS"]), labels)
+        self.assertEqual(json.loads(result["MCP_CLIENTS"]), config["clients"])
 
     def test_fail_closed_service_schema_and_security_allowlists(self):
         changes = (
@@ -395,8 +404,8 @@ assert "Timeout max is 36000 seconds." in next(
         # need not match the HTTPS resource or the redirect target.
         cfg = json.loads(json.dumps(self.settings))
         cfg["oauth"]["issuer"] = "https://ssh.example.net:8443"
-        cfg["oauth"]["client_metadata_url"] = "https://agent.example.org/oauth/client.json"
-        cfg["oauth"]["allowed_redirect_uris"] = [
+        cfg["clients"]["ChatGPT"]["identities"] = ["https://agent.example.org/oauth/client.json"]
+        cfg["clients"]["ChatGPT"]["offline_redirect_uris"] = [
             "https://agent.example.org/callback?flow=login",
             "https://other.example.com:8443/complete",
         ]
@@ -438,18 +447,7 @@ assert "Timeout max is 36000 seconds." in next(
             ("oauth", "issuer", "https://127.0.0.1"),
             ("oauth", "operator_subject", "legacy-operator"),
             ("oauth", "operator_subject", "agent"),
-            ("oauth", "client_metadata_url", "http://agent.example.com/client.json"),
-            ("oauth", "client_metadata_url", "https://user@agent.example.com/client.json"),
-            ("oauth", "client_metadata_url", "https://agent.example.com/client.json#fragment"),
-            ("oauth", "client_metadata_url", "https://agent.example.com:bad/client.json"),
-            ("oauth", "allowed_redirect_uris", []),
-            ("oauth", "allowed_redirect_uris", ["*"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb#fragment"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/a,b"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb?x=a,b"]),
             ("http", "allowed_origins", ["https://agent,example.com"]),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb"] * 2),
-            ("oauth", "allowed_redirect_uris", ["https://agent.example.com/cb", 42]),
             ("http", "allowed_origins", []),
             ("http", "allowed_origins", ["*"]),
             ("http", "allowed_origins", ["http://agent.example.com"]),
@@ -468,6 +466,69 @@ assert "Timeout max is 36000 seconds." in next(
                 with self.assertRaises(ValueError):
                     prepare(self.config, self.secrets, self.inventory, self.known, target)
                 self.assertEqual(list(target.iterdir()), [])
+
+        # These must reach URL validation inside the new signed clients map,
+        # not fail early merely because legacy OAuth keys were removed.
+        for field, values in (
+            ("identities", [
+                ["http://agent.example.com/client.json"],
+                ["https://127.0.0.1/client.json"],
+                ["https://169.254.169.254/client.json"],
+                ["https://localhost/client.json"],
+                ["https://agent/client.json"],
+                ["https://user@agent.example.com/client.json"],
+                ["https://agent.example.com:bad/client.json"],
+                ["https://agent.example.com/client.json#fragment"],
+                ["https://agent.example.com\\evil/client.json"],
+            ]),
+            ("offline_redirect_uris", [
+                [],
+                ["http://127.0.0.1/cb"],
+                ["https://127.0.0.1/cb"],
+                ["https://localhost/cb"],
+                ["https://agent/cb"],
+                ["https://user@agent.example.com/cb"],
+                ["https://agent.example.com/cb#fragment"],
+                ["https://agent.example.com/a,b"],
+                ["https://agent.example.com/cb?x=a,b"],
+                ["https://agent.example.com\\evil/cb"],
+                ["https://agent.example.com/cb"] * 2,
+            ]),
+        ):
+            for index, value in enumerate(values):
+                with self.subTest(field=field, case=index):
+                    cfg = json.loads(json.dumps(self.settings))
+                    cfg["clients"]["ChatGPT"][field] = value
+                    self.write(self.config, cfg)
+                    target = self.root / f"reject-client-{field}-{index}"
+                    target.mkdir(mode=0o700)
+                    with self.assertRaises(ValueError):
+                        prepare(self.config, self.secrets, self.inventory,
+                                self.known, target)
+                    self.assertEqual(list(target.iterdir()), [])
+
+    def test_signed_client_registry_rejects_untrusted_sources(self):
+        invalid = (
+            ("identities", ["http://evil.invalid/client.json"]),
+            ("identities", ["https://user@agent.example.org/client.json"]),
+            ("identities", ["dcr_*"]),
+            ("identities", []),
+            ("conversation_id", {"sources": [{"type": "header", "name": "X-Forwarded-For"}]}),
+            ("conversation_id", {"sources": [{"type": "header", "name": "Authorization"}]}),
+            ("conversation_id", {"sources": [{"type": "metadata", "name": "a", "field": "../secret"}]}),
+            ("conversation_id", {"sources": [{"type": "header", "name": "X-Demo"}] * 2}),
+            ("offline_redirect_uris", ["http://127.0.0.1/unsafe"]),
+            ("offline_redirect_uris", ["https://agent.example.org/a,b"]),
+            ("offline_redirect_uris", []),
+        )
+        for i, (key, value) in enumerate(invalid):
+            with self.subTest(key=key, case=i):
+                cfg = json.loads(json.dumps(self.settings))
+                cfg["clients"]["ChatGPT"][key] = value
+                self.write(self.config, cfg)
+                with self.assertRaises(ValueError):
+                    self.prepare()
+                self.assertEqual(list(self.target.iterdir()), [])
 
     def test_compose_owns_bind_host_and_port(self):
         result = self.prepare()

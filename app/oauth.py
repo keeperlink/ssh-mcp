@@ -412,13 +412,7 @@ def issue_access_token(
 
 
 def client_audit_actor(client_id: str) -> str:
-    """Partition MCP-visible audit by OAuth client without changing SSH grants.
-
-    Legacy configured ChatGPT/standalone operator retains its existing rows.
-    The signed host inventory always authorizes the base operator principal.
-    """
-    if client_id == MCP_CIMD_CLIENT_ID:
-        return config.MCP_OPERATOR_SUBJECT
+    """Every verified OAuth client gets a stable, separate audit actor."""
     digest = hashlib.sha256(client_id.encode("utf-8")).hexdigest()
     return f"{config.MCP_OPERATOR_SUBJECT}@{digest}"
 

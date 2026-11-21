@@ -89,3 +89,14 @@ time. An older runtime can ignore the additive columns; restoring the newer
 runtime recreates the current history projection. If rolling back to a
 runtime that predates `viewer.client_labels`, restore the previously signed
 service configuration together with the previously signed image.
+
+## SKY-344 signed client registry and mandatory one-time audit conversion
+
+The updated runtime requires a top-level signed `clients` object.
+Old `viewer.client_labels` and global conversation-header configurations
+are no longer supported. Before the image upgrade on any retained audit DB,
+run the reviewed `app.audit_migration` dry run, stop the original service,
+capture an independent SQLite backup, and apply the migration once manually.
+Restore the prior SQLite snapshot **with** the prior signed image/config on
+rollback; never mix the new actor format with the previous runtime. Verify
+ChatGPT, Antigravity, Claude and Grok on test before production release.

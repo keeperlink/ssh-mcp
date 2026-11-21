@@ -37,7 +37,7 @@ class FakeSSH:
         return result
 
     def list_servers(self, actor):
-        return ["demo-node-b"] if actor == "ssh-mcp-operator" else []
+        return ["demo-node-b"] if actor == oauth.client_audit_actor(CLIENT) else []
 
     def require_ready(self, server, *, privileged=False):
         pass
@@ -46,14 +46,14 @@ class FakeSSH:
         pass
 
     def authorized_host(self, actor, server):
-        if actor != "ssh-mcp-operator" or server != "demo-node-b":
+        if actor != oauth.client_audit_actor(CLIENT) or server != "demo-node-b":
             raise SSHDenied("invalid host or principal")
         return self
 
     async def execute(self, actor, request, *, on_output=None, on_admitted=None):
         if on_admitted is not None:
             on_admitted()
-        if actor != "ssh-mcp-operator" or request.server != "demo-node-b":
+        if actor != oauth.client_audit_actor(CLIENT) or request.server != "demo-node-b":
             raise SSHDenied("invalid host")
         if on_output:
             await on_output("stdout", b"ready\n")
@@ -69,6 +69,15 @@ class JobHTTPTests(unittest.TestCase):
         self.env_patch = patch.dict(os.environ, {
             "SSH_JOBS_ENABLED": "true", "SSH_JOBS_DB": str(db),
         })
+        registry = {"ChatGPT": {
+            "identities": [CLIENT],
+            "conversation_id": {"sources": [
+                {"type": "header", "name": "X-OpenAI-Session"},
+            ]},
+        }}
+        client_patch = patch.object(config, "MCP_CLIENTS", registry)
+        client_patch.start()
+        self.addCleanup(client_patch.stop)
         self.mode_patch = patch.object(config, "MCP_SSH_TOOLS_ENABLED", True)
         self.env_patch.start()
         self.mode_patch.start()
@@ -475,7 +484,7 @@ class JobHTTPTests(unittest.TestCase):
         async def fake_execute(_ssh, actor, request, *, on_output=None, on_admitted=None):
             if on_admitted is not None:
                 on_admitted()
-            self.assertEqual(actor, "ssh-mcp-operator")
+            self.assertEqual(actor, oauth.client_audit_actor(CLIENT))
             seen.append(request.argv[0])
             code = 2 if request.argv[0] == "fail" else 0
             if on_output is not None:
@@ -561,14 +570,14 @@ class JobHTTPTests(unittest.TestCase):
         }
 
         async def fake_upload(_self, actor, request, *, precreated_id=None):
-            self.assertEqual(actor, "ssh-mcp-operator")
+            self.assertEqual(actor, oauth.client_audit_actor(CLIENT))
             self.assertEqual(request.server, "demo-node-b")
             self.assertEqual(request.file.file_id, file_reference["file_id"])
             return {"status": "succeeded", "operation_id": "synthetic-upload-237",
                     "result": {"bytes": len(source), "sha256": checksum}}
 
         async def fake_download(_self, actor, request, *, precreated_id=None):
-            self.assertEqual(actor, "ssh-mcp-operator")
+            self.assertEqual(actor, oauth.client_audit_actor(CLIENT))
             self.assertEqual(request.max_bytes, 65536)
             return {"status": "succeeded", "operation_id": "synthetic-download-237",
                     "result": {"bytes": len(source), "offset": 0, "size": len(source),
@@ -636,7 +645,7 @@ class JobHTTPTests(unittest.TestCase):
         marker = "SYNTHETIC-SENSITIVE-CONTENT-NEVER-PERSIST-236"
 
         async def fake_file(_transport, actor, server, operation, payload):
-            self.assertEqual((actor, server), ("ssh-mcp-operator", "demo-node-b"))
+            self.assertEqual((actor, server), (oauth.client_audit_actor(CLIENT), "demo-node-b"))
             if operation == "read":
                 return {"ok": True, "path": payload["path"],
                         "content": marker, "bytes": len(marker), "eof": True,
@@ -755,7 +764,10 @@ class JobHTTPTests(unittest.TestCase):
         from app.contracts import ExecuteCommandRequest
         from app.file_audit import FileAudit
         from app.jobs import JobStore
+        from app.client_identity import client_id_context
 
+        token = client_id_context.set(CLIENT)
+        self.addCleanup(lambda: client_id_context.reset(token))
         store = JobStore(Path(os.environ["SSH_JOBS_DB"]), retention_months=12)
         archived = []
         for index in range(120):
@@ -764,14 +776,14 @@ class JobHTTPTests(unittest.TestCase):
                 argv=["echo", f"test-{index}"], reason=f"historical reason {index}",
                 story_id="TEST-243" if index < 5 else "TEST-191",
             )
-            job_id = store.create(config.MCP_OPERATOR_SUBJECT, req, mode="sync")
+            job_id = store.create(oauth.client_audit_actor(CLIENT), req, mode="sync")
             store.begin(job_id)
             store.append(job_id, "stdout", f"data-{index}".encode("utf-8"))
             store.finish(job_id, "failed" if index < 5 else "succeeded", elapsed=0.5)
             archived.append(job_id)
 
         file_audit = FileAudit(store)
-        file_key = file_audit.start(config.MCP_OPERATOR_SUBJECT, "ssh-mcp-retired",
+        file_key = file_audit.start(oauth.client_audit_actor(CLIENT), "ssh-mcp-retired",
                                     "inspect", "/private/archive.log", "TEST-243")
         file_audit.finish(file_key, "succeeded", byte_count=12)
 

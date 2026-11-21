@@ -840,21 +840,22 @@ def create_mcp_server(*, job_registry: dict | None = None,
 
     async def call_tool(_ctx, params: CallToolRequestParams):
         request = _ctx.request if _ctx is not None else None
+        access = get_access_token()
+        verified_client_id = (
+            access.client_id if access is not None
+            and access.subject == config.MCP_OPERATOR_SUBJECT
+            and config.MCP_SSH_SCOPE in access.scopes else None
+        )
         try:
             conversation_id = conversation_id_from_request(
                 request.headers if isinstance(request, Request) else None,
-                params.meta,
+                params.meta, client_id=verified_client_id,
             )
         except ValueError:
             return _error("Invalid or conflicting conversation identifier")
         context_token = conversation_id_context.set(conversation_id)
         approval_token = approval_status_context.set(None)
-        access = get_access_token()
-        client_token = client_id_context.set(
-            access.client_id if access is not None
-            and access.subject == config.MCP_OPERATOR_SUBJECT
-            and config.MCP_SSH_SCOPE in access.scopes else None
-        )
+        client_token = client_id_context.set(verified_client_id)
         try:
             return await dispatch_tool(_ctx, params)
         finally:

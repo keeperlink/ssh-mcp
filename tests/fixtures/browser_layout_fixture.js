@@ -99,7 +99,9 @@
     const filter = document.getElementById("filters").elements.namedItem("agent");
     assert(table.querySelectorAll("thead th")[1].textContent === "Agent",
       "Agent column must follow Time");
-    filter.value = "https://agent-b.example.org/client.json";
+    filter.value = "Agent B";
+    assert([...filter.options].filter(option => option.value === "Agent B").length === 1,
+      "Agent B must appear once in dropdown, not once per client identity");
     filter.dispatchEvent(new Event("change", { bubbles: true }));
     await waitFor(() => document.getElementById("page-summary").textContent.endsWith("of 2"),
       "Agent filter selected");

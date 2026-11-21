@@ -27,11 +27,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from starlette.concurrency import run_in_threadpool
 
 from . import config
-from .client_identity import UNKNOWN_AGENT, agent_label, resolve_client_id
+from .client_identity import UNKNOWN_AGENT, agent_label
 from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
 from .readiness import ReadinessMonitor
+from .ssh_executor import SSHExecutor
 
 if TYPE_CHECKING:
     from .jobs import JobManager
@@ -64,6 +65,12 @@ STATES = frozenset({
 
 TIME_RANGES = {"1h": 3600, "8h": 8 * 3600, "24h": 24 * 3600,
                "7d": 7 * 86400, "30d": 30 * 86400, "all": None}
+
+
+def _operator_actor(actor: object) -> bool:
+    """Only the operator subject or a verified client-hash actor."""
+    return (isinstance(actor, str)
+            and SSHExecutor._inventory_principal(actor) == config.MCP_OPERATOR_SUBJECT)
 
 
 def _headers() -> dict[str, str]:
@@ -125,8 +132,9 @@ class HistoryStore:
 
     @staticmethod
     def _client_id(client_id: str | None, actor: str) -> str | None:
-        return resolve_client_id(client_id, actor, config.MCP_CLIENT_LABELS,
-                                 config.MCP_OPERATOR_SUBJECT, config.MCP_CIMD_CLIENT_ID)
+        # The one-time audit migration normalizes all historical rows.
+        # Never infer an OAuth identity from a mutable audit actor.
+        return client_id
 
     @staticmethod
     def _agent_key(client_id: str | None, actor: str) -> str:
@@ -264,10 +272,15 @@ class HistoryStore:
             params.append(scoped_actor)
         agent = filters.get("agent", "")
         if agent:
-            if agent != UNKNOWN_AGENT and agent not in config.MCP_CLIENT_LABELS:
+            if agent in config.MCP_CLIENTS:
+                identities = config.MCP_CLIENTS[agent]["identities"]
+                where.append("client_id IN (" + ",".join("?" for _ in identities) + ")")
+                params.extend(identities)
+            elif agent == UNKNOWN_AGENT or agent in config.MCP_CLIENT_LABELS:
+                where.append("history_agent_key(client_id,actor)=?")
+                params.append(agent)
+            else:
                 raise ValueError("Invalid history agent filter")
-            where.append("history_agent_key(client_id,actor)=?")
-            params.append(agent)
         record_kind = filters.get("record_kind", "all")
         if record_kind not in {"all", "command", "file", "batch"}:
             raise ValueError("Invalid record kind")
@@ -563,7 +576,7 @@ class HistoryStore:
         } if row else None)
 
     def cancellation_target(
-        self, job_id: str, *, actor: str, approved_hosts: set[str],
+        self, job_id: str, *, actor: str | None, approved_hosts: set[str],
     ) -> dict[str, Any] | None:
         """Resolve browser command rows to actor-owned jobs or parent batches."""
         if not JOB_ID.fullmatch(job_id):
@@ -573,8 +586,11 @@ class HistoryStore:
                 "SELECT id,actor,server,status,cancel_requested FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
-            if job is None or job["actor"] != actor or job["server"] not in approved_hosts:
+            if (job is None or not _operator_actor(job["actor"])
+                    or (actor is not None and job["actor"] != actor)
+                    or job["server"] not in approved_hosts):
                 return None
+            actual_actor = str(job["actor"])
             target_type, target_id = "job", job_id
             active = job["status"] in {"queued", "running"} and not job["cancel_requested"]
             if db.execute(
@@ -586,7 +602,7 @@ class HistoryStore:
                        WHERE s.job_id=? LIMIT 1""", (job_id,),
                 ).fetchone()
                 if batch is not None:
-                    if batch["actor"] != actor or batch["server"] != job["server"]:
+                    if batch["actor"] != actual_actor or batch["server"] != job["server"]:
                         return None
                     target_type, target_id = "batch", batch["id"]
                     active = active and batch["status"] in {"queued", "running"}
@@ -596,7 +612,7 @@ class HistoryStore:
             ).fetchone():
                 active = False
         return {"target_type": target_type, "target_id": target_id,
-                "available": bool(active)}
+                "actor": actual_actor, "available": bool(active)}
 
     def output(self, job_id: str, *, cursor: int = 0, max_bytes: int = 16384) -> dict[str, Any] | None:
         if not JOB_ID.fullmatch(job_id):
@@ -835,8 +851,8 @@ def _history_page(csrf: str) -> str:
         '<option value="all">All time</option></select></label>'
         '<label class="filter-agent">Agent<select name="agent">'
         '<option value="">All agents</option>' + "".join(
-            f'<option value="{html.escape(client_id, quote=True)}">{html.escape(label)}</option>'
-            for client_id, label in sorted(config.MCP_CLIENT_LABELS.items(), key=lambda pair: pair[1].casefold())
+            f'<option value="{html.escape(label, quote=True)}">{html.escape(label)}</option>'
+            for label in sorted(config.MCP_CLIENTS, key=str.casefold)
         ) + '<option value="unknown">Unknown</option></select></label>'
         '<label class="filter-story">Story ID<input name="story_id" placeholder="All stories"'
         ' maxlength="80"></label>'
@@ -1010,18 +1026,20 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
     approved_set = set(hosts)
 
     def decorate_jobs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        candidates = [
-            str(item["id"]) for item in items
-            if job_manager is not None and item.get("record_kind") == "command"
-            and item.get("actor") == config.MCP_OPERATOR_SUBJECT
-            and item.get("server") in approved_set
-            and item.get("status") in {"queued", "running"}
-            and not item.get("cancellation_requested")
-        ]
-        eligible = store.eligible_cancellation_ids(
-            candidates, actor=config.MCP_OPERATOR_SUBJECT,
-            approved_hosts=approved_set, batches_enabled=batch_manager is not None,
-        ) if candidates else set()
+        candidates: dict[str, list[str]] = {}
+        for item in items:
+            actor = item.get("actor")
+            if (job_manager is not None and item.get("record_kind") == "command"
+                    and isinstance(actor, str) and _operator_actor(actor) and item.get("server") in approved_set
+                    and item.get("status") in {"queued", "running"}
+                    and not item.get("cancellation_requested")):
+                candidates.setdefault(actor, []).append(str(item["id"]))
+        eligible: set[str] = set()
+        for actor, ids in candidates.items():
+            eligible.update(store.eligible_cancellation_ids(
+                ids, actor=actor, approved_hosts=approved_set,
+                batches_enabled=batch_manager is not None,
+            ))
         for item in items:
             item["cancel_available"] = item["id"] in eligible
         return items
@@ -1300,7 +1318,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                 return _json({"error": "Cancellation unavailable"}, 404)
             try:
                 target = store.cancellation_target(
-                    job_id, actor=config.MCP_OPERATOR_SUBJECT, approved_hosts=approved_set,
+                    job_id, actor=None, approved_hosts=approved_set,
                 )
                 if target is None:
                     return _json({"error": "Job unavailable"}, 404)
@@ -1310,12 +1328,12 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                     if batch_manager is None:
                         return _json({"error": "Batch cancellation unavailable"}, 404)
                     result = batch_manager.cancel(
-                        config.MCP_OPERATOR_SUBJECT, target["target_id"],
+                        target["actor"], target["target_id"],
                         reason="Cancelled from History viewer", via="history",
                     )
                 else:
                     result = job_manager.cancel(
-                        config.MCP_OPERATOR_SUBJECT, target["target_id"],
+                        target["actor"], target["target_id"],
                         reason="Cancelled from History viewer", via="history",
                     )
             except (sqlite3.DatabaseError, OSError, ValueError):

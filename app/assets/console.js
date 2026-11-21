@@ -135,7 +135,8 @@
     const f = state.filters;
     if (f.privileged === "true" && (job.record_kind === "file" || job.privileged !== true))
       return false;
-    if (f.agent && (job.agent_key || "unknown") !== f.agent) return false;
+    if (f.agent && (job.agent || "Unknown") !== f.agent
+        && (job.agent_key || "unknown") !== f.agent) return false;
     if (f.host && job.server !== f.host) return false;
     if (f.story_id) {
       const jobStory = String(job.story_id || "");

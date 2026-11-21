@@ -89,17 +89,6 @@ class OAuthAndMCPTests(unittest.TestCase):
             ("MCP_AUTH_CODE_TTL", 999999),
             ("MCP_CIMD_CLIENT_ID", "http://untrusted.example/client.json"),
             ("MCP_ALLOWED_REDIRECT_URIS", set()),
-            ("MCP_CONVERSATION_HEADER_NAME", "Authorization"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Forwarded-For"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Real-IP"),
-            ("MCP_CONVERSATION_HEADER_NAME", "x-REAL-ip"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Client-IP"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Remote-IP"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Original-Forwarded-For"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-ıd"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Key"),
-            ("MCP_CONVERSATION_HEADER_NAME", "X-Bad Header"),
-            ("MCP_CONVERSATION_HEADER_NAME", ""),
         ):
             with self.subTest(name=name):
                 with patch.object(config, name, value):
@@ -128,10 +117,6 @@ class OAuthAndMCPTests(unittest.TestCase):
                 with patch.dict(os.environ, env_patch):
                     with self.assertRaisesRegex(RuntimeError, "must be distinct"):
                         config.validate_mcp_config()
-
-    def test_custom_conversation_header_config_is_valid(self):
-        with patch.object(config, "MCP_CONVERSATION_HEADER_NAME", "X-SSH-MCP-Conversation"):
-            config.validate_mcp_config()
 
     def test_pkce_rfc7636(self):
         self.assertEqual(oauth._pkce_s256(VERIFIER), CHALLENGE)

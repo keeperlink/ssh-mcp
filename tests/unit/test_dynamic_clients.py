@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -132,7 +133,9 @@ class DynamicOAuthTests(unittest.TestCase):
         self.assertEqual(HistoryStore._where({"actor": oauth.client_audit_actor(a)})[0][1],
                          "actor=?")
         self.assertEqual(oauth.client_audit_actor(config.MCP_CIMD_CLIENT_ID),
-                         config.MCP_OPERATOR_SUBJECT)
+                         config.MCP_OPERATOR_SUBJECT + "@" +
+                         hashlib.sha256(
+                             config.MCP_CIMD_CLIENT_ID.encode()).hexdigest())
 
     def test_denied_client_and_mismatched_redirect_no_tokens(self):
         client_id = next(iter(CLIENTS))

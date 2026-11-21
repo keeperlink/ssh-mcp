@@ -46,7 +46,7 @@ class FakeExecutor:
         return result
 
     def list_servers(self, principal):
-        return ["demo-node-b"] if principal == "ssh-mcp-operator" else []
+        return ["demo-node-b"] if principal == oauth.client_audit_actor(CLIENT) else []
 
     def require_ready(self, server, *, privileged=False):
         pass
@@ -55,7 +55,7 @@ class FakeExecutor:
         pass
 
     def authorized_host(self, principal, server):
-        if principal != "ssh-mcp-operator" or server != "demo-node-b":
+        if principal != oauth.client_audit_actor(CLIENT) or server != "demo-node-b":
             raise SSHDenied("unauthorized")
         return self
 
@@ -63,7 +63,7 @@ class FakeExecutor:
         if on_admitted is not None:
             on_admitted()
         self.calls.append((principal, request))
-        if principal != "ssh-mcp-operator" or request.server != "demo-node-b":
+        if principal != oauth.client_audit_actor(CLIENT) or request.server != "demo-node-b":
             raise SSHDenied("unauthorized")
         if request.argv[0] == "fail":
             return SSHResult(request.server, "command_error", 7, "", "failed", 0.02)
@@ -220,7 +220,7 @@ class DirectSSHMCPTests(unittest.TestCase):
             payload = json.loads(good["content"][0]["text"])
             self.assertEqual(payload["status"], "succeeded")
             self.assertEqual(payload["stdout"], "gateway\n")
-            self.assertEqual(fake.calls[0][0], "ssh-mcp-operator")
+            self.assertEqual(fake.calls[0][0], oauth.client_audit_actor(CLIENT))
             self.assertEqual(len(payload["request_id"]), 24)
             # A legacy host without privileged_access remains disabled by
             # signed policy even though the root executor now exists.

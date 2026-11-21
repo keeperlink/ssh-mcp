@@ -4,9 +4,10 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
 os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
@@ -14,9 +15,10 @@ os.environ.setdefault("MCP_TOKEN_SIGNING_SECRET", "synthetic-test-signing-" + "b
 os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 
 from app import config
+from app.approvals import PendingApproval
 from app.batch import BatchStore
-from app.client_identity import (agent_disambiguator, client_id_context,
-                                 parse_labels, labels_from_environment)
+from app.client_identity import agent_disambiguator, client_id_context
+from app.client_registry import parse_clients
 from app.contracts import ExecuteCommandRequest, ExecuteCommandsRequest
 from app.file_audit import FileAudit
 from app.history import HistoryStore, _history_page
@@ -26,6 +28,7 @@ from app.oauth import client_audit_actor
 A = "https://agent-a.example.org/client.json"
 B = "https://agent-b.example.org/client.json"
 C = "https://agent-c.example.org/client.json?private=synthetic"
+DCR = "dcr_" + "Q" * 43
 LABELS = {A: "Agent A", B: "Agent B"}
 
 
@@ -39,31 +42,44 @@ class ClientIdentityTests(unittest.TestCase):
         self.files = FileAudit(self.jobs)
         self.history = HistoryStore(self.jobs)
         labels = patch.object(config, "MCP_CLIENT_LABELS", LABELS)
-        default = patch.object(config, "MCP_CIMD_CLIENT_ID", A)
+        clients = patch.object(config, "MCP_CLIENTS", {
+            name: {"identities": [cid], "conversation_id": {"sources": []}}
+            for cid, name in LABELS.items()
+        })
         labels.start()
-        default.start()
+        clients.start()
         self.addCleanup(labels.stop)
-        self.addCleanup(default.stop)
+        self.addCleanup(clients.stop)
 
     def command(self, actor=None):
         return self.jobs.create(actor or config.MCP_OPERATOR_SUBJECT,
                                 ExecuteCommandRequest(server="demo-node-a", argv=["id"],
                                                       reason="synthetic", story_id="TEST-1"))
 
-    def test_configuration_is_bounded_and_validated(self):
-        self.assertEqual(parse_labels(LABELS), LABELS)
-        self.assertEqual(labels_from_environment("{}"), {})
-        for bad in (
-            [], {A: "Unknown"}, {A: "Agent", B: "agent"}, {A: "Agent\n"},
-            {A: "x" * 33}, {"http://agent.example.org/client.json": "Agent"},
-            {"https://user@agent.example.org/client.json": "Agent"},
-            {"https://agent.example.org:bad/client.json": "Agent"},
-            {A: 12}, {f"https://agent-{i}.example.org/client.json": str(i) for i in range(33)},
-        ):
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                parse_labels(bad)
-        with self.assertRaises(ValueError):
-            labels_from_environment("{")
+    def test_client_registry_is_bounded_and_validated(self):
+        client = {"identities": [A], "conversation_id": {"sources": []}}
+        self.assertEqual(parse_clients({"Agent A": client}), {"Agent A": client})
+        self.assertEqual(parse_clients({}), {})
+        invalid = (
+            [], {"Unknown": client}, {"Agent": client, "agent": client},
+            {"Agent": {**client, "identities": [B, B]}},
+            {"Agent": {**client, "identities": ["dcr_*"]}},
+            {"Agent": {**client, "identities": ["http://evil.example/id.json"]}},
+            {"Agent": {**client, "conversation_id": {"sources": [
+                {"type": "header", "name": "X-Forwarded-For"}]}}},
+            {"Agent": {**client, "conversation_id": {"sources": [
+                {"type": "metadata", "name": "x-meta", "field": "bad value"}]}}},
+            {"Agent": {**client, "conversation_id": {"sources": [
+                {"type": "header", "name": "X-A"}] * 2}}},
+            {"Agent": {**client, "conversation_id": {"sources": [
+                {"type": "header", "name": "X-A"}] * 9}}},
+            {"Agent": {**client, "offline_redirect_uris": ["http://127.0.0.1/x"]}},
+            {"Agent": {**client, "offline_redirect_uris": ["https://example.com/a,b"]}},
+            {"Agent": client, "Also": {**client, "identities": [A]}},
+        )
+        for item in invalid:
+            with self.subTest(item=item), self.assertRaises(ValueError):
+                parse_clients(item)
 
     def test_unlabelled_verified_client_has_stable_display_only_disambiguator(self):
         expected = hashlib.sha256(C.encode("utf-8")).hexdigest()[:12]
@@ -74,45 +90,93 @@ class ClientIdentityTests(unittest.TestCase):
         self.assertNotEqual(agent_disambiguator(C, LABELS),
                             agent_disambiguator("https://other.example.org/client.json", LABELS))
 
-    def test_legacy_inference_is_conservative_and_filter_uses_resolved_identity(self):
+    def test_legacy_attribution_is_not_inferred_at_runtime(self):
         actor_b = config.MCP_OPERATOR_SUBJECT + "@" + hashlib.sha256(B.encode()).hexdigest()
         legacy_b = self.command(actor_b)
-        legacy_ambiguous = self.command()
-        mismatch = self.command("someone-else@" + hashlib.sha256(B.encode()).hexdigest())
+        legacy_bare = self.command()
         token = client_id_context.set(A)
         try:
-            new_a = self.command()
+            job_a = self.command(client_audit_actor(A))
         finally:
             client_id_context.reset(token)
         token = client_id_context.set(B)
         try:
-            new_b = self.command(actor_b)
+            job_b = self.command(actor_b)
         finally:
             client_id_context.reset(token)
-        token = client_id_context.set(C)
-        try:
-            unknown = self.command()
-        finally:
-            client_id_context.reset(token)
-        self.assertEqual({x["id"] for x in self.history.list({"agent": A})["jobs"]}, {new_a})
-        self.assertEqual({x["id"] for x in self.history.list({"agent": B})["jobs"]}, {new_b, legacy_b})
+        self.assertEqual({x["id"] for x in self.history.list({"agent": B})["jobs"]}, {job_b})
+        self.assertEqual({x["id"] for x in self.history.list({"agent": A})["jobs"]}, {job_a})
         self.assertEqual({x["id"] for x in self.history.list({"agent": "unknown"})["jobs"]},
-                         {unknown, legacy_ambiguous, mismatch})
-        self.assertEqual(self.history.detail(legacy_b)["client_id"], B)
-        self.assertIsNone(self.history.detail(legacy_ambiguous)["client_id"])
-        self.assertEqual(self.history.detail(unknown)["client_id"], C.split("?")[0])
-        self.assertEqual(self.history.detail(unknown)["agent"], "Unknown")
-        self.assertEqual(self.history.list({"actor": actor_b, "agent": A})["filtered_total"], 0)
+                         {legacy_b, legacy_bare})
+        self.assertIsNone(self.history.detail(legacy_b)["client_id"])
+        self.assertIsNone(self.history.detail(legacy_bare)["client_id"])
+        self.assertEqual(client_audit_actor(A),
+                         config.MCP_OPERATOR_SUBJECT + "@" + hashlib.sha256(A.encode()).hexdigest())
         with self.assertRaises(ValueError):
             self.history.list({"agent": "unconfigured"})
-        with patch.object(config, "MCP_CLIENT_LABELS", {A: "Renamed", B: "Agent B"}):
-            self.assertEqual(self.history.detail(new_a)["agent"], "Renamed")
-        with self.jobs._connect() as db:
-            self.assertIsNone(db.execute("SELECT client_id FROM jobs WHERE id=?", (legacy_b,)).fetchone()[0])
-            self.assertEqual(db.execute("SELECT client_id FROM jobs WHERE id=?", (unknown,)).fetchone()[0], C)
         page = _history_page("synthetic")
-        self.assertIn('value="' + A + '">Agent A</option>', page)
-        self.assertIn('value="unknown">Unknown</option>', page)
+        self.assertIn('value="Agent A">Agent A</option>', page)
+
+    def test_multi_identity_agent_filter_groups_display_only(self):
+        extra_id = "https://agent-a2.example.org/client.json"
+        from app.client_registry import labels
+        clients = {
+            "Agent A": {"identities": [A, extra_id],
+                        "conversation_id": {"sources": []}},
+            "Agent B": {"identities": [B], "conversation_id": {"sources": []}},
+        }
+        with patch.object(config, "MCP_CLIENTS", clients), patch.object(
+                config, "MCP_CLIENT_LABELS", labels(clients)):
+            created = {}
+            for name, cid in (("first", A), ("second", extra_id), ("third", B)):
+                token = client_id_context.set(cid)
+                try:
+                    created[name] = self.command(client_audit_actor(cid))
+                finally:
+                    client_id_context.reset(token)
+            ids = {x["id"] for x in self.history.list({"agent": "Agent A"})["jobs"]}
+            self.assertEqual(ids, {created["first"], created["second"]})
+            self.assertEqual({x["id"] for x in self.history.list({"agent": A})["jobs"]},
+                             {created["first"]})
+            self.assertEqual({x["id"] for x in self.history.list({"agent": "Agent B"})["jobs"]},
+                             {created["third"]})
+            page = _history_page("synthetic")
+            self.assertEqual(page.count('value="Agent A">Agent A</option>'), 1)
+            self.assertNotIn('value="' + extra_id + '">Agent A</option>', page)
+            self.assertNotEqual(client_audit_actor(A), client_audit_actor(extra_id))
+
+    def test_exact_dcr_identity_labels_history_and_agent_filter(self):
+        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
+            actor = client_audit_actor(DCR)
+            context = client_id_context.set(DCR)
+            try:
+                job = self.command(actor)
+            finally:
+                client_id_context.reset(context)
+            items = self.history.list({"agent": DCR})["jobs"]
+            self.assertEqual({item["id"] for item in items}, {job})
+            self.assertEqual(items[0]["agent"], "Grok")
+            self.assertEqual(self.history.detail(job)["agent"], "Grok")
+            self.assertEqual(agent_disambiguator(DCR, config.MCP_CLIENT_LABELS), None)
+            self.assertEqual(self.history.list({"agent": A})["filtered_total"], 0)
+        self.assertEqual(self.history.detail(job)["agent"], "Unknown")
+
+    def test_exact_dcr_approval_display_is_agent_scoped_and_display_only(self):
+        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
+            pending = PendingApproval(
+                id="synthetic-approval", key=("agent:operator", DCR, "demo-node-a"),
+                tool="execute_command", reason="synthetic", summary="hostname",
+                expires_at=time.time() + 40, deadline=time.monotonic() + 40,
+                future=MagicMock(), waiter=None, client_id=DCR,
+            )
+            display = pending.public()
+            self.assertEqual(display["agent"], "Grok")
+            self.assertEqual(display["client_id"], DCR)
+            self.assertEqual(display["grant_scope"], "agent")
+            self.assertIsNone(display["conversation_id"])
+            self.assertIsNone(display["client_disambiguator"])
+        display = pending.public()
+        self.assertEqual(display["agent"], "Unknown")
 
     def test_all_durable_kinds_retain_identity_at_admission_and_after_reopen(self):
         actor = client_audit_actor(B)

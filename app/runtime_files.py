@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .control import LEVELS
-from .client_identity import parse_labels
+from .client_registry import parse_clients, offline_client
 from .readiness import ReadinessSettings
 
 CONFIG = Path("/etc/ssh-mcp/service.json")
@@ -31,9 +31,9 @@ ALIAS = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 SECTIONS = {
     "http": {"allowed_origins", "request_timeout_seconds"},
     "oauth": {"issuer", "operator_subject", "access_token_ttl_seconds", "session_ttl_seconds",
-              "authorization_code_ttl_seconds", "client_metadata_url",
+              "authorization_code_ttl_seconds",
               "validate_client_metadata", "client_metadata_cache_seconds",
-              "allowed_redirect_uris", "login_max_failures", "login_window_seconds"},
+              "login_max_failures", "login_window_seconds"},
     "ssh": {"enabled", "default_timeout_seconds", "max_timeout_seconds",
             "max_output_bytes", "max_argument_bytes", "max_arguments",
             "max_concurrent", "max_hosts"},
@@ -43,7 +43,7 @@ SECTIONS = {
     "viewer": {"enabled", "idle_timeout_seconds", "absolute_timeout_seconds"},
 }
 OAUTH_OPTIONAL = {"dcr_enabled"}
-VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from", "client_labels"}
+VIEWER_OPTIONAL = {"story_id_max_chars", "story_id_truncate_from"}
 HARD = {"max_timeout_seconds": 36000, "max_output_bytes": 1048576,
         "max_argument_bytes": 65536, "max_arguments": 64,
         "max_concurrent": 32, "max_hosts": 200, "max_active": 256}
@@ -118,7 +118,7 @@ def _positive(value: Any, maximum: int) -> bool:
 
 
 def _valid_settings(settings: dict[str, Any]) -> None:
-    required = {"version", "environment", *SECTIONS}
+    required = {"version", "environment", "clients", *SECTIONS}
     if (not required <= set(settings) <= required | {"logging", "readiness"}
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
@@ -129,7 +129,18 @@ def _valid_settings(settings: dict[str, Any]) -> None:
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
     ReadinessSettings.from_mapping(settings.get("readiness", {}))
-    parse_labels(settings["viewer"].get("client_labels", {}))
+    clients = parse_clients(settings["clients"])
+    for definition in clients.values():
+        for identity in definition["identities"]:
+            # Retain DNS-only, no-IP, no-single-label and no-backslash
+            # managed HTTPS policy from the previous signed settings.
+            if identity.startswith("https://") and not _https_url(identity):
+                raise ValueError("Invalid signed OAuth client identity URL")
+        for redirect in definition.get("offline_redirect_uris", []):
+            if not _https_url(redirect) or "," in redirect:
+                raise ValueError("Invalid signed OAuth offline redirect URL")
+    if offline_client(clients) is None:
+        raise ValueError("Managed service requires an explicit offline fallback client")
     logging_settings = settings.get("logging", {"level": "INFO"})
     if (type(logging_settings) is not dict or set(logging_settings) != {"level"}
             or logging_settings["level"] not in LEVELS):
@@ -143,7 +154,6 @@ def _valid_settings(settings: dict[str, Any]) -> None:
     if not _https_url(issuer, origin_only=True):
         raise ValueError("Invalid HTTPS OAuth issuer")
     if (oauth["operator_subject"] != "ssh-mcp-operator" or
-            not _https_url(oauth["client_metadata_url"]) or
             not _positive(oauth["authorization_code_ttl_seconds"], 600) or
             type(oauth["access_token_ttl_seconds"]) is not int or
             oauth["access_token_ttl_seconds"] != 900 or
@@ -157,8 +167,7 @@ def _valid_settings(settings: dict[str, Any]) -> None:
     if type(oauth.get("dcr_enabled", True)) is not bool:
         raise ValueError("Invalid OAuth DCR toggle")
     if (type(oauth["validate_client_metadata"]) is not bool or
-            oauth["validate_client_metadata"] is not True or
-            not _https_allowlist(oauth["allowed_redirect_uris"], origin_only=False)):
+            oauth["validate_client_metadata"] is not True):
         raise ValueError("Invalid OAuth redirect allowlist")
     if (not _https_allowlist(http["allowed_origins"], origin_only=True) or
             type(http["request_timeout_seconds"]) not in (int, float) or
@@ -270,6 +279,9 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
     _write_private(key_path, identity)
     _write_private(target / "inventory.json", json.dumps(inventory, sort_keys=True) + "\n")
     http, oauth, ssh, jobs = (cfg[part] for part in ("http", "oauth", "ssh", "jobs"))
+    offline = offline_client(parse_clients(cfg["clients"]))
+    if offline is None:
+        raise ValueError("No configured offline OAuth client")
     issuer = oauth["issuer"]
     return {
         **ReadinessSettings.from_mapping(cfg.get("readiness", {})).environment(),
@@ -287,11 +299,12 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "MCP_ACCESS_TOKEN_TTL": str(oauth["access_token_ttl_seconds"]),
         "MCP_SESSION_TTL_DEFAULT": str(oauth["session_ttl_seconds"]),
         "MCP_AUTH_CODE_TTL": str(oauth["authorization_code_ttl_seconds"]),
-        "MCP_CIMD_CLIENT_ID": oauth["client_metadata_url"],
+        "MCP_CIMD_CLIENT_ID": offline[0],
+        "MCP_CLIENTS": json.dumps(cfg["clients"], sort_keys=True),
         "MCP_CIMD_VALIDATE_REMOTE": "true" if oauth["validate_client_metadata"] else "false",
         "MCP_CIMD_CACHE_TTL": str(oauth["client_metadata_cache_seconds"]),
         "MCP_DCR_ENABLED": "true" if oauth.get("dcr_enabled", True) else "false",
-        "MCP_ALLOWED_REDIRECT_URIS": ",".join(oauth["allowed_redirect_uris"]),
+        "MCP_ALLOWED_REDIRECT_URIS": ",".join(offline[1]),
         "MCP_LOGIN_MAX_FAILURES": str(oauth["login_max_failures"]),
         "MCP_LOGIN_WINDOW_SECONDS": str(oauth["login_window_seconds"]),
         "MCP_SSH_TOOLS_ENABLED": "true", "SSH_EXECUTOR_ENABLED": "true",
@@ -310,7 +323,6 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "HISTORY_VIEWER_ENABLED": "true",
         "HISTORY_IDLE_TIMEOUT_SECONDS": str(cfg["viewer"]["idle_timeout_seconds"]),
         "HISTORY_ABSOLUTE_TIMEOUT_SECONDS": str(cfg["viewer"]["absolute_timeout_seconds"]),
-        "MCP_CLIENT_LABELS": json.dumps(cfg["viewer"].get("client_labels", {}), sort_keys=True),
         "HISTORY_STORY_ID_MAX_CHARS": str(cfg["viewer"].get("story_id_max_chars", 16)),
         "HISTORY_STORY_ID_TRUNCATE_FROM": cfg["viewer"].get("story_id_truncate_from", "end"),
         "MCP_METRICS_ENABLED": "true", "MCP_METRICS_TOKEN": secrets["metrics_token"],
