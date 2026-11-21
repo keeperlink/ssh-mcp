@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -1105,6 +1106,43 @@ class InMemoryApprovalTests(unittest.IsolatedAsyncioTestCase):
         host_grant = next(g for g in self.manager.snapshot()["active_grants"])
         self.assertTrue(self.manager.revoke(host_grant["id"]))
         self.assertEqual(self.manager.snapshot()["active_grants"], [])
+
+    async def test_two_unlabelled_agent_grants_have_distinct_stable_revoke_identities(self):
+        clients = ("https://one.example.invalid/client.json",
+                   "https://two.example.invalid/client.json")
+        with patch.object(config, "MCP_CLIENT_LABELS", {}):
+            for index, client_id in enumerate(clients):
+                key = (f"agent:operator-{index}", client_id, "demo-node2")
+                task = asyncio.create_task(self.manager.require(
+                    key, client_id=client_id, tool="execute_command",
+                    reason="Synthetic agent grant", summary="id",
+                    host_required=True, root_required=True,
+                ))
+                await asyncio.sleep(0)
+                pending = next(iter(self.manager.pending.values()))
+                fingerprint = hashlib.sha256(client_id.encode()).hexdigest()[:12]
+                self.assertEqual(pending.public()["client_disambiguator"], fingerprint)
+                self.assertTrue(self.manager.decide(pending.id, grant=True, duration="5m"))
+                await task
+            active = self.manager.snapshot()["active_grants"]
+            self.assertEqual(len(active), 4)
+            self.assertEqual({g["agent"] for g in active}, {"Unknown"})
+            fingerprints = {hashlib.sha256(x.encode()).hexdigest()[:12] for x in clients}
+            self.assertEqual({g["client_disambiguator"] for g in active}, fingerprints)
+            self.assertEqual(len({g["scope_id"] for g in active}), 2)
+            self.assertEqual(len({g["id"] for g in active}), 4)
+            for fingerprint in fingerprints:
+                pair = [g for g in active if g["client_disambiguator"] == fingerprint]
+                self.assertEqual({g["kind"] for g in pair}, {"host", "root"})
+                self.assertEqual(len({g["scope_id"] for g in pair}), 1)
+            self.assertNotIn(clients[0], str(active))
+            self.assertNotIn(clients[1], str(active))
+            target = next(g for g in active if g["kind"] == "host")
+            self.assertTrue(self.manager.revoke(target["id"]))
+            remaining = self.manager.snapshot()["active_grants"]
+            self.assertEqual(len(remaining), 2)
+            self.assertEqual({g["client_disambiguator"] for g in remaining},
+                             fingerprints - {target["client_disambiguator"]})
 
     async def test_pr1_gate_preserves_signed_host_and_missing_identity_denial(self):
         class Executor:

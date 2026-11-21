@@ -15,7 +15,8 @@ os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 
 from app import config
 from app.batch import BatchStore
-from app.client_identity import client_id_context, parse_labels, labels_from_environment
+from app.client_identity import (agent_disambiguator, client_id_context,
+                                 parse_labels, labels_from_environment)
 from app.contracts import ExecuteCommandRequest, ExecuteCommandsRequest
 from app.file_audit import FileAudit
 from app.history import HistoryStore, _history_page
@@ -63,6 +64,15 @@ class ClientIdentityTests(unittest.TestCase):
                 parse_labels(bad)
         with self.assertRaises(ValueError):
             labels_from_environment("{")
+
+    def test_unlabelled_verified_client_has_stable_display_only_disambiguator(self):
+        expected = hashlib.sha256(C.encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(agent_disambiguator(C, LABELS), expected)
+        self.assertEqual(agent_disambiguator(C, LABELS), expected)
+        self.assertIsNone(agent_disambiguator(A, LABELS))
+        self.assertIsNone(agent_disambiguator(None, LABELS))
+        self.assertNotEqual(agent_disambiguator(C, LABELS),
+                            agent_disambiguator("https://other.example.org/client.json", LABELS))
 
     def test_legacy_inference_is_conservative_and_filter_uses_resolved_identity(self):
         actor_b = config.MCP_OPERATOR_SUBJECT + "@" + hashlib.sha256(B.encode()).hexdigest()

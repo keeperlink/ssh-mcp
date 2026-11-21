@@ -83,6 +83,10 @@ and explains the wider scope. Other agents never inherit that grant. When a
 conversation ID is present, grants remain bound to the **specific OAuth
 session + conversation**; the Console shows a local numeric label such as
 `demo-node-b[ChatGPT-1]`. These labels are for display, not authorization.
+Verified clients without a configured label display as
+`demo-node-b[Unknown-<fingerprint>]`, using a short, stable display-only hash
+of the OAuth client ID to distinguish their individual grant/revoke controls;
+the original client ID is not shown in the chip.
 
 Host and root grants remain independently approved, expiring and revocable.
 Agent-wide root grants are as broad as agent-wide host grants, so review

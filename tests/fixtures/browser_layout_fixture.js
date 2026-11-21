@@ -1011,6 +1011,35 @@
         && document.getElementById("approval-client").textContent === "Claude"
         && document.getElementById("approval-client").title === "https://example.invalid/client.json",
       "Agent-wide approval must identify verified client");
+      const hostConsent = document.getElementById("approval-explainer").textContent;
+      assert(hostConsent.includes("SSH host access")
+        && hostConsent.includes("across conversations and OAuth logins")
+        && hostConsent.includes("expiry or revocation")
+        && !hostConsent.includes("root execution"),
+      "Host-only agent-wide timed approval must explain future cross-login SSH access");
+      send(19, [{ ...requests[0], id: "synthetic-agent-root-preview",
+        conversation_id: null, conversation_scope_id: null, grant_scope: "agent",
+        requires_host: true, requires_root: true, timed_grants_allowed: true,
+        expires_at: Date.now() / 1000 + 28 }]);
+      const rootConsent = document.getElementById("approval-explainer").textContent;
+      assert(rootConsent.includes("SSH host access and root execution")
+        && rootConsent.includes("across conversations and OAuth logins")
+        && rootConsent.includes("expiry or revocation"),
+      "Combined agent-wide timed approval must explain cross-login host and root access");
+      send(19, [{ ...requests[0], id: "synthetic-agent-root-only-preview",
+        conversation_id: null, conversation_scope_id: null, grant_scope: "agent",
+        requires_host: false, requires_root: true, timed_grants_allowed: true,
+        expires_at: Date.now() / 1000 + 28 }]);
+      const rootOnlyConsent = document.getElementById("approval-explainer").textContent;
+      assert(rootOnlyConsent.includes("future root execution")
+        && rootOnlyConsent.includes("across conversations and OAuth logins")
+        && !rootOnlyConsent.includes("future SSH host access"),
+      "Root-only timed approval must describe only the permission being extended");
+      send(19, [{ ...requests[0], id: "synthetic-headerless",
+        conversation_id: null, scope_id: "agent-scope-claude", conversation_scope_id: null,
+        grant_scope: "agent", timed_grants_allowed: true,
+        client_id: "https://example.invalid/client.json", agent: "Claude",
+        expires_at: Date.now() / 1000 + 28 }]);
       duration("1h").click();
       grant.click();
       await waitFor(() => layer.hidden && posts.length === 9, "Agent approval completes");
@@ -1022,6 +1051,40 @@
         expires_at: Date.now() / 1000 + 3600 }]);
       assert(chips.querySelector(".grant-name").textContent === "demo-node-d[Claude]",
         "Agent-wide timed grant must show the agent name without session number");
+      const unknownGrants = [
+        { id: "unknown-a-host", kind: "host", host: "demo-node-a", agent: "Unknown",
+          grant_scope: "agent", client_disambiguator: "a1b2c3d4e5f6",
+          scope_id: "unknown-a", conversation_scope_id: null,
+          expires_at: Date.now() / 1000 + 3600 },
+        { id: "unknown-a-root", kind: "root", host: "demo-node-a", agent: "Unknown",
+          grant_scope: "agent", client_disambiguator: "a1b2c3d4e5f6",
+          scope_id: "unknown-a", conversation_scope_id: null,
+          expires_at: Date.now() / 1000 + 3600 },
+        { id: "unknown-b-host", kind: "host", host: "demo-node-a", agent: "Unknown",
+          grant_scope: "agent", client_disambiguator: "0a9b8c7d6e5f",
+          scope_id: "unknown-b", conversation_scope_id: null,
+          expires_at: Date.now() / 1000 + 3600 },
+        { id: "unknown-b-root", kind: "root", host: "demo-node-a", agent: "Unknown",
+          grant_scope: "agent", client_disambiguator: "0a9b8c7d6e5f",
+          scope_id: "unknown-b", conversation_scope_id: null,
+          expires_at: Date.now() / 1000 + 3600 },
+      ];
+      send(20, [], unknownGrants);
+      const unknownNames = [...chips.querySelectorAll(".grant-name")]
+        .map((node) => node.textContent);
+      assert(unknownNames.length === 2
+        && unknownNames.includes("demo-node-a[Unknown-a1b2c3d4e5f6]")
+        && unknownNames.includes("demo-node-a[Unknown-0a9b8c7d6e5f]")
+        && chips.querySelectorAll(".grant-root-detail").length === 2,
+      "Two unlabelled clients on one host need distinct, correctly paired bubbles");
+      const unknownRevokeLabels = [...chips.querySelectorAll("button")]
+        .map((node) => node.getAttribute("aria-label"));
+      assert(unknownRevokeLabels.length === 4
+        && new Set(unknownRevokeLabels).size === 4
+        && unknownRevokeLabels.every((label) => label.includes("Unknown-"))
+        && [...chips.querySelectorAll("button")].every((node) =>
+          node.title.includes("Unknown-") && node.title.includes("demo-node-a")),
+      "All host/root revoke controls and tooltips must disambiguate unknown clients");
       send(21, [{ ...requests[0], id: "synthetic-conversation-again",
         timed_grants_allowed: true, expires_at: Date.now() / 1000 + 28 }]);
       await waitFor(() => !layer.hidden, "Conversation approval appears after headerless");

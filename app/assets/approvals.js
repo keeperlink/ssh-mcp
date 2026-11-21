@@ -197,7 +197,8 @@
       const number = conversationNumber(request.conversation_scope_id);
       $("approval-conversation").textContent = number ? "Conversation #" + number
         : request.grant_scope === "agent" ? "Agent-wide" : "Not provided";
-      $("approval-client").textContent = request.agent || "Unknown";
+      $("approval-client").textContent = (request.agent || "Unknown")
+        + (request.client_disambiguator ? "-" + request.client_disambiguator : "");
       $("approval-client").title = (request.client_id || "").split("?", 1)[0];
       const timedAllowed = request.timed_grants_allowed !== false &&
         (Boolean(request.conversation_id) || request.grant_scope === "agent");
@@ -208,14 +209,21 @@
       layer.classList.toggle("is-root", root);
       $("approval-title").textContent = root
         ? "Run as root — operator approval" : "Restricted host access";
-      $("approval-explainer").textContent = root
+      const permission = root
+        ? (request.requires_host ? "SSH host access and root execution" : "root execution")
+        : "SSH host access";
+      const explanation = root
         ? (request.requires_host
           ? "Approve SSH host access and root execution for this exact request."
           : "Approve execution as root for this exact request.")
-          + (timedAllowed ? (request.grant_scope === "agent"
-            ? " A timed grant also authorizes this agent's requests to this host across conversations and logins."
-            : " A timed grant also authorizes subsequent root requests in this conversation and host.") : "")
         : "An agent is waiting for your approval. Access will not be granted automatically.";
+      const timedExplanation = timedAllowed && request.grant_scope === "agent"
+        ? " A timed grant also authorizes future " + permission
+          + " requests on this host from this agent across conversations and OAuth logins until expiry or revocation."
+        : timedAllowed && root
+          ? " A timed grant also authorizes subsequent root requests in this conversation and host."
+          : "";
+      $("approval-explainer").textContent = explanation + timedExplanation;
       renderPreview(request);
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
       $("approval-feedback").hidden = true;
@@ -226,14 +234,16 @@
   }
   function grantName(grant) {
     const number = conversationNumber(grant.conversation_scope_id);
-    const agent = grant.agent || "Unknown";
+    const agent = (grant.agent || "Unknown")
+      + (grant.client_disambiguator ? "-" + grant.client_disambiguator : "");
     return grant.host + "[" + agent + (number ? "-" + number : "") + "]";
   }
   function revokeButton(grant, name) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = "×";
-    button.title = grant.kind === "root" ? "Revoke root grant" : "Revoke host grant";
+    button.title = (grant.kind === "root" ? "Revoke root grant" : "Revoke host grant")
+      + " for " + name;
     button.setAttribute("aria-label", "Revoke "
       + (grant.kind === "root" ? "root" : "host access") + " for " + name);
     button.addEventListener("click", () => submit(
