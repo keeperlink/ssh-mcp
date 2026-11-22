@@ -31,10 +31,12 @@ the separately reviewed unlock/readiness implementation lands.
 
 ## Console bounds and database recovery
 
-- The Console password must be **16–256 Unicode code points** in valid
-  UTF-8 without NUL. This limit is enforced at conversion, verifier
-  creation, rekey and verification and fits the HTTPS sign-in form's
-  `maxlength=256` and 8192-byte request cap, even with multibyte input.
+- The Console password must contain at least **16 Unicode scalar values**
+  and at most **256 UTF-16 code units** (the browser's `maxlength` rule).
+  NUL and CR/LF are rejected because password inputs strip line breaks.
+  Only valid UTF-8 strings are accepted. These checks apply at conversion,
+  verifier creation, rekey and verification, and fit the HTTPS form's
+  `maxlength=256` and 8192-byte request cap, even for supplementary Unicode.
   The independent OAuth password and metrics token retain their existing
   8192-character legacy bounds.
 - Stage 2 **cannot activate v2**. Before a future approved cutover, create
@@ -55,10 +57,12 @@ the separately reviewed unlock/readiness implementation lands.
 - Rollback to a v1 image requires that *verified pre-cutover* snapshot
   and compatible legacy credentials. Use guarded `ops.history_db restore`
   only with the service stopped, with WAL/SHM reconciled; restore
-  revokes persisted OAuth sessions. After any host sudo password rotation,
-  roll back only to a **sealed-compatible** image and secret revision
-  matching the new host credentials. Never reintroduce plaintext
-  values as a silent fallback.
+  revokes persisted OAuth sessions **and all restored Console sessions**,
+  so an older cookie never becomes valid again. The v1 snapshot is strictly
+  for **pre-cutover recovery**. Once a sealed-only cutover succeeds, rollback
+  requires a **sealed-compatible** image and an appropriate protected secret
+  revision, even *before* host sudo passwords are rotated. Never reintroduce
+  plaintext values as a silent fallback.
 
 ## Threat boundary
 

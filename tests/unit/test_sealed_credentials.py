@@ -55,6 +55,15 @@ class VerifierTests(unittest.TestCase):
         verifier = create_verifier("é" * 256, "console-login")
         self.assertTrue(verify_password("é" * 256, verifier, "console-login"))
         self.assertFalse(verify_password("é" * 257, verifier, "console-login"))
+        emoji = create_verifier("🔒" * 128, "console-login")
+        self.assertTrue(verify_password("🔒" * 128, emoji, "console-login"))
+        self.assertFalse(verify_password("🔒" * 129, emoji, "console-login"))
+        for rejected in ("password-with-newline\n" + "a" * 25,
+                         "password-with-return\r" + "a" * 25):
+            with self.subTest(rejected=rejected), self.assertRaises(InvalidCredential):
+                create_verifier(rejected, "console-login")
+        with self.assertRaises(InvalidCredential):
+            create_verifier("🔒" * 129, "console-login")
 
     def test_metrics_token_verification(self):
         original = "synthetic-high-entropy-bearer-" + "a" * 40

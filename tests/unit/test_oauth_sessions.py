@@ -463,6 +463,52 @@ class RefreshEndpointTests(unittest.TestCase):
         self.assertEqual(sum(len(x) for x in oauth._LOGIN_FAILURES.values()), count)
         self.assertFalse(oauth._LOGIN_INFLIGHT)
 
+    def test_v2_cancelled_consent_counts_against_retry_limit(self):
+        import re
+        response = self.client.get("/oauth/authorize", params={
+            "client_id": CLIENT, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256", "resource": config.MCP_RESOURCE,
+            "scope": "mcp.access",
+        })
+        request_token = re.search(r'name="request_token" value="([^"]+)"',
+                                  response.text).group(1)
+        oauth._LOGIN_FAILURES.clear()
+        oauth._LOGIN_INFLIGHT.clear()
+        self.addCleanup(oauth._LOGIN_FAILURES.clear)
+        self.addCleanup(oauth._LOGIN_INFLIGHT.clear)
+
+        async def exercise() -> None:
+            entered = asyncio.Event()
+
+            async def waiting_auth(*_args):
+                entered.set()
+                await asyncio.Future()
+
+            with patch.object(oauth, "run_auth", side_effect=waiting_auth):
+                async with AsyncClient(transport=ASGITransport(app=self.app),
+                                       base_url="http://testserver",
+                                       follow_redirects=False) as client:
+                    data = {"request_token": request_token,
+                            "mcp_login_key": "synthetic-invalid-key"}
+                    for _ in range(oauth.MCP_LOGIN_MAX_FAILURES):
+                        entered.clear()
+                        running = asyncio.create_task(client.post("/oauth/authorize", data=data))
+                        await asyncio.wait_for(entered.wait(), timeout=2)
+                        running.cancel()
+                        result = await asyncio.gather(running, return_exceptions=True)
+                        self.assertIsInstance(result[0], asyncio.CancelledError)
+                    rejected = await client.post("/oauth/authorize", data=data)
+                    self.assertEqual(rejected.status_code, 429)
+            self.assertEqual(sum(len(x) for x in oauth._LOGIN_FAILURES.values()),
+                             oauth.MCP_LOGIN_MAX_FAILURES)
+            self.assertFalse(oauth._LOGIN_INFLIGHT)
+
+        with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+              patch.object(config, "MCP_LOGIN_VERIFIER",
+                           create_verifier(config.MCP_LOGIN_KEY, "oauth-login"))):
+            asyncio.run(exercise())
+
     def test_no_database_configuration_or_unsupported_grant(self):
         with patch.dict(os.environ, {"MCP_OAUTH_DB": "", "SSH_JOBS_DB": ""}):
             with self.assertRaises(RuntimeError):

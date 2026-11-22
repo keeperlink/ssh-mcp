@@ -737,7 +737,13 @@ async def oauth_authorize_post(request: Request) -> Response:
         else:
             accepted = bool(MCP_LOGIN_KEY) and secrets.compare_digest(supplied_key, MCP_LOGIN_KEY)
     finally:
-        await _finish_login_attempt(client_ip, success=accepted)
+        # Once admitted, even a cancelled HTTP request consumes retry
+        # capacity. The worker may still be checking its credential after
+        # disconnect; clearing the reservation without charging a failure
+        # would permit unlimited overlapping cancellations.
+        await asyncio.shield(_finish_login_attempt(
+            client_ip, success=accepted if accepted is not None else False,
+        ))
     if not accepted:
         return _authorization_error_redirect(
             redirect_uri,

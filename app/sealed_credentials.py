@@ -74,10 +74,13 @@ def _password_bytes(password: str) -> bytes:
 
 
 def validate_console_password(password: str) -> None:
-    """Exactly match what HTTPS Console sign-in can send, not v1 OAuth limits."""
+    """Match password-input maxlength in UTF-16 units and browser newline rules."""
     if (type(password) is not str
-            or not 16 <= len(password) <= MAX_CONSOLE_PASSWORD_CHARS):
-        raise InvalidCredential("Console password must contain 16–256 characters")
+            or len(password) < 16
+            or any(char in password for char in ("\x00", "\r", "\n"))
+            or sum(2 if ord(char) > 0xFFFF else 1 for char in password)
+            > MAX_CONSOLE_PASSWORD_CHARS):
+        raise InvalidCredential("Console password exceeds browser-compatible limits")
     _password_bytes(password)
 
 

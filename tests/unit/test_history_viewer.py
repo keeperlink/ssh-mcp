@@ -1268,7 +1268,8 @@ class BrowserTests(unittest.TestCase):
         self.assertIsNone(auth.login("same-ip", self.secret))
 
     def test_v2_maximum_console_password_signs_in_via_real_form(self):
-        maximum = "é" * 256
+        # Browsers count UTF-16 units for maxlength, not Python code points.
+        maximum = "🔒" * 128
         with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
               patch.object(config, "HISTORY_VIEWER_VERIFIER",
                            create_verifier(maximum, "console-login")),
@@ -1291,9 +1292,9 @@ class BrowserTests(unittest.TestCase):
         legacy = ViewerAuth(HistoryStore(self.store), self.secret)
         token = legacy.login("pre-cutover", self.secret)
         backup_path = Path(self.temp.name) / "private" / "pre-cutover.sqlite"
-        with self.store._connect() as original, sqlite3.connect(backup_path) as backup:
-            original.backup(backup)
-        backup_path.chmod(0o600)  # SQLite's default umask may create 0644 fixtures.
+        from ops.history_db import backup, restore, verify
+        backup(self.store.path, backup_path)
+        verify(backup_path)
         verifier = create_verifier(self.secret, "console-login")
         upgraded = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
                               generation="e" * 32)
@@ -1301,9 +1302,14 @@ class BrowserTests(unittest.TestCase):
         with self.store._connect() as db:
             self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
                              {"id", "generation"})
-        restored_jobs = JobStore(backup_path)
+        # Real offline restore revokes old OAuth and Console sessions.
+        restore(backup_path, self.store.path, service_stopped=True)
+        restored_jobs = JobStore(self.store.path)
         restored_auth = ViewerAuth(HistoryStore(restored_jobs), self.secret)
-        self.assertTrue(restored_auth.valid(token))
+        self.assertFalse(restored_auth.valid(token))
+        fresh = restored_auth.login("restored-operator", self.secret)
+        self.assertIsNotNone(fresh)
+        self.assertTrue(restored_auth.valid(fresh))
         with restored_jobs._connect() as db:
             self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
                              {"id", "salt", "verifier", "generation"})

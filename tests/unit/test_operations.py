@@ -50,6 +50,48 @@ class OperationalTests(unittest.TestCase):
                 await asyncio.gather(*requests)
 
         self.assertTrue(asyncio.run(exercise()))
+
+    def test_cancelled_auth_requests_hold_worker_permits_until_threads_finish(self):
+        gates = [threading.Event() for _ in range(3)]
+        started = [threading.Event() for _ in range(3)]
+
+        def blocked(index: int) -> bool:
+            started[index].set()
+            return gates[index].wait(4)
+
+        async def wait_until(signal: threading.Event) -> None:
+            for _ in range(150):
+                if signal.is_set():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Expected auth worker to start")
+
+        async def exercise() -> None:
+            first = asyncio.create_task(run_auth(blocked, 0))
+            second = asyncio.create_task(run_auth(blocked, 1))
+            third = None
+            try:
+                await wait_until(started[0])
+                await wait_until(started[1])
+                first.cancel()
+                second.cancel()
+                results = await asyncio.gather(first, second, return_exceptions=True)
+                self.assertTrue(all(isinstance(x, asyncio.CancelledError) for x in results))
+                third = asyncio.create_task(run_auth(blocked, 2))
+                await asyncio.sleep(0.07)
+                self.assertFalse(started[2].is_set(), "Cancelled worker freed a permit too early")
+                gates[0].set()
+                await wait_until(started[2])
+                gates[1].set()
+                gates[2].set()
+                self.assertTrue(await third)
+            finally:
+                for gate in gates:
+                    gate.set()
+                if third is not None:
+                    await asyncio.gather(third, return_exceptions=True)
+
+        asyncio.run(exercise())
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

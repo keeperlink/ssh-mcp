@@ -148,6 +148,14 @@ def restore(source: Path, destination: Path, *, service_stopped: bool) -> Path |
                         "UPDATE oauth_sessions SET revoked_at=? WHERE revoked_at IS NULL",
                         (int(time.time()),),
                     )
+                # A pre-cutover snapshot can contain valid Console cookies
+                # that were revoked after backup. Never revive those sessions
+                # when rolling back the audit DB to the v1 schema.
+                if imported.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='history_sessions'"
+                ).fetchone():
+                    imported.execute("DELETE FROM history_sessions")
         finally:
             imported.close()
         verify(temp)
