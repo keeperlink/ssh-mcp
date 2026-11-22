@@ -59,11 +59,28 @@ def _decode(raw: Any, *, length: int | None = None, maximum: int = 8192) -> byte
 
 
 def _password_bytes(password: str) -> bytes:
-    if type(password) is not str or not 1 <= len(password) <= 256 or "\x00" in password:
+    # Managed v1 passwords support up to 8192 characters. Preserve that range
+    # for cutover verification, even if interactive UI input is more restricted.
+    if type(password) is not str or not 1 <= len(password) <= 8192 or "\x00" in password:
         raise InvalidCredential("Invalid password input")
-    result = password.encode("utf-8")
-    if len(result) > 1024:
+    try:
+        result = password.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidCredential("Invalid password input") from None
+    if len(result) > 32768:
         raise InvalidCredential("Invalid password input")
+    return result
+
+
+def _sudo_bytes(password: str) -> bytes:
+    if type(password) is not str or any(char in password for char in ("\x00", "\r", "\n")):
+        raise InvalidCredential("Invalid sudo credential")
+    try:
+        result = password.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidCredential("Invalid sudo credential") from None
+    if not 1 <= len(result) <= 4096:
+        raise InvalidCredential("Invalid sudo credential")
     return result
 
 
@@ -80,6 +97,10 @@ def _derive(password: str, salt: bytes, purpose: str) -> bytes:
 def create_verifier(password: str, purpose: str) -> dict[str, str | int]:
     if purpose not in _PURPOSES:
         raise InvalidCredential("Invalid password verifier purpose")
+    # Enforce the established character minimum, not the UTF-8 byte count.
+    minimum = 32 if purpose == "oauth-login" else 16
+    if type(password) is not str or len(password) < minimum:
+        raise InvalidCredential("Password does not meet minimum length")
     salt = secrets.token_bytes(_SALT)
     digest = _derive(password, salt, purpose)
     return {"algorithm": "argon2id", "salt": _b64(salt), "digest": _b64(digest),
@@ -109,9 +130,13 @@ def verify_password(password: str, value: Any, purpose: str) -> bool:
 
 
 def create_token_verifier(token: str) -> dict[str, str]:
-    if type(token) is not str or not 32 <= len(token) <= 1024:
+    if type(token) is not str or not 32 <= len(token) <= 8192 or "\x00" in token:
         raise InvalidCredential("Invalid metrics token")
-    return {"algorithm": "sha256", "digest": hashlib.sha256(token.encode("utf-8")).hexdigest()}
+    try:
+        encoded = token.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidCredential("Invalid metrics token") from None
+    return {"algorithm": "sha256", "digest": hashlib.sha256(encoded).hexdigest()}
 
 
 def validate_token_verifier(value: Any) -> None:
@@ -123,10 +148,13 @@ def validate_token_verifier(value: Any) -> None:
 
 def verify_token(token: str, value: Any) -> bool:
     validate_token_verifier(value)
-    if type(token) is not str or not 1 <= len(token) <= 1024:
+    if type(token) is not str or not 1 <= len(token) <= 8192 or "\x00" in token:
         return False
-    return hmac.compare_digest(hashlib.sha256(token.encode("utf-8")).hexdigest(),
-                               value["digest"])
+    try:
+        encoded = token.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(hashlib.sha256(encoded).hexdigest(), value["digest"])
 
 
 def _associated_data(deployment: str, issuer: str, alias: str, username: str) -> bytes:
@@ -141,14 +169,11 @@ def _associated_data(deployment: str, issuer: str, alias: str, username: str) ->
 
 def seal_sudo(password: str, sudo_password: str, *, deployment: str, issuer: str,
               alias: str, username: str) -> dict[str, str]:
-    if type(sudo_password) is not str or not 1 <= len(sudo_password.encode("utf-8")) <= 4096 or any(
-        char in sudo_password for char in ("\x00", "\r", "\n")
-    ):
-        raise InvalidCredential("Invalid sudo credential")
+    sudo_bytes = _sudo_bytes(sudo_password)
     associated = _associated_data(deployment, issuer, alias, username)
     salt, nonce = secrets.token_bytes(_SALT), secrets.token_bytes(_NONCE)
     key = _derive(password, salt, "sudo-wrap")
-    ciphertext = AESGCM(key).encrypt(nonce, sudo_password.encode("utf-8"), associated)
+    ciphertext = AESGCM(key).encrypt(nonce, sudo_bytes, associated)
     return {"algorithm": "aes-256-gcm", "salt": _b64(salt),
             "nonce": _b64(nonce), "ciphertext": _b64(ciphertext)}
 
@@ -261,8 +286,15 @@ def rotate_console(value: dict[str, Any], *, old_password: str, new_password: st
     validate_v2_secrets(value)
     if not verify_password(old_password, value["viewer_verifier"], "console-login"):
         raise InvalidCredential("Console password rejected")
-    if old_password == new_password or len(_password_bytes(new_password)) < 16:
+    _password_bytes(new_password)
+    if type(new_password) is not str or len(new_password) < 16 or old_password == new_password:
         raise InvalidCredential("Console password must change")
+    # Independent salts do not prevent reuse of the same underlying value.
+    # Check all other password/token identities before encrypting anything.
+    if (verify_password(new_password, value["oauth_login_verifier"], "oauth-login")
+            or verify_token(new_password, value["metrics_verifier"])
+            or new_password == value["oauth_signing_key"]):
+        raise InvalidCredential("Console password must remain independent")
     if set(value["sealed_sudo"]) - set(hosts):
         raise InvalidCredential("Missing signed host binding")
     entries = {
@@ -293,7 +325,7 @@ def rotate_host_sudo(value: dict[str, Any], *, console_password: str,
     previous = unseal_sudo(console_password, value["sealed_sudo"][alias],
                             deployment=deployment, issuer=issuer, alias=alias,
                             username=username)
-    if hmac.compare_digest(previous, new_sudo_password):
+    if hmac.compare_digest(_sudo_bytes(previous), _sudo_bytes(new_sudo_password)):
         raise InvalidCredential("Host sudo password must change")
     replacement = deepcopy(value)
     replacement["sealed_sudo"][alias] = seal_sudo(

@@ -46,8 +46,10 @@ class VerifierTests(unittest.TestCase):
                 validate_verifier({**valid, **changes})
         with self.assertRaises(InvalidCredential):
             create_verifier(PASSWORD, "sudo-wrap")
-        for invalid in ("", "\x00", "x" * 257):
+        for invalid in ("", "\x00", "x" * 8193, "\ud800"):
             self.assertFalse(verify_password(invalid, valid, "console-login"))
+        with self.assertRaises(InvalidCredential):
+            create_verifier("🔒" * 8, "console-login")  # 32 UTF-8 bytes, only 8 chars
 
     def test_metrics_token_verification(self):
         original = "synthetic-high-entropy-bearer-" + "a" * 40
@@ -188,6 +190,21 @@ class MigrationTests(unittest.TestCase):
                            new_password=PASSWORD+"-rotated", hosts={},
                            deployment=BIND["deployment"], issuer=BIND["issuer"])
 
+    def test_console_rekey_rejects_cross_credential_reuse_and_short_unicode(self):
+        source = self.convert()
+        original_generation = source["viewer_generation"]
+        original_envelope = copy.deepcopy(source["sealed_sudo"])
+        for replacement in (
+            self.legacy["oauth_login_key"], self.legacy["metrics_token"],
+            self.legacy["oauth_signing_key"], "🔒" * 8,
+        ):
+            with self.subTest(credential=replacement[:15]), self.assertRaises(InvalidCredential):
+                rotate_console(source, old_password=PASSWORD,
+                               new_password=replacement, hosts=self.hosts,
+                               deployment=BIND["deployment"], issuer=BIND["issuer"])
+        self.assertEqual(source["viewer_generation"], original_generation)
+        self.assertEqual(source["sealed_sudo"], original_envelope)
+
     def test_host_rotation_scoped_without_modifying_input(self):
         source = self.convert()
         replacement = rotate_host_sudo(source, console_password=PASSWORD,
@@ -200,6 +217,38 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(InvalidCredential):
             rotate_host_sudo(source, console_password=PASSWORD,
                              new_sudo_password=SUDO, **BIND)
+
+    def test_unicode_old_and_new_sudo_rotation(self):
+        self.legacy["sudo_passwords"]["demo-node-a"] = "synthetic-öñç 🔒 密碼"
+        source = self.convert()
+        replacement = "synthetic-новый 🔑 密码"
+        updated = rotate_host_sudo(source, console_password=PASSWORD,
+                                   new_sudo_password=replacement, **BIND)
+        self.assertEqual(unseal_sudo(PASSWORD, updated["sealed_sudo"]["demo-node-a"],
+                                     **BIND), replacement)
+        self.assertEqual(unseal_sudo(PASSWORD, source["sealed_sudo"]["demo-node-a"],
+                                     **BIND), self.legacy["sudo_passwords"]["demo-node-a"])
+        with self.assertRaises(InvalidCredential):
+            rotate_host_sudo(updated, console_password=PASSWORD,
+                             new_sudo_password=replacement, **BIND)
+        with self.assertRaises(InvalidCredential):
+            rotate_host_sudo(source, console_password=PASSWORD,
+                             new_sudo_password="\ud800", **BIND)
+
+    def test_long_legacy_oauth_and_metrics_survive_conversion(self):
+        self.legacy["oauth_login_key"] = "o" * 8192
+        self.legacy["metrics_token"] = "m" * 8192
+        source = self.convert()
+        self.assertTrue(verify_password(self.legacy["oauth_login_key"],
+                                        source["oauth_login_verifier"], "oauth-login"))
+        self.assertFalse(verify_password(self.legacy["oauth_login_key"] + "o",
+                                         source["oauth_login_verifier"], "oauth-login"))
+        self.assertTrue(verify_token(self.legacy["metrics_token"],
+                                     source["metrics_verifier"]))
+        self.assertFalse(verify_token(self.legacy["metrics_token"] + "m",
+                                      source["metrics_verifier"]))
+        self.assertEqual(unseal_sudo(PASSWORD, source["sealed_sudo"]["demo-node-a"],
+                                     **BIND), SUDO)
 
 
 if __name__ == "__main__":
