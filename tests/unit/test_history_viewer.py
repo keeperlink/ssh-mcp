@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import sqlite3
@@ -1254,6 +1255,17 @@ class BrowserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ViewerAuth(HistoryStore(self.store), "", verifier={"invalid": True},
                        generation="a" * 32)
+
+    def test_v2_concurrent_login_attempts_share_one_failure_budget(self):
+        from app.history import LOGIN_MAX_FAILURES
+        auth = ViewerAuth(HistoryStore(self.store), "",
+                          verifier=create_verifier(self.secret, "console-login"),
+                          generation="c" * 32)
+        with ThreadPoolExecutor(max_workers=10) as workers:
+            attempts = list(workers.map(lambda _: auth.login("same-ip", "wrong"), range(20)))
+        self.assertEqual(attempts, [None] * 20)
+        self.assertEqual(len(auth.failed["same-ip"]), LOGIN_MAX_FAILURES)
+        self.assertIsNone(auth.login("same-ip", self.secret))
 
     def test_browser_displays_safe_error_without_interpreting_html(self):
         self.login()

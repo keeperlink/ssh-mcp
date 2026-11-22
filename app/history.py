@@ -15,6 +15,7 @@ import re
 import secrets
 import shlex
 import sqlite3
+import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
@@ -662,6 +663,10 @@ class ViewerAuth:
         self.password = password
         self.verifier = verifier
         self.failed: dict[str, deque[float]] = defaultdict(deque)
+        # Password verification now runs in a threadpool. Serialize the
+        # check/reservation/failure update, not just dictionary mutation,
+        # so simultaneous attempts cannot evade the per-IP retry budget.
+        self._login_lock = threading.RLock()
         with self.store._connect() as db:
             # A password change revokes all old cookies, including after a restart.
             # Keep the salted verifier private; never store the password itself.
@@ -724,22 +729,24 @@ class ViewerAuth:
                 )
 
     def allowed(self, ip: str) -> bool:
-        now = time.time()
-        failures = self.failed[ip]
-        while failures and failures[0] <= now - LOGIN_WINDOW:
-            failures.popleft()
-        return len(failures) < LOGIN_MAX_FAILURES
+        with self._login_lock:
+            now = time.time()
+            failures = self.failed[ip]
+            while failures and failures[0] <= now - LOGIN_WINDOW:
+                failures.popleft()
+            return len(failures) < LOGIN_MAX_FAILURES
 
     def login(self, ip: str, password: str) -> str | None:
-        if not self.allowed(ip):
-            return None
-        accepted = (verify_password(password, self.verifier, "console-login")
-                    if self.verifier is not None else
-                    secrets.compare_digest(password, self.password))
-        if not accepted:
-            self.failed[ip].append(time.time())
-            return None
-        self.failed.pop(ip, None)
+        with self._login_lock:
+            if not self.allowed(ip):
+                return None
+            accepted = (verify_password(password, self.verifier, "console-login")
+                        if self.verifier is not None else
+                        secrets.compare_digest(password, self.password))
+            if not accepted:
+                self.failed[ip].append(time.time())
+                return None
+            self.failed.pop(ip, None)
         session = secrets.token_urlsafe(32)
         now = time.time()
         with self.store._connect() as db:
