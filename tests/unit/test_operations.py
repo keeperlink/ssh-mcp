@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from starlette.concurrency import run_in_threadpool
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
 os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
@@ -24,12 +26,72 @@ from app.contracts import ExecuteCommandRequest
 from app.jobs import JobStore
 from app.oauth_sessions import SessionStore
 from app.observability import create_observability_router
+from app.auth_workers import run_auth
+from app.sealed_credentials import create_token_verifier
 from ops import history_db
 from ops.history_db import backup, restore, verify
 from app import main as main_app
 
 
 class OperationalTests(unittest.TestCase):
+    def test_waiting_password_requests_do_not_exhaust_shared_workers(self):
+        gate = threading.Event()
+
+        def slow_auth() -> bool:
+            return gate.wait(2)
+
+        async def exercise() -> bool:
+            requests = [asyncio.create_task(run_auth(slow_auth)) for _ in range(75)]
+            try:
+                await asyncio.sleep(0.05)
+                return await asyncio.wait_for(run_in_threadpool(lambda: True), timeout=0.4)
+            finally:
+                gate.set()
+                await asyncio.gather(*requests)
+
+        self.assertTrue(asyncio.run(exercise()))
+
+    def test_cancelled_auth_requests_hold_worker_permits_until_threads_finish(self):
+        gates = [threading.Event() for _ in range(3)]
+        started = [threading.Event() for _ in range(3)]
+
+        def blocked(index: int) -> bool:
+            started[index].set()
+            return gates[index].wait(4)
+
+        async def wait_until(signal: threading.Event) -> None:
+            for _ in range(150):
+                if signal.is_set():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("Expected auth worker to start")
+
+        async def exercise() -> None:
+            first = asyncio.create_task(run_auth(blocked, 0))
+            second = asyncio.create_task(run_auth(blocked, 1))
+            third = None
+            try:
+                await wait_until(started[0])
+                await wait_until(started[1])
+                first.cancel()
+                second.cancel()
+                results = await asyncio.gather(first, second, return_exceptions=True)
+                self.assertTrue(all(isinstance(x, asyncio.CancelledError) for x in results))
+                third = asyncio.create_task(run_auth(blocked, 2))
+                await asyncio.sleep(0.07)
+                self.assertFalse(started[2].is_set(), "Cancelled worker freed a permit too early")
+                gates[0].set()
+                await wait_until(started[2])
+                gates[1].set()
+                gates[2].set()
+                self.assertTrue(await third)
+            finally:
+                for gate in gates:
+                    gate.set()
+                if third is not None:
+                    await asyncio.gather(third, return_exceptions=True)
+
+        asyncio.run(exercise())
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -96,6 +158,22 @@ class OperationalTests(unittest.TestCase):
             response = client.get("/metrics", headers={"Authorization": "Bearer " + self.secret})
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("hidden path", response.text)
+
+    def test_v2_metrics_verifier_requires_valid_bearer_without_plaintext(self):
+        verifier = create_token_verifier(self.secret)
+        self.assertNotIn(self.secret, repr(verifier))
+        app = FastAPI()
+        app.include_router(create_observability_router(self.store, "", verifier=verifier))
+        with TestClient(app) as client:
+            for header in ({}, {"Authorization": "Bearer invalid"},
+                           {"Authorization": self.secret},
+                           {"Authorization": "Bearer " + self.secret + "x"}):
+                self.assertEqual(client.get("/metrics", headers=header).status_code, 401)
+            response = client.get("/metrics", headers={"Authorization": "Bearer " + self.secret})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        with self.assertRaises(RuntimeError):
+            create_observability_router(self.store, self.secret, verifier=verifier)
 
     def test_ready_checks_db_without_spilling_exceptions(self):
         class Registry:

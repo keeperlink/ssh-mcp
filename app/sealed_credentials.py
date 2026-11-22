@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
 VERSION = 2
+MAX_CONSOLE_PASSWORD_CHARS = 256
 KDF_MEMORY_KIB = 65536
 KDF_ITERATIONS = 3
 KDF_LANES = 1
@@ -72,6 +73,17 @@ def _password_bytes(password: str) -> bytes:
     return result
 
 
+def validate_console_password(password: str) -> None:
+    """Match password-input maxlength in UTF-16 units and browser newline rules."""
+    if (type(password) is not str
+            or len(password) < 16
+            or any(char in password for char in ("\x00", "\r", "\n"))
+            or sum(2 if ord(char) > 0xFFFF else 1 for char in password)
+            > MAX_CONSOLE_PASSWORD_CHARS):
+        raise InvalidCredential("Console password exceeds browser-compatible limits")
+    _password_bytes(password)
+
+
 def _sudo_bytes(password: str) -> bytes:
     if type(password) is not str or any(char in password for char in ("\x00", "\r", "\n")):
         raise InvalidCredential("Invalid sudo credential")
@@ -101,6 +113,8 @@ def create_verifier(password: str, purpose: str) -> dict[str, str | int]:
     minimum = 32 if purpose == "oauth-login" else 16
     if type(password) is not str or len(password) < minimum:
         raise InvalidCredential("Password does not meet minimum length")
+    if purpose == "console-login":
+        validate_console_password(password)
     salt = secrets.token_bytes(_SALT)
     digest = _derive(password, salt, purpose)
     return {"algorithm": "argon2id", "salt": _b64(salt), "digest": _b64(digest),
@@ -123,6 +137,8 @@ def verify_password(password: str, value: Any, purpose: str) -> bool:
     if purpose not in _PURPOSES:
         raise InvalidCredential("Invalid password verifier purpose")
     try:
+        if purpose == "console-login":
+            validate_console_password(password)
         computed = _derive(password, _decode(value["salt"], length=_SALT), purpose)
     except InvalidCredential:
         return False
@@ -250,8 +266,8 @@ def from_legacy(value: dict[str, Any], *, console_password: str,
     if any(type(value[k]) is not str or not 32 <= len(value[k]) <= 8192
            for k in keys if k != "viewer_password"):
         raise InvalidCredential("Invalid legacy credential")
-    if type(value["viewer_password"]) is not str or len(value["viewer_password"]) < 16:
-        raise InvalidCredential("Invalid legacy Console password")
+    validate_console_password(value["viewer_password"])
+    validate_console_password(console_password)
     if len({value[k] for k in keys}) != len(keys) or not hmac.compare_digest(
         _password_bytes(console_password), _password_bytes(value["viewer_password"])
     ):
@@ -286,8 +302,8 @@ def rotate_console(value: dict[str, Any], *, old_password: str, new_password: st
     validate_v2_secrets(value)
     if not verify_password(old_password, value["viewer_verifier"], "console-login"):
         raise InvalidCredential("Console password rejected")
-    _password_bytes(new_password)
-    if type(new_password) is not str or len(new_password) < 16 or old_password == new_password:
+    validate_console_password(new_password)
+    if old_password == new_password:
         raise InvalidCredential("Console password must change")
     # Independent salts do not prevent reuse of the same underlying value.
     # Check all other password/token identities before encrypting anything.

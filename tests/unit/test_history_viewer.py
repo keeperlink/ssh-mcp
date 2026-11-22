@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import sqlite3
@@ -29,6 +30,7 @@ from app.history import (
 )
 from app.jobs import JobManager, JobStore
 from app.ssh_executor import SSHDenied, SSHResult
+from app.sealed_credentials import create_verifier
 
 
 def request(*argv: str, story_id: str | None = "TEST-209") -> ExecuteCommandRequest:
@@ -1215,6 +1217,102 @@ class BrowserTests(unittest.TestCase):
         self.assertFalse(restored.valid(new_token))
         self.assertFalse(restored.valid(old_token))  # rotation back never revives old tokens
         self.assertTrue(restored.valid(restored.login("operator", self.secret)))
+
+    def test_v2_auth_migrates_away_secondary_verifier_and_tracks_generation(self):
+        legacy = ViewerAuth(HistoryStore(self.store), self.secret)
+        legacy_cookie = legacy.login("legacy", self.secret)
+        self.assertTrue(legacy.valid(legacy_cookie))
+        verifier = create_verifier(self.secret, "console-login")
+        first = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                           generation="a" * 32)
+        self.assertFalse(first.valid(legacy_cookie))
+        self.assertIsNone(first.login("user", "wrong"))
+        cookie = first.login("user", self.secret)
+        self.assertTrue(first.valid(cookie))
+        with self.store._connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")}
+            self.assertEqual(columns, {"id", "generation"})
+        restarted = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                               generation="a" * 32)
+        self.assertTrue(restarted.valid(cookie))
+        rotated = ViewerAuth(HistoryStore(self.store), "",
+                             verifier=create_verifier(self.secret + "-rotated", "console-login"),
+                             generation="b" * 32)
+        self.assertFalse(first.valid(cookie))
+        self.assertFalse(rotated.valid(cookie))
+        self.assertIsNone(first.login("user", self.secret))
+        rotated_cookie = rotated.login("user", self.secret + "-rotated")
+        self.assertTrue(rotated.valid(rotated_cookie))
+
+    def test_v2_rejects_mixed_password_and_invalid_generation(self):
+        verifier = create_verifier(self.secret, "console-login")
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed"):
+            ViewerAuth(HistoryStore(self.store), self.secret,
+                       verifier=verifier, generation="a" * 32)
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed"):
+            ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                       generation="not-a-generation")
+        with self.assertRaises(ValueError):
+            ViewerAuth(HistoryStore(self.store), "", verifier={"invalid": True},
+                       generation="a" * 32)
+
+    def test_v2_concurrent_login_attempts_share_one_failure_budget(self):
+        from app.history import LOGIN_MAX_FAILURES
+        auth = ViewerAuth(HistoryStore(self.store), "",
+                          verifier=create_verifier(self.secret, "console-login"),
+                          generation="c" * 32)
+        with ThreadPoolExecutor(max_workers=10) as workers:
+            attempts = list(workers.map(lambda _: auth.login("same-ip", "wrong"), range(20)))
+        self.assertEqual(attempts, [None] * 20)
+        self.assertEqual(len(auth.failed["same-ip"]), LOGIN_MAX_FAILURES)
+        self.assertIsNone(auth.login("same-ip", self.secret))
+
+    def test_v2_maximum_console_password_signs_in_via_real_form(self):
+        # Browsers count UTF-16 units for maxlength, not Python code points.
+        maximum = "🔒" * 128
+        with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+              patch.object(config, "HISTORY_VIEWER_VERIFIER",
+                           create_verifier(maximum, "console-login")),
+              patch.object(config, "HISTORY_VIEWER_GENERATION", "d" * 32)):
+            app = FastAPI()
+            app.include_router(create_history_router(self.store))
+            with TestClient(app, base_url="https://lab.example.net",
+                            follow_redirects=False) as client:
+                page = client.get("/console/login")
+                self.assertIn('maxlength="256"', page.text)
+                csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+                response = client.post(
+                    "/console/login", data={"csrf": csrf, "password": maximum},
+                    headers={"Origin": config.MCP_ISSUER},
+                )
+                self.assertEqual(response.status_code, 303)
+                self.assertIn(SESSION_COOKIE, client.cookies)
+
+    def test_v2_migration_recovery_uses_preserved_pre_cutover_backup(self):
+        legacy = ViewerAuth(HistoryStore(self.store), self.secret)
+        token = legacy.login("pre-cutover", self.secret)
+        backup_path = Path(self.temp.name) / "private" / "pre-cutover.sqlite"
+        from ops.history_db import backup, restore, verify
+        backup(self.store.path, backup_path)
+        verify(backup_path)
+        verifier = create_verifier(self.secret, "console-login")
+        upgraded = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                              generation="e" * 32)
+        self.assertFalse(upgraded.valid(token))
+        with self.store._connect() as db:
+            self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
+                             {"id", "generation"})
+        # Real offline restore revokes old OAuth and Console sessions.
+        restore(backup_path, self.store.path, service_stopped=True)
+        restored_jobs = JobStore(self.store.path)
+        restored_auth = ViewerAuth(HistoryStore(restored_jobs), self.secret)
+        self.assertFalse(restored_auth.valid(token))
+        fresh = restored_auth.login("restored-operator", self.secret)
+        self.assertIsNotNone(fresh)
+        self.assertTrue(restored_auth.valid(fresh))
+        with restored_jobs._connect() as db:
+            self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
+                             {"id", "salt", "verifier", "generation"})
 
     def test_browser_displays_safe_error_without_interpreting_html(self):
         self.login()

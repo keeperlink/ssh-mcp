@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from .control import LEVELS
 from .client_registry import parse_clients, offline_client
 from .readiness import ReadinessSettings
+from .sealed_credentials import validate_v2_secrets
 
 CONFIG = Path("/etc/ssh-mcp/service.json")
 INVENTORY = Path("/etc/ssh-mcp/inventory.json")
@@ -103,9 +104,19 @@ def _read(path: Path, limit: int) -> str:
     return path.read_text("utf-8")
 
 
-def _json(path: Path, limit: int) -> dict[str, Any]:
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate member in managed JSON")
+        result[key] = value
+    return result
+
+
+def _json(path: Path, limit: int, *, reject_duplicates: bool = False) -> dict[str, Any]:
     try:
-        value = json.loads(_read(path, limit))
+        value = json.loads(_read(path, limit),
+                           object_pairs_hook=_unique_members if reject_duplicates else None)
     except (ValueError, OSError, UnicodeError) as exc:
         raise ValueError("Invalid mounted JSON configuration") from exc
     if type(value) is not dict:
@@ -216,17 +227,35 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
     os.umask(0o077)
     cfg = _json(config_source, 65536)
     _valid_settings(cfg)
-    secrets = _json(secrets_source, 65536)
-    if (set(secrets) not in (SECRETS_KEYS, SECRETS_KEYS | OPTIONAL_SECRETS_KEYS)
-            or secrets["version"] != 1):
-        raise ValueError("Invalid managed secrets schema")
-    for name, minimum in (("oauth_login_key", 32), ("oauth_signing_key", 32),
-                          ("viewer_password", 16), ("metrics_token", 32)):
-        if not _secret(secrets[name], minimum):
-            raise ValueError("Invalid private credential")
-    if len({secrets[k] for k in
-            ("oauth_login_key", "oauth_signing_key", "viewer_password", "metrics_token")}) != 4:
-        raise ValueError("Independent credentials must be distinct")
+    secrets = _json(secrets_source, 65536, reject_duplicates=True)
+    sealed = type(secrets.get("version")) is int and secrets["version"] == 2
+    if sealed:
+        validate_v2_secrets(secrets)
+        auth_env = {
+            "MCP_MANAGED_SECRETS_VERSION": "2",
+            "MCP_LOGIN_VERIFIER": json.dumps(secrets["oauth_login_verifier"], sort_keys=True),
+            "HISTORY_VIEWER_VERIFIER": json.dumps(secrets["viewer_verifier"], sort_keys=True),
+            "HISTORY_VIEWER_GENERATION": secrets["viewer_generation"],
+            "MCP_METRICS_VERIFIER": json.dumps(secrets["metrics_verifier"], sort_keys=True),
+        }
+    else:
+        # Legacy managed layout remains usable only during the staged
+        # development migration; strict v2-only cutover is a later stage.
+        if (set(secrets) not in (SECRETS_KEYS, SECRETS_KEYS | OPTIONAL_SECRETS_KEYS)
+                or secrets["version"] != 1):
+            raise ValueError("Invalid managed secrets schema")
+        for name, minimum in (("oauth_login_key", 32), ("oauth_signing_key", 32),
+                              ("viewer_password", 16), ("metrics_token", 32)):
+            if not _secret(secrets[name], minimum):
+                raise ValueError("Invalid private credential")
+        if len({secrets[k] for k in
+                ("oauth_login_key", "oauth_signing_key", "viewer_password", "metrics_token")}) != 4:
+            raise ValueError("Independent credentials must be distinct")
+        auth_env = {
+            "MCP_LOGIN_KEY": secrets["oauth_login_key"],
+            "HISTORY_VIEWER_PASSWORD": secrets["viewer_password"],
+            "MCP_METRICS_TOKEN": secrets["metrics_token"],
+        }
     identity = secrets["ssh_private_key"]
     if (type(identity) is not str or len(identity) > 100000 or
             not identity.startswith("-----BEGIN OPENSSH PRIVATE KEY-----") or
@@ -260,7 +289,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         aliases.append(host["alias"])
     if len(set(aliases)) != len(aliases):
         raise ValueError("Duplicate SSH host alias")
-    sudo_passwords = secrets.get("sudo_passwords", {})
+    sudo_passwords = {} if sealed else secrets.get("sudo_passwords", {})
     if (type(sudo_passwords) is not dict or
             any(type(alias) is not str or not ALIAS.fullmatch(alias)
                 for alias in sudo_passwords)):
@@ -293,7 +322,6 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
             "localhost,localhost:*,127.0.0.1,127.0.0.1:*"),
         "MCP_ALLOWED_ORIGINS": ",".join(http["allowed_origins"]),
         "REQUEST_TIMEOUT": str(http["request_timeout_seconds"]),
-        "MCP_LOGIN_KEY": secrets["oauth_login_key"],
         "MCP_TOKEN_SIGNING_SECRET": secrets["oauth_signing_key"],
         "MCP_OPERATOR_SUBJECT": oauth["operator_subject"],
         "MCP_ACCESS_TOKEN_TTL": str(oauth["access_token_ttl_seconds"]),
@@ -319,11 +347,11 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "SSH_MAX_ARGUMENT_BYTES": str(ssh["max_argument_bytes"]),
         "SSH_MAX_ARGUMENTS": str(ssh["max_arguments"]),
         "SSH_MAX_ACTIVE_JOBS": str(jobs["max_active"]),
-        "HISTORY_VIEWER_PASSWORD": secrets["viewer_password"],
         "HISTORY_VIEWER_ENABLED": "true",
         "HISTORY_IDLE_TIMEOUT_SECONDS": str(cfg["viewer"]["idle_timeout_seconds"]),
         "HISTORY_ABSOLUTE_TIMEOUT_SECONDS": str(cfg["viewer"]["absolute_timeout_seconds"]),
         "HISTORY_STORY_ID_MAX_CHARS": str(cfg["viewer"].get("story_id_max_chars", 16)),
         "HISTORY_STORY_ID_TRUNCATE_FROM": cfg["viewer"].get("story_id_truncate_from", "end"),
-        "MCP_METRICS_ENABLED": "true", "MCP_METRICS_TOKEN": secrets["metrics_token"],
+        "MCP_METRICS_ENABLED": "true",
+        **auth_env,
     }

@@ -28,6 +28,8 @@ from .oauth_sessions import SessionStore, ClientRegistrationRevoked
 from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
 from .dcr_registry import DCRStore, RegistrationError
 from .form_body import read_bounded_body
+from .auth_workers import run_auth
+from .sealed_credentials import verify_password
 from .config import (
     MCP_ACCESS_TOKEN_TTL,
     MCP_SESSION_TTL_DEFAULT,
@@ -59,6 +61,7 @@ _CIMD_REGISTRY = ClientMetadataRegistry()
 _AUTH_CODES: dict[str, "StoredAuthorizationCode"] = {}
 _AUTH_CODES_LOCK = asyncio.Lock()
 _LOGIN_FAILURES: dict[str, deque[float]] = defaultdict(deque)
+_LOGIN_INFLIGHT: dict[str, int] = defaultdict(int)
 _LOGIN_FAILURES_LOCK = asyncio.Lock()
 class ActiveOrigins(list[str]):
     """MCP Origin membership follows live authorized sessions, not stale cache."""
@@ -286,6 +289,35 @@ async def _record_login_failure(client_ip: str) -> None:
 async def _clear_login_failures(client_ip: str) -> None:
     async with _LOGIN_FAILURES_LOCK:
         _LOGIN_FAILURES.pop(client_ip, None)
+
+
+async def _reserve_login_attempt(client_ip: str) -> tuple[bool, int]:
+    """Count already-running Argon2 attempts against the same per-IP budget."""
+    now = time.monotonic()
+    async with _LOGIN_FAILURES_LOCK:
+        failures = _LOGIN_FAILURES[client_ip]
+        while failures and failures[0] < now - MCP_LOGIN_WINDOW_SECONDS:
+            failures.popleft()
+        if len(failures) + _LOGIN_INFLIGHT[client_ip] >= MCP_LOGIN_MAX_FAILURES:
+            remaining = (max(1, int(MCP_LOGIN_WINDOW_SECONDS - (now - failures[0])))
+                         if failures else 1)
+            return False, remaining
+        _LOGIN_INFLIGHT[client_ip] += 1
+        return True, 0
+
+
+async def _finish_login_attempt(client_ip: str, *, success: bool | None) -> None:
+    """Always release the reservation, even if the HTTP request is cancelled."""
+    async with _LOGIN_FAILURES_LOCK:
+        count = _LOGIN_INFLIGHT[client_ip] - 1
+        if count:
+            _LOGIN_INFLIGHT[client_ip] = count
+        else:
+            _LOGIN_INFLIGHT.pop(client_ip, None)
+        if success is True:
+            _LOGIN_FAILURES.pop(client_ip, None)
+        elif success is False:
+            _LOGIN_FAILURES[client_ip].append(time.monotonic())
 
 
 async def _store_authorization_code(
@@ -689,9 +721,30 @@ async def oauth_authorize_post(request: Request) -> Response:
         )
     if form.get("decision", "grant") != "grant":
         return _oauth_error("invalid_request", "Invalid authorization decision")
-    required_key = MCP_LOGIN_KEY
-    if not required_key or not secrets.compare_digest(supplied_key, required_key):
-        await _record_login_failure(client_ip)
+    reserved, retry_after = await _reserve_login_attempt(client_ip)
+    if not reserved:
+        return HTMLResponse(
+            "<h1>Too many failed attempts</h1><p>Try again later.</p>",
+            status_code=429,
+            headers={**_security_headers(), "Retry-After": str(retry_after)},
+        )
+    accepted: bool | None = None
+    try:
+        if config.MCP_MANAGED_SECRETS_VERSION == "2":
+            accepted = await run_auth(
+                verify_password, supplied_key, config.MCP_LOGIN_VERIFIER, "oauth-login",
+            )
+        else:
+            accepted = bool(MCP_LOGIN_KEY) and secrets.compare_digest(supplied_key, MCP_LOGIN_KEY)
+    finally:
+        # Once admitted, even a cancelled HTTP request consumes retry
+        # capacity. The worker may still be checking its credential after
+        # disconnect; clearing the reservation without charging a failure
+        # would permit unlimited overlapping cancellations.
+        await asyncio.shield(_finish_login_attempt(
+            client_ip, success=accepted if accepted is not None else False,
+        ))
+    if not accepted:
         return _authorization_error_redirect(
             redirect_uri,
             str(state) if state is not None else None,
@@ -699,7 +752,6 @@ async def oauth_authorize_post(request: Request) -> Response:
             "The MCP login key was not accepted",
         )
 
-    await _clear_login_failures(client_ip)
     if client_id.startswith("dcr_"):
         approved_name = form.get("agent_name", "")
         if (not isinstance(approved_name, str) or approved_name != approved_name.strip()

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 from pathlib import Path
 
 from .control import LEVELS
 from .client_registry import clients_from_environment, labels, offline_client
+from .sealed_credentials import validate_token_verifier, validate_verifier
 
 # Production mounts are all-or-nothing. Lab environment-file mode remains
 # supported by the exact same single image, without separate bootstrap code.
@@ -27,6 +29,15 @@ def _csv_env(name: str, default: str = "") -> list[str]:
 
 
 MCP_LOGIN_KEY = os.getenv("MCP_LOGIN_KEY", "")
+MCP_MANAGED_SECRETS_VERSION = os.getenv("MCP_MANAGED_SECRETS_VERSION", "")
+# Stage 2 is intentionally non-deployable: root grant scoping, locked-host
+# readiness and a recoverable database cutover must be implemented before
+# an image can accept an active v2 secret. Not controllable by environment.
+SEALED_RUNTIME_READY = False
+MCP_LOGIN_VERIFIER = json.loads(os.getenv("MCP_LOGIN_VERIFIER", "null"))
+HISTORY_VIEWER_VERIFIER = json.loads(os.getenv("HISTORY_VIEWER_VERIFIER", "null"))
+HISTORY_VIEWER_GENERATION = os.getenv("HISTORY_VIEWER_GENERATION", "")
+MCP_METRICS_VERIFIER = json.loads(os.getenv("MCP_METRICS_VERIFIER", "null"))
 MCP_TOKEN_SIGNING_SECRET = os.getenv("MCP_TOKEN_SIGNING_SECRET", "")
 MCP_ENVIRONMENT = os.getenv("MCP_ENVIRONMENT", "lab")
 MCP_LOG_LEVEL = os.getenv("MCP_LOG_LEVEL", "INFO")
@@ -92,19 +103,33 @@ def validate_mcp_config() -> None:
         raise RuntimeError("MCP_ENVIRONMENT must be lab or production")
     if not _valid_service_version(MCP_SERVICE_VERSION):
         raise RuntimeError("MCP_SERVICE_VERSION must be a release version or Git commit hash")
-    if len(MCP_LOGIN_KEY) < 32:
+    if MCP_MANAGED_SECRETS_VERSION not in ("", "2"):
+        raise RuntimeError("Unsupported managed secret revision")
+    if MCP_MANAGED_SECRETS_VERSION == "2":
+        if (MCP_LOGIN_KEY or os.getenv("HISTORY_VIEWER_PASSWORD")
+                or os.getenv("MCP_METRICS_TOKEN")):
+            raise RuntimeError("Sealed mode must not load plaintext login or metrics credentials")
+        validate_verifier(MCP_LOGIN_VERIFIER)
+        validate_verifier(HISTORY_VIEWER_VERIFIER)
+        validate_token_verifier(MCP_METRICS_VERIFIER)
+        if re.fullmatch("[0-9a-f]{32}", HISTORY_VIEWER_GENERATION) is None:
+            raise RuntimeError("Invalid Console secret generation")
+        if not SEALED_RUNTIME_READY:
+            raise RuntimeError("Sealed runtime activation requires completed SKY-347 cutover")
+    elif len(MCP_LOGIN_KEY) < 32:
         raise RuntimeError("MCP_LOGIN_KEY must contain at least 32 characters")
     if len(MCP_TOKEN_SIGNING_SECRET) < 32:
         raise RuntimeError("MCP_TOKEN_SIGNING_SECRET must contain at least 32 characters")
     # Auth, signing, Console and metrics secrets must never share a value.
     # Managed signed config already enforces this; standalone env mode must too.
-    credentials = [MCP_LOGIN_KEY, MCP_TOKEN_SIGNING_SECRET]
-    if os.getenv("HISTORY_VIEWER_ENABLED", "false").lower() == "true":
-        credentials.append(os.getenv("HISTORY_VIEWER_PASSWORD", ""))
-    if os.getenv("MCP_METRICS_ENABLED", "false").lower() == "true":
-        credentials.append(os.getenv("MCP_METRICS_TOKEN", ""))
-    if len(set(credentials)) != len(credentials):
-        raise RuntimeError("OAuth, signing, Console and metrics secrets must be distinct")
+    if MCP_MANAGED_SECRETS_VERSION != "2":
+        credentials = [MCP_LOGIN_KEY, MCP_TOKEN_SIGNING_SECRET]
+        if os.getenv("HISTORY_VIEWER_ENABLED", "false").lower() == "true":
+            credentials.append(os.getenv("HISTORY_VIEWER_PASSWORD", ""))
+        if os.getenv("MCP_METRICS_ENABLED", "false").lower() == "true":
+            credentials.append(os.getenv("MCP_METRICS_TOKEN", ""))
+        if len(set(credentials)) != len(credentials):
+            raise RuntimeError("OAuth, signing, Console and metrics secrets must be distinct")
     if not MCP_ISSUER.startswith("https://") and MCP_ISSUER not in {"http://localhost", "http://127.0.0.1"}:
         raise RuntimeError("MCP_ISSUER must use HTTPS outside local development")
     if MCP_RESOURCE != f"{MCP_ISSUER}/mcp":
