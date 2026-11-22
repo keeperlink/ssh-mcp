@@ -12,7 +12,7 @@
     totals: null, summaryFetchedAt: 0, relativeTime: false, listGeneration: 0,
     requestJson: false, responseJson: false, privilegedOnly: false,
     cancelling: new Set(), readiness: null,
-    agentRevision: Number($("filters").elements.namedItem("agent").dataset.namesRevision || 0)
+    agentRevision: $("filters").elements.namedItem("agent").dataset.namesRevision || ""
   };
   const historyTable = $("history-table");
   const storyMaxChars = Number(historyTable.dataset.storyIdMaxChars || 16);
@@ -496,7 +496,7 @@
   }
   async function refreshAgentOptions() {
     const result = await api("/console/api/agents");
-    if (!Number.isInteger(result.revision) || !Array.isArray(result.agents)) {
+    if (typeof result.revision !== "string" || !Array.isArray(result.agents)) {
       throw new Error("Invalid agent-name snapshot");
     }
     const select = $("filters").elements.namedItem("agent");
@@ -517,7 +517,8 @@
       state.filters = currentFilters();
       remember();
     }
-    state.agentRevision = result.revision;
+    // Do not acknowledge this version yet: rows and details may still fail.
+    return result.revision;
   }
   async function loadJobs() {
     const generation = state.listGeneration;
@@ -872,6 +873,7 @@
       let refreshSelected = false;
       let sawChanges = false;
       let namesChanged = false;
+      let pendingNameRevision = null;
       if (state.changesCursor) {
         for (let i = 0; i < 8; i++) {
           const data = await api("/console/api/changes?after=" + escaped(state.changesCursor));
@@ -881,9 +883,9 @@
             document.dispatchEvent(new CustomEvent("ssh-mcp-approvals-snapshot", { detail: data }));
           }
           if (data.readiness) state.readiness = data.readiness;
-          if (Number.isInteger(data.agent_names_revision)
-              && data.agent_names_revision !== state.agentRevision) {
-            await refreshAgentOptions();
+          if (typeof data.agent_names_revision === "string"
+              && data.agent_names_revision !== state.agentRevision && !namesChanged) {
+            pendingNameRevision = await refreshAgentOptions();
             namesChanged = true;
           }
           state.changesCursor = data.changes_cursor;
@@ -916,8 +918,14 @@
       // Refresh the active first page when new jobs arrive, without
       // exceeding the visible row budget. Other pages retain a notice.
       const expired = [...state.rows.values()].some((job) => !matches(job));
-      if (expired || namesChanged || (sawChanges && state.page === 1)) await loadJobs();
+      if (expired || namesChanged || (sawChanges && state.page === 1)) {
+        const loaded = await loadJobs();
+        if (namesChanged && !loaded) throw new Error("History page changed during name refresh");
+      }
       if (namesChanged && state.detail && !refreshSelected) await updateSelected();
+      // Only acknowledge after options, rows, and any selected detail succeeded.
+      // An HTTP failure will retry on the next poll, including on a restarted service.
+      if (namesChanged) state.agentRevision = pendingNameRevision;
       newJobsBanner();
       refreshMetrics();
       if (state.relativeTime) refreshRowTimes();

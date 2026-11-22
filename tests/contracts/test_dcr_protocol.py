@@ -278,6 +278,24 @@ class DCRProtocolTests(unittest.TestCase):
         self.assertEqual(store.revoke(one), 0)
         self.assertIsNot(previous, store.approved_names)
 
+    def test_name_snapshot_revision_changes_across_restart_without_db_change(self):
+        from app.dcr_registry import DCRStore
+        store = oauth.dcr_store()
+        client = self.register().json()["client_id"]
+        store.approve_name(client, "Grok")
+        revision, names = store.names_snapshot
+        self.assertEqual(names[client], "Grok")
+        self.assertEqual(revision, store.names_revision)
+        store.reload_names()
+        next_version, next_names = store.names_snapshot
+        self.assertNotEqual(revision, next_version)
+        self.assertEqual(dict(names), dict(next_names))
+        restarted = DCRStore(store.path)
+        restart_version, restart_names = restarted.names_snapshot
+        self.assertNotEqual(next_version, restart_version)
+        self.assertEqual(dict(restart_names), dict(next_names))
+        self.assertIs(restarted.names_snapshot[1], restart_names)
+
     def test_failed_full_map_read_rolls_back_registration_and_name_changes(self):
         import sqlite3
         store = oauth.dcr_store()
@@ -344,12 +362,12 @@ class DCRProtocolTests(unittest.TestCase):
         self.assertIn("Synthetic CLI", output.getvalue())
         output = io.StringIO()
         with redirect_stdout(output):
-            self.assertEqual(main(["--db", path, "revoke", client, "--confirm-id", client]), 0)
+            self.assertEqual(main(["--db", path, "revoke", client, "--confirm-id", client, "--offline"]), 0)
         self.assertIn("revoked", output.getvalue())
         self.assertIsNone(oauth.dcr_store().get(client))
         output = io.StringIO()
         with redirect_stdout(output):
-            self.assertEqual(main(["--db", path, "revoke", client, "--confirm-id", client]), 1)
+            self.assertEqual(main(["--db", path, "revoke", client, "--confirm-id", client, "--offline"]), 1)
         self.assertIn("not found", output.getvalue())
 
     def test_admin_cli_rejects_invalid_database_and_confirmation(self):

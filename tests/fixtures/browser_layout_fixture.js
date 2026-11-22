@@ -929,6 +929,19 @@
         && !combined.querySelector(":scope > .grant-countdown").hidden
         && combined.querySelectorAll(".grant-countdown").length === 2,
       "Longer SSH grant must retain both green and red remaining durations");
+      // A DCR name can change without changing a grant ID or approval revision.
+      send(10, [], [{ ...longerHost, agent: "Grok" }, { ...shorterRoot, agent: "Grok" }]);
+      assert(chips.querySelector('[data-id="synthetic-host-grant"]') === combined
+        && combined.querySelector(":scope > .grant-name").textContent.includes("[Grok-")
+        && [...combined.querySelectorAll("button")].length === 2
+        && [...combined.querySelectorAll("button")].every((node) =>
+          node.title.includes("[Grok-") && node.getAttribute("aria-label").includes("[Grok-")),
+      "Same-ID nested host/root grant rename must update the existing bubble and both accessible revoke labels");
+      send(10, [], [longerHost, shorterRoot]);
+      assert(combined.querySelector(":scope > .grant-name").textContent.includes("[ChatGPT-")
+        && [...combined.querySelectorAll("button")].every((node) =>
+          node.getAttribute("aria-label").includes("[ChatGPT-")),
+      "Grant names must update back on the same IDs and same approval revision");
       combined.querySelector(".grant-root-detail button").click();
       await waitFor(() => posts.length === 4
         && !chips.querySelector(".grant-root-detail")
@@ -953,6 +966,14 @@
         && chips.querySelector("button").getAttribute("aria-label")
           .startsWith("Revoke root"),
       "Sudo-only approval must show host-named red bubble with no green SSH revoke");
+      const sudoChip = chips.firstElementChild;
+      send(12, [], [{ ...sudoOnly, agent: "Grok" }]);
+      assert(chips.firstElementChild === sudoChip
+        && sudoChip.querySelector(":scope > .grant-name").textContent.includes("[Grok-")
+        && sudoChip.querySelector("button").title.includes("[Grok-")
+        && sudoChip.querySelector("button").getAttribute("aria-label").includes("[Grok-"),
+      "Same-ID standalone root grant rename must update existing chip and accessible revoke label");
+      send(12, [], [sudoOnly]);
       chips.querySelector("button").click();
       await waitFor(() => posts.length === 6 && chips.children.length === 0,
         "Revoking sudo-only bubble must clear it without affecting connection");
@@ -1072,6 +1093,13 @@
         expires_at: Date.now() / 1000 + 3600 }]);
       assert(chips.querySelector(".grant-name").textContent === "demo-node-d[Claude]",
         "Agent-wide timed grant must show the agent name without session number");
+      const agentChip = chips.firstElementChild;
+      send(20, [], [{ ...serverGrants[0], agent: "Grok" }]);
+      assert(chips.firstElementChild === agentChip
+        && agentChip.querySelector(".grant-name").textContent === "demo-node-d[Grok]"
+        && agentChip.querySelector("button").title.includes("demo-node-d[Grok]")
+        && agentChip.querySelector("button").getAttribute("aria-label").includes("demo-node-d[Grok]"),
+      "Same-ID agent-wide rename must update visible label and revocation accessibility");
       const unknownGrants = [
         { id: "unknown-a-host", kind: "host", host: "demo-node-a", agent: "Unknown",
           grant_scope: "agent", client_disambiguator: "a1b2c3d4e5f6",

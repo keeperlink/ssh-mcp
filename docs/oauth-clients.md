@@ -162,9 +162,12 @@ JSON and oversized bodies) is rate-limited; the existing 4,096-registration
 cap remains. OAuth sessions and tokens retain their independent expiry.
 Approved names are loaded into a process-local map at startup and the entire
 map is refreshed after registration, operator name approval, or revocation;
-History and approval rendering never query SQLite per record. Administrative
-revocation through the separate CLI requires restarting the service to refresh
-the running process's display-name cache. Preserve the existing private SQLite
+History and approval rendering never query SQLite per record. The administrative
+CLI asks the running service to reload its name map through the owner-only
+control socket (including no-op revocations). If the socket cannot be reached,
+the CLI reports exit 2 after the database change; restart SSH-MCP before
+relying on the display. For deliberate maintenance while the service is
+stopped, pass `--offline` and restart afterward. Preserve the private SQLite
 volume across upgrades and rollbacks.
 
 ### Operator-approved DCR agent names
@@ -193,8 +196,15 @@ To revoke a verified client ID and all its active OAuth sessions:
 python -m app.dcr_admin --db /PATH/TO/jobs.sqlite revoke dcr_EXACT_ID --confirm-id dcr_EXACT_ID
 ```
 
-Use the exact returned ID, not the self-reported display name. A successful
-administrative removal is committed with a durable, sanitized audit record
+Use the exact returned ID, not the self-reported display name. The CLI
+must reach the running service's local control socket to refresh its name
+cache. When running outside that container, execute it in the service
+namespace or explicitly use `--offline` while the service is stopped, then
+restart the service. Offline revocations skip notification; a missing socket
+in normal mode returns exit 2, even though the SQL change is already
+committed. Do not blindly retry a completed revocation.
+
+A successful administrative removal is committed with a durable, sanitized audit record
 containing only the opaque client ID and removal time. This record is retained
 for at most 365 days and bounded to the most recent 4096 removals. No ordinary
 client can invoke this administrative capability through HTTP. Revoking a DCR

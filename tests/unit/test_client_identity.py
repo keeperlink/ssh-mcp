@@ -156,7 +156,8 @@ class ClientIdentityTests(unittest.TestCase):
             self.assertEqual(self.history.detail(job)["agent"], "Unknown")
             self.assertEqual(self.history.list({"agent": "unknown"})["jobs"][0]["id"], job)
             with patch("app.client_identity.approved_dcr_names", return_value={DCR: "Grok"}), (
-                    patch("app.history.approved_dcr_names", return_value={DCR: "Grok"})):
+                    patch("app.history.approved_dcr_names", return_value={DCR: "Grok"})), (
+                    patch("app.history.agent_names_snapshot", return_value=("v-identity", {DCR: "Grok"}))):
                 items = self.history.list({"agent": "Grok"})["jobs"]
                 self.assertEqual({item["id"] for item in items}, {job})
                 self.assertEqual(items[0]["agent"], "Grok")

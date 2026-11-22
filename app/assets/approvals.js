@@ -253,14 +253,17 @@
       + (grant.client_disambiguator ? "-" + grant.client_disambiguator : "");
     return grant.host + "[" + agent + (number ? "-" + number : "") + "]";
   }
-  function revokeButton(grant, name) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "×";
+  function updateRevokeLabel(button, grant, name) {
     button.title = (grant.kind === "root" ? "Revoke root grant" : "Revoke host grant")
       + " for " + name;
     button.setAttribute("aria-label", "Revoke "
       + (grant.kind === "root" ? "root" : "host access") + " for " + name);
+  }
+  function revokeButton(grant, name) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "×";
+    updateRevokeLabel(button, grant, name);
     button.addEventListener("click", () => submit(
       "/console/api/grants/" + encodeURIComponent(grant.id) + "/revoke",
       {}, grant.id, true
@@ -321,6 +324,9 @@
         chip.append(name, timer, revokeButton(host, name.textContent));
         container.append(chip);
       }
+      const hostName = grantName(host);
+      chip.querySelector(":scope > .grant-name").textContent = hostName;
+      updateRevokeLabel(chip.querySelector(":scope > button"), host, hostName);
       const timer = chip.querySelector(":scope > .grant-countdown");
       timer.hidden = Boolean(root) &&
         Math.abs(Number(host.expires_at) - Number(root.expires_at)) < 1;
@@ -332,6 +338,7 @@
           section = rootSection(root, grantName(host));
           chip.insertBefore(section, chip.lastElementChild);
         }
+        updateRevokeLabel(section.querySelector("button"), root, hostName);
         section.querySelector(".grant-countdown").textContent =
           countdown(remaining(root.expires_at));
       } else {
@@ -352,6 +359,9 @@
         chip.append(name, rootSection(root, name.textContent));
         container.append(chip);
       }
+      const rootName = grantName(root);
+      chip.querySelector(":scope > .grant-name").textContent = rootName;
+      updateRevokeLabel(chip.querySelector(".grant-root-detail button"), root, rootName);
       chip.querySelector(".grant-countdown").textContent =
         countdown(remaining(root.expires_at));
     }

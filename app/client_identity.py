@@ -18,12 +18,16 @@ def approved_dcr_names() -> Mapping[str, str]:
     return dcr_store().approved_names
 
 
-def agent_names_revision() -> int:
-    """Monotonic within the running server, including full no-op reloads."""
+def agent_names_snapshot() -> tuple[str, Mapping[str, str]]:
+    """Read names and restart-unique revision from the same published map."""
     if not (os.getenv("SSH_JOBS_DB") or os.getenv("MCP_OAUTH_DB")):
-        return 0
+        return "", {}
     from .oauth import dcr_store
-    return dcr_store().names_revision
+    return dcr_store().names_snapshot
+
+
+def agent_names_revision() -> str:
+    return agent_names_snapshot()[0]
 
 
 def agent_label(client_id: str | None, labels: dict[str, str]) -> str:

@@ -146,18 +146,21 @@ class DCRStore:
                 );
             """)
         self._mutation_lock = threading.RLock()
-        self._approved_names: Mapping[str, str] = MappingProxyType({})
-        self._names_revision = 0
+        self._names_state: tuple[str, Mapping[str, str]] = ("", MappingProxyType({}))
         self.reload_names()
 
     @property
-    def approved_names(self) -> Mapping[str, str]:
-        """Process-local snapshot, replaced atomically only after successful commit."""
-        return self._approved_names
+    def names_snapshot(self) -> tuple[str, Mapping[str, str]]:
+        """One immutable name map and restart-unique version, read together."""
+        return self._names_state
 
     @property
-    def names_revision(self) -> int:
-        return self._names_revision
+    def approved_names(self) -> Mapping[str, str]:
+        return self._names_state[1]
+
+    @property
+    def names_revision(self) -> str:
+        return self._names_state[0]
 
     @staticmethod
     def _snapshot(db: sqlite3.Connection) -> Mapping[str, str]:
@@ -171,8 +174,9 @@ class DCRStore:
         return MappingProxyType(names)
 
     def _publish_names(self, snapshot: Mapping[str, str]) -> None:
-        self._approved_names = snapshot
-        self._names_revision += 1
+        # Random revision is also unique across service restarts, without a
+        # persistent sequence or schema migration. Publish both as one object.
+        self._names_state = (secrets.token_hex(16), snapshot)
 
     def reload_names(self) -> None:
         """Refresh after startup/external mutation; never publish a partial map."""
