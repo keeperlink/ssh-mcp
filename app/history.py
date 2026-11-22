@@ -36,6 +36,7 @@ from .jobs import JobStore
 from .readiness import ReadinessMonitor
 from .ssh_executor import SSHExecutor
 from .sealed_credentials import validate_verifier, verify_password
+from .auth_workers import run_auth
 
 if TYPE_CHECKING:
     from .jobs import JobManager
@@ -679,7 +680,11 @@ class ViewerAuth:
             )""")
             if verifier is not None:
                 # No secondary PBKDF2 verifier in the durable audit store.
-                # Drop the old schema transactionally on first v2 activation.
+                # This migration is gated at service startup until the
+                # explicitly approved DB backup, cutover and recovery plan.
+                # Secure deletion covers freed SQLite pages, not historical
+                # backups or journal/WAL data; those require offline cleanup.
+                db.execute("PRAGMA secure_delete=ON")
                 columns = {row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")}
                 if columns and columns != {"id", "generation"}:
                     db.execute("DROP TABLE history_auth_state")
@@ -1158,7 +1163,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         if not _same_origin(request) or not _csrf_ok(request, data):
             return _json({"error": "Request forbidden"}, 403)
         ip = request.client.host if request.client else "unknown"
-        session = await run_in_threadpool(auth.login, ip, data.get("password", ""))
+        session = await run_auth(auth.login, ip, data.get("password", ""))
         if session is None:
             return HTMLResponse(_login_page(data["csrf"], failed=True), status_code=401, headers=_headers())
         response = RedirectResponse("/console", status_code=303, headers=_headers())

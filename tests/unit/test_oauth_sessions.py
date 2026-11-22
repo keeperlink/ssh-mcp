@@ -1,6 +1,7 @@
 """TEST-214 persistent refresh token security; all fixtures are synthetic and local."""
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from contextlib import redirect_stdout
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
 os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
@@ -412,6 +414,54 @@ class RefreshEndpointTests(unittest.TestCase):
                 "session_ttl_seconds": "3600",
             }, follow_redirects=False)
             self.assertIn("access_denied", rejected.headers["location"])
+
+    def test_v2_parallel_consent_reserves_oauth_retry_budget(self):
+        from urllib.parse import parse_qs, urlparse
+        import re
+        response = self.client.get("/oauth/authorize", params={
+            "client_id": CLIENT, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256", "resource": config.MCP_RESOURCE,
+            "scope": "mcp.access",
+        })
+        request_token = re.search(r'name="request_token" value="([^"]+)"',
+                                  response.text).group(1)
+        oauth._LOGIN_FAILURES.clear()
+        oauth._LOGIN_INFLIGHT.clear()
+        self.addCleanup(oauth._LOGIN_FAILURES.clear)
+        self.addCleanup(oauth._LOGIN_INFLIGHT.clear)
+        count = oauth.MCP_LOGIN_MAX_FAILURES
+
+        async def slow_invalid(*_args):
+            await asyncio.sleep(0.08)
+            return False
+
+        async def attempt():
+            async with AsyncClient(transport=ASGITransport(app=self.app),
+                                   base_url="http://testserver",
+                                   follow_redirects=False) as client:
+                results = await asyncio.gather(*(client.post(
+                    "/oauth/authorize", data={
+                        "request_token": request_token,
+                        "mcp_login_key": "invalid-test-password",
+                        "session_ttl_seconds": "3600",
+                    },
+                ) for _ in range(count + 8)))
+            return results
+
+        with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+              patch.object(config, "MCP_LOGIN_VERIFIER",
+                           create_verifier(config.MCP_LOGIN_KEY, "oauth-login")),
+              patch.object(oauth, "run_auth", side_effect=slow_invalid)):
+            results = asyncio.run(attempt())
+        self.assertEqual(sum(res.status_code == 429 for res in results), 8)
+        self.assertEqual(sum(
+            res.status_code == 302 and
+            "access_denied" in parse_qs(urlparse(res.headers["location"]).query).get("error", [])
+            for res in results
+        ), count)
+        self.assertEqual(sum(len(x) for x in oauth._LOGIN_FAILURES.values()), count)
+        self.assertFalse(oauth._LOGIN_INFLIGHT)
 
     def test_no_database_configuration_or_unsupported_grant(self):
         with patch.dict(os.environ, {"MCP_OAUTH_DB": "", "SSH_JOBS_DB": ""}):

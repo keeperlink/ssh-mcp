@@ -50,6 +50,11 @@ class VerifierTests(unittest.TestCase):
             self.assertFalse(verify_password(invalid, valid, "console-login"))
         with self.assertRaises(InvalidCredential):
             create_verifier("🔒" * 8, "console-login")  # 32 UTF-8 bytes, only 8 chars
+        with self.assertRaises(InvalidCredential):
+            create_verifier("c" * 257, "console-login")
+        verifier = create_verifier("é" * 256, "console-login")
+        self.assertTrue(verify_password("é" * 256, verifier, "console-login"))
+        self.assertFalse(verify_password("é" * 257, verifier, "console-login"))
 
     def test_metrics_token_verification(self):
         original = "synthetic-high-entropy-bearer-" + "a" * 40
@@ -189,6 +194,16 @@ class MigrationTests(unittest.TestCase):
             rotate_console(source, old_password=PASSWORD,
                            new_password=PASSWORD+"-rotated", hosts={},
                            deployment=BIND["deployment"], issuer=BIND["issuer"])
+        with self.assertRaises(InvalidCredential):
+            rotate_console(source, old_password=PASSWORD, new_password="c" * 257,
+                           hosts=self.hosts, deployment=BIND["deployment"], issuer=BIND["issuer"])
+
+    def test_conversion_rejects_unusable_long_console_password(self):
+        self.legacy["viewer_password"] = "v" * 257
+        with self.assertRaises(InvalidCredential):
+            from_legacy(self.legacy, console_password="v" * 257,
+                        deployment=BIND["deployment"], issuer=BIND["issuer"],
+                        hosts=self.hosts)
 
     def test_console_rekey_rejects_cross_credential_reuse_and_short_unicode(self):
         source = self.convert()

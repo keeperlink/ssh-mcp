@@ -104,9 +104,19 @@ def _read(path: Path, limit: int) -> str:
     return path.read_text("utf-8")
 
 
-def _json(path: Path, limit: int) -> dict[str, Any]:
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate member in managed JSON")
+        result[key] = value
+    return result
+
+
+def _json(path: Path, limit: int, *, reject_duplicates: bool = False) -> dict[str, Any]:
     try:
-        value = json.loads(_read(path, limit))
+        value = json.loads(_read(path, limit),
+                           object_pairs_hook=_unique_members if reject_duplicates else None)
     except (ValueError, OSError, UnicodeError) as exc:
         raise ValueError("Invalid mounted JSON configuration") from exc
     if type(value) is not dict:
@@ -217,7 +227,7 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
     os.umask(0o077)
     cfg = _json(config_source, 65536)
     _valid_settings(cfg)
-    secrets = _json(secrets_source, 65536)
+    secrets = _json(secrets_source, 65536, reject_duplicates=True)
     sealed = type(secrets.get("version")) is int and secrets["version"] == 2
     if sealed:
         validate_v2_secrets(secrets)

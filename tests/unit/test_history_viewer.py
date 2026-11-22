@@ -1267,6 +1267,47 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(len(auth.failed["same-ip"]), LOGIN_MAX_FAILURES)
         self.assertIsNone(auth.login("same-ip", self.secret))
 
+    def test_v2_maximum_console_password_signs_in_via_real_form(self):
+        maximum = "é" * 256
+        with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+              patch.object(config, "HISTORY_VIEWER_VERIFIER",
+                           create_verifier(maximum, "console-login")),
+              patch.object(config, "HISTORY_VIEWER_GENERATION", "d" * 32)):
+            app = FastAPI()
+            app.include_router(create_history_router(self.store))
+            with TestClient(app, base_url="https://lab.example.net",
+                            follow_redirects=False) as client:
+                page = client.get("/console/login")
+                self.assertIn('maxlength="256"', page.text)
+                csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+                response = client.post(
+                    "/console/login", data={"csrf": csrf, "password": maximum},
+                    headers={"Origin": config.MCP_ISSUER},
+                )
+                self.assertEqual(response.status_code, 303)
+                self.assertIn(SESSION_COOKIE, client.cookies)
+
+    def test_v2_migration_recovery_uses_preserved_pre_cutover_backup(self):
+        legacy = ViewerAuth(HistoryStore(self.store), self.secret)
+        token = legacy.login("pre-cutover", self.secret)
+        backup_path = Path(self.temp.name) / "private" / "pre-cutover.sqlite"
+        with self.store._connect() as original, sqlite3.connect(backup_path) as backup:
+            original.backup(backup)
+        backup_path.chmod(0o600)  # SQLite's default umask may create 0644 fixtures.
+        verifier = create_verifier(self.secret, "console-login")
+        upgraded = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                              generation="e" * 32)
+        self.assertFalse(upgraded.valid(token))
+        with self.store._connect() as db:
+            self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
+                             {"id", "generation"})
+        restored_jobs = JobStore(backup_path)
+        restored_auth = ViewerAuth(HistoryStore(restored_jobs), self.secret)
+        self.assertTrue(restored_auth.valid(token))
+        with restored_jobs._connect() as db:
+            self.assertEqual({row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")},
+                             {"id", "salt", "verifier", "generation"})
+
     def test_browser_displays_safe_error_without_interpreting_html(self):
         self.login()
         identifier = self.save("alice")

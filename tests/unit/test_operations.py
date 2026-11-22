@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from starlette.concurrency import run_in_threadpool
 
 os.environ.setdefault("MCP_ISSUER", "http://localhost")
 os.environ.setdefault("MCP_LOGIN_KEY", "synthetic-test-login-" + "a" * 40)
@@ -24,6 +26,7 @@ from app.contracts import ExecuteCommandRequest
 from app.jobs import JobStore
 from app.oauth_sessions import SessionStore
 from app.observability import create_observability_router
+from app.auth_workers import run_auth
 from app.sealed_credentials import create_token_verifier
 from ops import history_db
 from ops.history_db import backup, restore, verify
@@ -31,6 +34,22 @@ from app import main as main_app
 
 
 class OperationalTests(unittest.TestCase):
+    def test_waiting_password_requests_do_not_exhaust_shared_workers(self):
+        gate = threading.Event()
+
+        def slow_auth() -> bool:
+            return gate.wait(2)
+
+        async def exercise() -> bool:
+            requests = [asyncio.create_task(run_auth(slow_auth)) for _ in range(75)]
+            try:
+                await asyncio.sleep(0.05)
+                return await asyncio.wait_for(run_in_threadpool(lambda: True), timeout=0.4)
+            finally:
+                gate.set()
+                await asyncio.gather(*requests)
+
+        self.assertTrue(asyncio.run(exercise()))
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

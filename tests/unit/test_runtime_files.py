@@ -65,6 +65,37 @@ class SignedConfigurationTests(unittest.TestCase):
             self.prepare()
         self.assertEqual(list(self.target.iterdir()), [])
 
+    def test_managed_v2_rejects_duplicate_members_at_any_level(self):
+        original = fixture_secret()
+        converted = from_legacy(
+            original, console_password=original["viewer_password"],
+            deployment=self.settings["environment"], issuer=self.settings["oauth"]["issuer"],
+            hosts={"demo-node-b": "gateway"},
+        )
+        converted["sealed_sudo"] = {
+            "demo-node-b": from_legacy(
+                {**original, "sudo_passwords": {"demo-node-b": "synthetic-sudo"}},
+                console_password=original["viewer_password"],
+                deployment=self.settings["environment"],
+                issuer=self.settings["oauth"]["issuer"],
+                hosts={"demo-node-b": "gateway"},
+            )["sealed_sudo"]["demo-node-b"]
+        }
+        prepared = json.dumps(converted)
+        for index, malformed in enumerate((
+            prepared.replace('"version": 2', '"version": 1, "version": 2', 1),
+            prepared.replace('"algorithm": "argon2id"',
+                             '"algorithm": "unknown", "algorithm": "argon2id"', 1),
+            prepared.replace('"ciphertext": ', '"ciphertext": "bad", "ciphertext": ', 1),
+        )):
+            with self.subTest(index=index):
+                self.secrets.write_text(malformed)
+                target = self.root / f"duplicate-v2-{index}"
+                target.mkdir(mode=0o700)
+                with self.assertRaisesRegex(ValueError, "Invalid mounted JSON"):
+                    prepare(self.config, self.secrets, self.inventory, self.known, target)
+                self.assertEqual(list(target.iterdir()), [])
+
     def test_v2_config_accepts_only_sealed_verifiers_and_rejects_mixed_mode(self):
         from app import config
         original = fixture_secret()
@@ -81,16 +112,19 @@ class SignedConfigurationTests(unittest.TestCase):
             HISTORY_VIEWER_GENERATION=converted["viewer_generation"],
             MCP_METRICS_VERIFIER=converted["metrics_verifier"],
         ), patch.dict(os.environ, {"HISTORY_VIEWER_PASSWORD": "", "MCP_METRICS_TOKEN": ""})):
-            config.validate_mcp_config()
-            with patch.object(config, "MCP_LOGIN_KEY", original["oauth_login_key"]):
-                with self.assertRaisesRegex(RuntimeError, "must not load plaintext"):
-                    config.validate_mcp_config()
-            with patch.object(config, "MCP_LOGIN_VERIFIER", {"algorithm": "unknown"}):
-                with self.assertRaises(ValueError):
-                    config.validate_mcp_config()
-            with patch.object(config, "HISTORY_VIEWER_GENERATION", "invalid"):
-                with self.assertRaisesRegex(RuntimeError, "generation"):
-                    config.validate_mcp_config()
+            with self.assertRaisesRegex(RuntimeError, "requires completed"):
+                config.validate_mcp_config()
+            with patch.object(config, "SEALED_RUNTIME_READY", True):
+                config.validate_mcp_config()
+                with patch.object(config, "MCP_LOGIN_KEY", original["oauth_login_key"]):
+                    with self.assertRaisesRegex(RuntimeError, "must not load plaintext"):
+                        config.validate_mcp_config()
+                with patch.object(config, "MCP_LOGIN_VERIFIER", {"algorithm": "unknown"}):
+                    with self.assertRaises(ValueError):
+                        config.validate_mcp_config()
+                with patch.object(config, "HISTORY_VIEWER_GENERATION", "invalid"):
+                    with self.assertRaisesRegex(RuntimeError, "generation"):
+                        config.validate_mcp_config()
 
 
     def test_privileged_access_policy_is_opt_in_and_signed(self):

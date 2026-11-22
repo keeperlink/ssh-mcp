@@ -30,6 +30,10 @@ def _csv_env(name: str, default: str = "") -> list[str]:
 
 MCP_LOGIN_KEY = os.getenv("MCP_LOGIN_KEY", "")
 MCP_MANAGED_SECRETS_VERSION = os.getenv("MCP_MANAGED_SECRETS_VERSION", "")
+# Stage 2 is intentionally non-deployable: root grant scoping, locked-host
+# readiness and a recoverable database cutover must be implemented before
+# an image can accept an active v2 secret. Not controllable by environment.
+SEALED_RUNTIME_READY = False
 MCP_LOGIN_VERIFIER = json.loads(os.getenv("MCP_LOGIN_VERIFIER", "null"))
 HISTORY_VIEWER_VERIFIER = json.loads(os.getenv("HISTORY_VIEWER_VERIFIER", "null"))
 HISTORY_VIEWER_GENERATION = os.getenv("HISTORY_VIEWER_GENERATION", "")
@@ -110,6 +114,8 @@ def validate_mcp_config() -> None:
         validate_token_verifier(MCP_METRICS_VERIFIER)
         if re.fullmatch("[0-9a-f]{32}", HISTORY_VIEWER_GENERATION) is None:
             raise RuntimeError("Invalid Console secret generation")
+        if not SEALED_RUNTIME_READY:
+            raise RuntimeError("Sealed runtime activation requires completed SKY-347 cutover")
     elif len(MCP_LOGIN_KEY) < 32:
         raise RuntimeError("MCP_LOGIN_KEY must contain at least 32 characters")
     if len(MCP_TOKEN_SIGNING_SECRET) < 32:
