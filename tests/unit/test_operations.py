@@ -24,6 +24,7 @@ from app.contracts import ExecuteCommandRequest
 from app.jobs import JobStore
 from app.oauth_sessions import SessionStore
 from app.observability import create_observability_router
+from app.sealed_credentials import create_token_verifier
 from ops import history_db
 from ops.history_db import backup, restore, verify
 from app import main as main_app
@@ -96,6 +97,22 @@ class OperationalTests(unittest.TestCase):
             response = client.get("/metrics", headers={"Authorization": "Bearer " + self.secret})
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("hidden path", response.text)
+
+    def test_v2_metrics_verifier_requires_valid_bearer_without_plaintext(self):
+        verifier = create_token_verifier(self.secret)
+        self.assertNotIn(self.secret, repr(verifier))
+        app = FastAPI()
+        app.include_router(create_observability_router(self.store, "", verifier=verifier))
+        with TestClient(app) as client:
+            for header in ({}, {"Authorization": "Bearer invalid"},
+                           {"Authorization": self.secret},
+                           {"Authorization": "Bearer " + self.secret + "x"}):
+                self.assertEqual(client.get("/metrics", headers=header).status_code, 401)
+            response = client.get("/metrics", headers={"Authorization": "Bearer " + self.secret})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        with self.assertRaises(RuntimeError):
+            create_observability_router(self.store, self.secret, verifier=verifier)
 
     def test_ready_checks_db_without_spilling_exceptions(self):
         class Registry:

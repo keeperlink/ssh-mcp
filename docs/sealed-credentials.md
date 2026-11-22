@@ -1,11 +1,26 @@
 # Sealed managed credential format (SKY-347)
 
-The v2 primitives in `app/sealed_credentials.py` are the **first, offline
-development stage**, not yet a deployed authentication mechanism. Do not put
-v2 secrets into a running SSH-MCP deployment until the signed-config reader,
-OAuth/Console/metrics authentication, privileged approval flow and readiness
-monitor support v2 and complete LAB acceptance. The current production image
-does not consume the new format.
+The v2 cryptographic primitives and **OAuth, Console, and metrics verifier
+wiring** are implemented as separate development stages. This is **not yet
+deployable**: the privileged grant popup, per-scope in-memory sudo unlock,
+locked readiness checks, operator provisioning and LAB acceptance are still
+required. Do not put v2 secrets into a running SSH-MCP deployment or sign an
+image for rollout until the remaining SKY-347 gates are met.
+
+The signed managed reader accepts a v2 secret revision and passes only
+one-way verifiers and a Console session-generation marker to authentication
+and metrics code. It never exports the original OAuth, Console or metrics
+credential in process environment variables. The Console's durable session
+state replaces the old auxiliary PBKDF2 verifier with a generation-only row
+when v2 is first activated; new generations invalidate previous cookies.
+Argon2id verification runs outside async request handling, with bounded
+concurrent memory pressure.
+
+**Temporary compatibility boundary:** the old managed v1 schema remains
+accepted solely to preserve existing offline fixtures and current deployed
+behavior during staged development. The final sealed cutover must reject v1
+without fallback; root operation while v2 is sealed cannot be accepted until
+the separately reviewed unlock/readiness implementation lands.
 
 ## Threat boundary
 

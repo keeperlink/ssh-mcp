@@ -34,6 +34,7 @@ from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
 from .readiness import ReadinessMonitor
 from .ssh_executor import SSHExecutor
+from .sealed_credentials import validate_verifier, verify_password
 
 if TYPE_CHECKING:
     from .jobs import JobManager
@@ -649,11 +650,17 @@ class HistoryStore:
 class ViewerAuth:
     """Separate viewer-password check and revocable, idle-bound sessions."""
 
-    def __init__(self, store: HistoryStore, password: str):
-        if len(password) < 16 or password in {config.MCP_LOGIN_KEY}:
+    def __init__(self, store: HistoryStore, password: str, *,
+                 verifier: dict[str, Any] | None = None, generation: str | None = None):
+        if verifier is not None:
+            if password or generation is None or re.fullmatch(r"[0-9a-f]{32}", generation) is None:
+                raise RuntimeError("Invalid managed Console verifier configuration")
+            validate_verifier(verifier)
+        elif len(password) < 16 or password in {config.MCP_LOGIN_KEY}:
             raise RuntimeError("Viewer password must be distinct and contain 16+ characters")
         self.store = store
         self.password = password
+        self.verifier = verifier
         self.failed: dict[str, deque[float]] = defaultdict(deque)
         with self.store._connect() as db:
             # A password change revokes all old cookies, including after a restart.
@@ -665,6 +672,27 @@ class ViewerAuth:
                 last_seen REAL NOT NULL,
                 generation TEXT NOT NULL
             )""")
+            if verifier is not None:
+                # No secondary PBKDF2 verifier in the durable audit store.
+                # Drop the old schema transactionally on first v2 activation.
+                columns = {row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")}
+                if columns and columns != {"id", "generation"}:
+                    db.execute("DROP TABLE history_auth_state")
+                    db.execute("DELETE FROM history_sessions")
+                db.execute("""CREATE TABLE IF NOT EXISTS history_auth_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    generation TEXT NOT NULL
+                )""")
+                stored = db.execute(
+                    "SELECT generation FROM history_auth_state WHERE id=1"
+                ).fetchone()
+                self.generation = generation
+                if stored is None or stored["generation"] != generation:
+                    db.execute("DELETE FROM history_sessions")
+                    db.execute("""INSERT INTO history_auth_state(id,generation)
+                        VALUES(1,?) ON CONFLICT(id) DO UPDATE SET
+                        generation=excluded.generation""", (generation,))
+                return
             db.execute("""CREATE TABLE IF NOT EXISTS history_auth_state (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 salt BLOB NOT NULL,
@@ -683,14 +711,16 @@ class ViewerAuth:
             else:
                 self.generation = secrets.token_hex(16)
                 salt = secrets.token_bytes(16)
-                verifier = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200000)
+                pbkdf_verifier = hashlib.pbkdf2_hmac(
+                    "sha256", password.encode("utf-8"), salt, 200000,
+                )
                 db.execute("DELETE FROM history_sessions")
                 db.execute("""INSERT INTO history_auth_state(id,salt,verifier,generation)
                     VALUES(1,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
                       salt=excluded.salt,verifier=excluded.verifier,
                       generation=excluded.generation""",
-                    (salt, verifier, self.generation),
+                    (salt, pbkdf_verifier, self.generation),
                 )
 
     def allowed(self, ip: str) -> bool:
@@ -703,7 +733,10 @@ class ViewerAuth:
     def login(self, ip: str, password: str) -> str | None:
         if not self.allowed(ip):
             return None
-        if not secrets.compare_digest(password, self.password):
+        accepted = (verify_password(password, self.verifier, "console-login")
+                    if self.verifier is not None else
+                    secrets.compare_digest(password, self.password))
+        if not accepted:
             self.failed[ip].append(time.time())
             return None
         self.failed.pop(ip, None)
@@ -1040,7 +1073,10 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
     """Create browser-only routes; operator actions never execute SSH commands."""
     secret = os.getenv("HISTORY_VIEWER_PASSWORD", "")
     store = HistoryStore(jobs)
-    auth = ViewerAuth(store, secret)
+    auth = (ViewerAuth(store, "", verifier=config.HISTORY_VIEWER_VERIFIER,
+                       generation=config.HISTORY_VIEWER_GENERATION)
+            if config.MCP_MANAGED_SECRETS_VERSION == "2" else
+            ViewerAuth(store, secret))
     router = APIRouter()
     # Serialize logout and final approval decisions; the SQLite check is
     # deliberately off-loop, and mutations occur before releasing this lock.
@@ -1115,7 +1151,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         if not _same_origin(request) or not _csrf_ok(request, data):
             return _json({"error": "Request forbidden"}, 403)
         ip = request.client.host if request.client else "unknown"
-        session = auth.login(ip, data.get("password", ""))
+        session = await run_in_threadpool(auth.login, ip, data.get("password", ""))
         if session is None:
             return HTMLResponse(_login_page(data["csrf"], failed=True), status_code=401, headers=_headers())
         response = RedirectResponse("/console", status_code=303, headers=_headers())

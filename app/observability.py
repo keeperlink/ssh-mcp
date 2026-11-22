@@ -8,16 +8,22 @@ from fastapi.responses import Response
 from .jobs import JobStore, TERMINAL, DURATION_BUCKETS
 from . import config
 import os
+from typing import Any
+from .sealed_credentials import validate_token_verifier, verify_token
 
 STATES = tuple(sorted(TERMINAL | {"queued", "running"}))
 PLAIN = "text/plain; version=0.0.4; charset=utf-8"
 NO_STORE = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
-def create_observability_router(store: JobStore, token: str) -> APIRouter:
-    if len(token) < 32 or token in {
-        config.MCP_LOGIN_KEY,
-        os.getenv("HISTORY_VIEWER_PASSWORD", ""),
+def create_observability_router(store: JobStore, token: str, *,
+                                verifier: dict[str, Any] | None = None) -> APIRouter:
+    if verifier is not None:
+        if token:
+            raise RuntimeError("Sealed metrics mode cannot receive a plaintext token")
+        validate_token_verifier(verifier)
+    elif len(token) < 32 or token in {
+        config.MCP_LOGIN_KEY, os.getenv("HISTORY_VIEWER_PASSWORD", ""),
     }:
         raise RuntimeError("Metrics require an independent 32+ character bearer secret")
     router = APIRouter()
@@ -25,7 +31,10 @@ def create_observability_router(store: JobStore, token: str) -> APIRouter:
     @router.get("/metrics")
     def metrics(request: Request) -> Response:
         supplied = request.headers.get("authorization", "")
-        if not hmac.compare_digest(supplied, "Bearer " + token):
+        accepted = (supplied.startswith("Bearer ") and
+                    verify_token(supplied[7:], verifier)) if verifier is not None else (
+                    hmac.compare_digest(supplied, "Bearer " + token))
+        if not accepted:
             return Response(status_code=401, headers=NO_STORE)
         try:
             with store._connect() as db:

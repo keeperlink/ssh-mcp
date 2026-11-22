@@ -29,6 +29,7 @@ from app.history import (
 )
 from app.jobs import JobManager, JobStore
 from app.ssh_executor import SSHDenied, SSHResult
+from app.sealed_credentials import create_verifier
 
 
 def request(*argv: str, story_id: str | None = "TEST-209") -> ExecuteCommandRequest:
@@ -1215,6 +1216,44 @@ class BrowserTests(unittest.TestCase):
         self.assertFalse(restored.valid(new_token))
         self.assertFalse(restored.valid(old_token))  # rotation back never revives old tokens
         self.assertTrue(restored.valid(restored.login("operator", self.secret)))
+
+    def test_v2_auth_migrates_away_secondary_verifier_and_tracks_generation(self):
+        legacy = ViewerAuth(HistoryStore(self.store), self.secret)
+        legacy_cookie = legacy.login("legacy", self.secret)
+        self.assertTrue(legacy.valid(legacy_cookie))
+        verifier = create_verifier(self.secret, "console-login")
+        first = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                           generation="a" * 32)
+        self.assertFalse(first.valid(legacy_cookie))
+        self.assertIsNone(first.login("user", "wrong"))
+        cookie = first.login("user", self.secret)
+        self.assertTrue(first.valid(cookie))
+        with self.store._connect() as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")}
+            self.assertEqual(columns, {"id", "generation"})
+        restarted = ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                               generation="a" * 32)
+        self.assertTrue(restarted.valid(cookie))
+        rotated = ViewerAuth(HistoryStore(self.store), "",
+                             verifier=create_verifier(self.secret + "-rotated", "console-login"),
+                             generation="b" * 32)
+        self.assertFalse(first.valid(cookie))
+        self.assertFalse(rotated.valid(cookie))
+        self.assertIsNone(first.login("user", self.secret))
+        rotated_cookie = rotated.login("user", self.secret + "-rotated")
+        self.assertTrue(rotated.valid(rotated_cookie))
+
+    def test_v2_rejects_mixed_password_and_invalid_generation(self):
+        verifier = create_verifier(self.secret, "console-login")
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed"):
+            ViewerAuth(HistoryStore(self.store), self.secret,
+                       verifier=verifier, generation="a" * 32)
+        with self.assertRaisesRegex(RuntimeError, "Invalid managed"):
+            ViewerAuth(HistoryStore(self.store), "", verifier=verifier,
+                       generation="not-a-generation")
+        with self.assertRaises(ValueError):
+            ViewerAuth(HistoryStore(self.store), "", verifier={"invalid": True},
+                       generation="a" * 32)
 
     def test_browser_displays_safe_error_without_interpreting_html(self):
         self.login()

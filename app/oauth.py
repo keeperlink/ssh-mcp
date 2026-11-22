@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlencode
 import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 from mcp.server.auth.provider import AccessToken
 
 from . import config
@@ -28,6 +29,7 @@ from .oauth_sessions import SessionStore, ClientRegistrationRevoked
 from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
 from .dcr_registry import DCRStore, RegistrationError
 from .form_body import read_bounded_body
+from .sealed_credentials import verify_password
 from .config import (
     MCP_ACCESS_TOKEN_TTL,
     MCP_SESSION_TTL_DEFAULT,
@@ -689,8 +691,13 @@ async def oauth_authorize_post(request: Request) -> Response:
         )
     if form.get("decision", "grant") != "grant":
         return _oauth_error("invalid_request", "Invalid authorization decision")
-    required_key = MCP_LOGIN_KEY
-    if not required_key or not secrets.compare_digest(supplied_key, required_key):
+    if config.MCP_MANAGED_SECRETS_VERSION == "2":
+        accepted = await run_in_threadpool(
+            verify_password, supplied_key, config.MCP_LOGIN_VERIFIER, "oauth-login",
+        )
+    else:
+        accepted = bool(MCP_LOGIN_KEY) and secrets.compare_digest(supplied_key, MCP_LOGIN_KEY)
+    if not accepted:
         await _record_login_failure(client_ip)
         return _authorization_error_redirect(
             redirect_uri,

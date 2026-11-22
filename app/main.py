@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
 from .config import MCP_LOG_LEVEL, MCP_OPERATOR_SUBJECT, validate_mcp_config
+from . import config
 from .control import SOCKET, control_server
 from .request_trace import RequestTrace
 from .approvals import ApprovalManager
@@ -117,7 +118,9 @@ if os.getenv("MCP_METRICS_ENABLED", "false").lower() == "true":
         raise RuntimeError("Metrics require enabled durable jobs")
     from .observability import create_observability_router
     app.include_router(create_observability_router(
-        jobs.store, os.getenv("MCP_METRICS_TOKEN", "")
+        jobs.store, os.getenv("MCP_METRICS_TOKEN", ""),
+        verifier=(config.MCP_METRICS_VERIFIER
+                  if config.MCP_MANAGED_SECRETS_VERSION == "2" else None),
     ))
 
 

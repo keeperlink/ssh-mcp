@@ -27,6 +27,7 @@ os.environ.setdefault("MCP_CIMD_VALIDATE_REMOTE", "false")
 from app import config, oauth, oauth_session_cli
 from app.jobs import JobStore
 from app.oauth_sessions import SessionStore
+from app.sealed_credentials import create_verifier
 from ops.history_db import backup, restore, verify
 
 CLIENT = "https://chatgpt.com/oauth/client.json"
@@ -389,6 +390,28 @@ class RefreshEndpointTests(unittest.TestCase):
         })
         self.assertEqual(result.status_code, 200, result.text)
         return result.json()
+
+    def test_v2_oauth_login_uses_argon2_verifier_not_legacy_key(self):
+        verifier = create_verifier(config.MCP_LOGIN_KEY, "oauth-login")
+        with (patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+              patch.object(config, "MCP_LOGIN_VERIFIER", verifier),
+              patch.object(oauth, "MCP_LOGIN_KEY", "old-plaintext-must-not-authenticate")):
+            issued = self.authorize()
+            self.assertIn("access_token", issued)
+            self.assertIn("refresh_token", issued)
+            response = self.client.get("/oauth/authorize", params={
+                "client_id": CLIENT, "redirect_uri": REDIRECT,
+                "response_type": "code", "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256", "resource": config.MCP_RESOURCE,
+                "scope": "mcp.access",
+            })
+            import re
+            token = re.search(r'name="request_token" value="([^"]+)"', response.text).group(1)
+            rejected = self.client.post("/oauth/authorize", data={
+                "request_token": token, "mcp_login_key": "old-plaintext-must-not-authenticate",
+                "session_ttl_seconds": "3600",
+            }, follow_redirects=False)
+            self.assertIn("access_denied", rejected.headers["location"])
 
     def test_no_database_configuration_or_unsupported_grant(self):
         with patch.dict(os.environ, {"MCP_OAUTH_DB": "", "SSH_JOBS_DB": ""}):

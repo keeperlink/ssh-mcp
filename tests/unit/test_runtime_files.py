@@ -9,8 +9,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from app.runtime_files import prepare
+from app.sealed_credentials import from_legacy
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,6 +30,69 @@ def fixture_secret():
 
 
 class SignedConfigurationTests(unittest.TestCase):
+    def test_v2_secrets_emit_only_verifiers_and_seal_sudo(self):
+        original = {**fixture_secret(), "sudo_passwords": {"demo-node-b": "synthetic-sudo-value"}}
+        converted = from_legacy(
+            original, console_password=original["viewer_password"],
+            deployment=self.settings["environment"], issuer=self.settings["oauth"]["issuer"],
+            hosts={"demo-node-b": "gateway"},
+        )
+        self.write(self.secrets, converted, 0o600)
+        env = self.prepare()
+        self.assertEqual(env["MCP_MANAGED_SECRETS_VERSION"], "2")
+        self.assertEqual(env["HISTORY_VIEWER_GENERATION"], converted["viewer_generation"])
+        self.assertEqual(json.loads(env["MCP_LOGIN_VERIFIER"]), converted["oauth_login_verifier"])
+        self.assertEqual(json.loads(env["HISTORY_VIEWER_VERIFIER"]), converted["viewer_verifier"])
+        self.assertEqual(json.loads(env["MCP_METRICS_VERIFIER"]), converted["metrics_verifier"])
+        for field in ("MCP_LOGIN_KEY", "HISTORY_VIEWER_PASSWORD", "MCP_METRICS_TOKEN"):
+            self.assertNotIn(field, env)
+        output = json.dumps(env) + (self.target / "inventory.json").read_text()
+        for secret in (original["oauth_login_key"], original["viewer_password"],
+                       original["metrics_token"], original["sudo_passwords"]["demo-node-b"]):
+            self.assertNotIn(secret, output)
+        self.assertEqual({p.name for p in self.target.iterdir()}, {"identity", "inventory.json"})
+
+    def test_v2_invalid_verifier_fails_before_private_file_creation(self):
+        original = fixture_secret()
+        converted = from_legacy(
+            original, console_password=original["viewer_password"],
+            deployment=self.settings["environment"], issuer=self.settings["oauth"]["issuer"],
+            hosts={"demo-node-b": "gateway"},
+        )
+        converted["oauth_login_verifier"]["iterations"] = 100000
+        self.write(self.secrets, converted, 0o600)
+        with self.assertRaises(ValueError):
+            self.prepare()
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_v2_config_accepts_only_sealed_verifiers_and_rejects_mixed_mode(self):
+        from app import config
+        original = fixture_secret()
+        converted = from_legacy(
+            original, console_password=original["viewer_password"],
+            deployment=self.settings["environment"], issuer=self.settings["oauth"]["issuer"],
+            hosts={"demo-node-b": "gateway"},
+        )
+        with (patch.multiple(
+            config,
+            MCP_MANAGED_SECRETS_VERSION="2", MCP_LOGIN_KEY="",
+            MCP_LOGIN_VERIFIER=converted["oauth_login_verifier"],
+            HISTORY_VIEWER_VERIFIER=converted["viewer_verifier"],
+            HISTORY_VIEWER_GENERATION=converted["viewer_generation"],
+            MCP_METRICS_VERIFIER=converted["metrics_verifier"],
+        ), patch.dict(os.environ, {"HISTORY_VIEWER_PASSWORD": "", "MCP_METRICS_TOKEN": ""})):
+            config.validate_mcp_config()
+            with patch.object(config, "MCP_LOGIN_KEY", original["oauth_login_key"]):
+                with self.assertRaisesRegex(RuntimeError, "must not load plaintext"):
+                    config.validate_mcp_config()
+            with patch.object(config, "MCP_LOGIN_VERIFIER", {"algorithm": "unknown"}):
+                with self.assertRaises(ValueError):
+                    config.validate_mcp_config()
+            with patch.object(config, "HISTORY_VIEWER_GENERATION", "invalid"):
+                with self.assertRaisesRegex(RuntimeError, "generation"):
+                    config.validate_mcp_config()
+
+
     def test_privileged_access_policy_is_opt_in_and_signed(self):
         doc = json.loads(self.inventory.read_text())
         # Existing signed inventories remain valid but normalized as no sudo.
