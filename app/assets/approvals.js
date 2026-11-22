@@ -240,6 +240,11 @@
       layer.hidden = false;
       $("approval-grant").focus();
     }
+    // The same pending approval may have a new approved name without a new
+    // approval ID or revision. Refresh the label on every authoritative snapshot.
+    $("approval-client").textContent = (request.agent || "Unknown")
+      + (request.client_disambiguator ? "-" + request.client_disambiguator : "");
+    $("approval-client").title = (request.client_id || "").split("?", 1)[0];
     updateClock();
   }
   function grantName(grant) {

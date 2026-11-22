@@ -45,6 +45,47 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         async with control.control_server("WARNING", self.path):
             self.assertEqual(control.LOGGER.getEffectiveLevel(), logging.WARNING)
 
+    async def test_admin_cli_revocation_refreshes_running_process_and_noop(self):
+        from app.dcr_registry import DCRStore
+        from app.oauth_sessions import SessionStore
+        from app import dcr_admin
+        database = self.path.parent / "oauth.sqlite"
+        SessionStore(database)
+        running = DCRStore(database)
+        client = running.register({
+            "client_name": "Synthetic CLI",
+            "application_type": "native",
+            "redirect_uris": ["http://127.0.0.1:3131/callback"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })["client_id"]
+        running.approve_name(client, "Grok")
+        self.assertEqual(running.approved_names[client], "Grok")
+        async with control.control_server(
+                "INFO", self.path, reload_names=running.reload_names):
+            with patch.object(dcr_admin, "SOCKET", self.path):
+                before = running.names_revision
+                result = await asyncio.to_thread(
+                    dcr_admin.main, ["--db", str(database), "revoke", client,
+                                     "--confirm-id", client])
+                self.assertEqual(result, 0)
+                self.assertGreater(running.names_revision, before)
+                self.assertEqual(dict(running.approved_names), {})
+                before = running.names_revision
+                result = await asyncio.to_thread(
+                    dcr_admin.main, ["--db", str(database), "revoke", client,
+                                     "--confirm-id", client])
+                self.assertEqual(result, 1)
+                self.assertGreater(running.names_revision, before)
+                self.assertEqual(dict(running.approved_names), {})
+
+    async def test_control_name_reload_is_restricted_to_available_handler(self):
+        async with control.control_server("INFO", self.path):
+            with self.assertRaises(ValueError):
+                await asyncio.to_thread(control_cli.request,
+                                        "reload-dcr-names", path=self.path)
+
     async def test_invalid_oversized_and_incomplete_requests(self):
         async with control.control_server("INFO", self.path):
             for payload in (b'not json\n', b'[]\n', b'{"action":"set","level":"TRACE"}\n',

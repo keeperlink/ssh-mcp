@@ -278,6 +278,44 @@ class DCRProtocolTests(unittest.TestCase):
         self.assertEqual(store.revoke(one), 0)
         self.assertIsNot(previous, store.approved_names)
 
+    def test_failed_full_map_read_rolls_back_registration_and_name_changes(self):
+        import sqlite3
+        store = oauth.dcr_store()
+        revision = store.names_revision
+        with patch.object(store, "_snapshot", side_effect=sqlite3.OperationalError("fixture")):
+            rejected = self.register()
+            self.assertEqual(rejected.status_code, 503)
+        self.assertEqual(store.list_clients(), [])  # No orphan identity consumes a slot.
+        self.assertEqual(store.names_revision, revision)
+        client = self.register().json()["client_id"]
+        initial = store.names_revision
+        with patch.object(store, "_snapshot", side_effect=sqlite3.OperationalError("fixture")):
+            with self.assertRaises(sqlite3.OperationalError):
+                store.approve_name(client, "Grok")
+            with self.assertRaises(sqlite3.OperationalError):
+                store.revoke(client)
+        self.assertIsNone(store.get(client).get("operator_name"))
+        self.assertIsNotNone(store.get(client))
+        self.assertEqual(store.names_revision, initial)
+        self.assertEqual(dict(store.approved_names), {})
+        store.approve_name(client, "Grok")
+        self.assertEqual(store.approved_names[client], "Grok")
+
+    def test_failed_snapshot_before_commit_cannot_issue_oauth_authorization(self):
+        import sqlite3
+        client = self.register().json()["client_id"]
+        store = oauth.dcr_store()
+        page = self.authorize(client)
+        token = re.search(r'name="request_token" value="([^"]+)"', page.text).group(1)
+        with patch.object(store, "_snapshot", side_effect=sqlite3.OperationalError("fixture")):
+            declined = self.app.post("/oauth/authorize", data={
+                "request_token": token, "mcp_login_key": config.MCP_LOGIN_KEY,
+                "agent_name": "Grok", "decision": "grant",
+            }, follow_redirects=False)
+        self.assertEqual(declined.status_code, 503)
+        self.assertIsNone(store.get(client).get("operator_name"))
+        self.assertEqual(store.approved_names, {})
+
     def test_invalid_registration_attempts_are_rate_limited(self):
         from app import dcr_registry
         with patch.object(dcr_registry, "PER_IP_RATE", 2):

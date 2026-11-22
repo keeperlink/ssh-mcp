@@ -668,6 +668,28 @@ class BrowserTests(unittest.TestCase):
         self.store.finish(job, "succeeded", exit_code=0)
         return job
 
+    def test_agent_names_version_and_options_are_authenticated_and_live(self):
+        self.assertEqual(self.client.get("/console/api/agents").status_code, 401)
+        self.assertEqual(self.login().status_code, 303)
+        with patch("app.history.approved_dcr_names", return_value={
+                "dcr_" + "A" * 43: "Grok & Tested",
+                "dcr_" + "B" * 43: "Grok & Tested",
+            }), patch("app.history.agent_names_revision", return_value=8):
+            page = self.client.get("/console")
+            self.assertIn('data-names-revision="8"', page.text)
+            self.assertIn("Grok &amp; Tested", page.text)
+            opts = self.client.get("/console/api/agents").json()
+            self.assertEqual(opts["agents"].count("Grok & Tested"), 1)
+            self.assertEqual(opts["revision"], 8)
+            events = self.client.get("/console/api/changes?after=0:_").json()
+            self.assertEqual(events["agent_names_revision"], 8)
+        script = self.client.get("/console/assets/console.js").text
+        self.assertIn('"/console/api/agents"', script)
+        self.assertIn("namesChanged", script)
+        self.assertIn("option.textContent = labels[index]", script)
+        approvals = self.client.get("/console/assets/approvals.js").text
+        self.assertIn("The same pending approval may have a new approved name", approvals)
+
     def test_auth_redirect_login_cookie_security_and_logout(self):
         self.assertEqual(self.client.get("/console").status_code, 303)
         self.assertEqual(self.client.get("/console/api/jobs").status_code, 401)

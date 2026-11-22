@@ -56,6 +56,8 @@ async def lifespan(_app: FastAPI):
     socket_path = SOCKET if os.getenv("MCP_CONFIG_FILE") or local_socket else None
     async with control_server(
         MCP_LOG_LEVEL, socket_path, readiness.recheck if readiness is not None else None,
+        dcr_store().reload_names if (socket_path is not None
+                                       and (os.getenv("SSH_JOBS_DB") or os.getenv("MCP_OAUTH_DB"))) else None,
     ), _mcp_server.session_manager.run():
         jobs = _job_registry.get("jobs")
         # Fail at startup if private session storage cannot initialize.
