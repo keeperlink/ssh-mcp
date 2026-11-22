@@ -99,23 +99,26 @@ by operator-approved display name. Standalone environment mode uses
 }
 ```
 
-Only exact verified CIMD/DCR client IDs may receive labels or conversation
-selectors. Client-supplied names, wildcards, user agents and guessed session
-IDs never establish client identity. The same display name can group several
-verified IDs, but tokens, audit actor and timed grants remain isolated per
-exact OAuth client ID. Missing or unconfigured selectors mean agent-wide
-operator grants. Conflicting configured sources fail closed, and unconfigured
-headers/metadata are ignored: **no global X-SSH-MCP-Conversation fallback**.
-The clients map is not an OAuth allowlist; otherwise authorized unknown clients
-show as Unknown. The global `oauth.dcr_enabled` bool defaults to true.
+Signed `clients` entries identify CIMD clients and define explicit
+conversation-ID selectors. For DCR clients, only a name confirmed by the
+operator at OAuth authorization is trusted for display. The server persists
+`operator_name` in the existing `oauth_dcr_clients.metadata` JSON and caches
+all approved DCR names in memory. Unapproved DCR identities display Unknown;
+signed client-label mappings are **not** a fallback for DCR names. The same
+display name may group multiple exact IDs in History, but OAuth tokens, audit
+actors, host/root grants and revocation remain isolated per verified ID.
+Missing conversation selectors mean agent-wide grants. Conflicting configured
+sources fail closed, and unconfigured headers/metadata are ignored: **no global
+X-SSH-MCP-Conversation fallback**. The signed `clients` map is not an OAuth
+allowlist. The global `oauth.dcr_enabled` bool defaults to true.
 
 ### Audit actor isolation and database upgrades
 
 The current release associates each audit record with the verified OAuth
 `client_id`. Its authorization `actor` is
 `ssh-mcp-operator@SHA256(client_id)`, regardless of the client's display name.
-The signed `clients` registry maps exact OAuth IDs to display labels; it does
-not grant additional authorization.
+CIMD labels come from the signed `clients` registry; DCR labels come from
+operator-approved registration names. Neither provides authorization.
 
 All SKY-344 historical audit-actor corrections on the managed test and
 production installations have been completed and independently verified.

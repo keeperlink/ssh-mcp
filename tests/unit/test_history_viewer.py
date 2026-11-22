@@ -668,6 +668,32 @@ class BrowserTests(unittest.TestCase):
         self.store.finish(job, "succeeded", exit_code=0)
         return job
 
+    def test_agent_names_version_and_options_are_authenticated_and_live(self):
+        self.assertEqual(self.client.get("/console/api/agents").status_code, 401)
+        self.assertEqual(self.login().status_code, 303)
+        names = {"dcr_" + "A" * 43: "Grok & Tested",
+                 "dcr_" + "B" * 43: "Grok & Tested"}
+        with patch("app.history.agent_names_snapshot", return_value=("restart-unique-8", names)), (
+                patch("app.history.agent_names_revision", return_value="restart-unique-8")):
+            page = self.client.get("/console")
+            self.assertIn('data-names-revision="restart-unique-8"', page.text)
+            self.assertIn("Grok &amp; Tested", page.text)
+            opts = self.client.get("/console/api/agents").json()
+            self.assertEqual(opts["agents"].count("Grok & Tested"), 1)
+            self.assertEqual(opts["revision"], "restart-unique-8")
+            events = self.client.get("/console/api/changes?after=0:_").json()
+            self.assertEqual(events["agent_names_revision"], "restart-unique-8")
+        script = self.client.get("/console/assets/console.js").text
+        self.assertIn('"/console/api/agents"', script)
+        self.assertIn("namesChanged", script)
+        self.assertIn("option.textContent = labels[index]", script)
+        approvals = self.client.get("/console/assets/approvals.js").text
+        self.assertIn("The same pending approval may have a new approved name", approvals)
+        self.assertIn("updateRevokeLabel", approvals)
+        self.assertIn("state.agentRevision = pendingNameRevision", script)
+        self.assertLess(script.index("await loadJobs();", script.index("async function poll()")),
+                        script.index("state.agentRevision = pendingNameRevision"))
+
     def test_auth_redirect_login_cookie_security_and_logout(self):
         self.assertEqual(self.client.get("/console").status_code, 303)
         self.assertEqual(self.client.get("/console/api/jobs").status_code, 401)

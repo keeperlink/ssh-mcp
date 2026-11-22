@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, suppress
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 import stat
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -15,6 +16,7 @@ SOCKET = Path("/run/ssh-mcp/control.sock")
 LIMIT = 4096
 RECHECK_TIMEOUT = 200.0
 Recheck = Callable[[str], Awaitable[dict[str, object]]]
+ReloadNames = Callable[[], None]
 TIMEOUT = 2.0
 LOGGER = logging.getLogger("app")
 
@@ -49,7 +51,8 @@ def command(request: Any, configured: str) -> dict[str, str]:
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, configured: str,
-                 recheck: Recheck | None = None) -> None:
+                 recheck: Recheck | None = None,
+                 reload_names: ReloadNames | None = None) -> None:
     try:
         try:
             line = await asyncio.wait_for(reader.readuntil(b"\n"), TIMEOUT)
@@ -60,8 +63,15 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, con
                     and isinstance(request["alias"], str)):
                 async with asyncio.timeout(RECHECK_TIMEOUT):
                     response = {"status": "ok", "host": await recheck(request["alias"])}
+            elif (reload_names is not None and type(request) is dict
+                  and request == {"action": "reload-dcr-names"}):
+                # Socket is owner-only; the CLI sends this after its transaction commits.
+                await asyncio.to_thread(reload_names)
+                response = {"status": "ok"}
             else:
                 response = command(request, configured)
+        except (OSError, sqlite3.Error):
+            response = {"status": "error", "error": "DCR name cache reload failed"}
         except (ValueError, TypeError, asyncio.LimitOverrunError, asyncio.IncompleteReadError,
                 TimeoutError, RecursionError):
             response = {"status": "error", "error": "Invalid or incomplete control request"}
@@ -77,7 +87,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, con
 
 @asynccontextmanager
 async def control_server(configured: str, path: Path | None,
-                         recheck: Recheck | None = None) -> AsyncIterator[None]:
+                         recheck: Recheck | None = None,
+                         reload_names: ReloadNames | None = None) -> AsyncIterator[None]:
     configure_logging(configured)
     if path is None:
         yield
@@ -90,7 +101,7 @@ async def control_server(configured: str, path: Path | None,
     if path.exists() or path.is_symlink():
         raise RuntimeError("Control socket already exists")
     async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await handle(reader, writer, configured, recheck)
+        await handle(reader, writer, configured, recheck, reload_names)
     server = await asyncio.start_unix_server(client, path=str(path), limit=LIMIT,
                                              start_serving=False)
     try:

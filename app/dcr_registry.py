@@ -10,9 +10,11 @@ import json
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .client_metadata import _parts
@@ -21,7 +23,6 @@ from .sqlite_support import _ClosingConnection, _prepare_path
 MAX_REGISTRATIONS = 4096
 MAX_REMOVAL_AUDIT = 4096
 REMOVAL_AUDIT_SECONDS = 365 * 86400
-INACTIVE_SECONDS = 90 * 86400
 RATE_WINDOW_SECONDS = 60
 PER_IP_RATE = 12
 GLOBAL_RATE = 120
@@ -144,6 +145,65 @@ class DCRStore:
                     removed_at INTEGER NOT NULL
                 );
             """)
+        self._mutation_lock = threading.RLock()
+        self._names_state: tuple[str, Mapping[str, str]] = ("", MappingProxyType({}))
+        self.reload_names()
+
+    @property
+    def names_snapshot(self) -> tuple[str, Mapping[str, str]]:
+        """One immutable name map and restart-unique version, read together."""
+        return self._names_state
+
+    @property
+    def approved_names(self) -> Mapping[str, str]:
+        return self._names_state[1]
+
+    @property
+    def names_revision(self) -> str:
+        return self._names_state[0]
+
+    @staticmethod
+    def _snapshot(db: sqlite3.Connection) -> Mapping[str, str]:
+        """Read and validate the whole map in the *mutation transaction*."""
+        rows = db.execute("SELECT client_id,metadata FROM oauth_dcr_clients").fetchall()
+        names: dict[str, str] = {}
+        for row in rows:
+            label = json.loads(row["metadata"]).get("operator_name")
+            if isinstance(label, str) and 1 <= len(label) <= 64 and label.isprintable():
+                names[row["client_id"]] = label
+        return MappingProxyType(names)
+
+    def _publish_names(self, snapshot: Mapping[str, str]) -> None:
+        # Random revision is also unique across service restarts, without a
+        # persistent sequence or schema migration. Publish both as one object.
+        self._names_state = (secrets.token_hex(16), snapshot)
+
+    def reload_names(self) -> None:
+        """Refresh after startup/external mutation; never publish a partial map."""
+        with self._mutation_lock:
+            with self._connect() as db:
+                snapshot = self._snapshot(db)
+            self._publish_names(snapshot)
+
+    def approve_name(self, client_id: str, name: str) -> None:
+        """Only the operator-authenticated OAuth consent handler may invoke this."""
+        if (not _CLIENT_ID.fullmatch(client_id) or not isinstance(name, str)
+                or name != name.strip() or not 1 <= len(name) <= 64
+                or not name.isprintable() or name.casefold() == "unknown"):
+            raise ValueError("Invalid approved agent name")
+        with self._mutation_lock:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute("SELECT metadata FROM oauth_dcr_clients WHERE client_id=?",
+                                 (client_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Unknown DCR client")
+                metadata = json.loads(row["metadata"])
+                metadata["operator_name"] = name
+                db.execute("UPDATE oauth_dcr_clients SET metadata=? WHERE client_id=?",
+                           (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), client_id))
+                snapshot = self._snapshot(db)
+            self._publish_names(snapshot)
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
@@ -154,20 +214,11 @@ class DCRStore:
         return db
 
     def _prune(self, db: sqlite3.Connection, now: int) -> int:
-        # An active OAuth authorization always prevents cleanup, even if last_used_at is old.
-        result = db.execute("""
-            DELETE FROM oauth_dcr_clients
-            WHERE last_used_at < ?
-              AND NOT EXISTS (
-                SELECT 1 FROM oauth_sessions s
-                WHERE s.client_id = oauth_dcr_clients.client_id
-                  AND s.revoked_at IS NULL AND s.expires_at > ?
-              )
-        """, (now - INACTIVE_SECONDS, now))
+        # Registered identities and their approved names persist until explicit revocation.
         db.execute("DELETE FROM oauth_dcr_rates WHERE window_start < ?", (now - 2 * RATE_WINDOW_SECONDS,))
         db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
                    (now - REMOVAL_AUDIT_SECONDS,))
-        return result.rowcount
+        return 0
 
     def prune(self) -> int:
         with self._connect() as db:
@@ -201,23 +252,28 @@ class DCRStore:
     def register(self, document: Any) -> dict[str, Any]:
         now = int(time.time())
         metadata = _validated_document(document)
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            self._prune(db, now)
-            count = db.execute("SELECT COUNT(*) FROM oauth_dcr_clients").fetchone()[0]
-            if count >= MAX_REGISTRATIONS:
-                raise RegistrationError("invalid_client_metadata", "Registration capacity exceeded", 429)
-            for _ in range(3):
-                client_id = "dcr_" + secrets.token_urlsafe(32)
-                try:
-                    db.execute("""INSERT INTO oauth_dcr_clients(client_id,metadata,issued_at,last_used_at)
-                                  VALUES (?,?,?,?)""",
-                               (client_id, json.dumps(metadata, separators=(",", ":")), now, now))
-                    return {**metadata, "client_id": client_id, "client_id_issued_at": now,
-                            "client_id_expires_at": 0}
-                except sqlite3.IntegrityError:
-                    continue
-            raise RuntimeError("Unable to allocate unique client ID")
+        with self._mutation_lock:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self._prune(db, now)
+                count = db.execute("SELECT COUNT(*) FROM oauth_dcr_clients").fetchone()[0]
+                if count >= MAX_REGISTRATIONS:
+                    raise RegistrationError("invalid_client_metadata", "Registration capacity exceeded", 429)
+                for _ in range(3):
+                    client_id = "dcr_" + secrets.token_urlsafe(32)
+                    try:
+                        db.execute("""INSERT INTO oauth_dcr_clients(client_id,metadata,issued_at,last_used_at)
+                                      VALUES (?,?,?,?)""",
+                                   (client_id, json.dumps(metadata, separators=(",", ":")), now, now))
+                        break
+                    except sqlite3.IntegrityError:
+                        continue
+                else:
+                    raise RuntimeError("Unable to allocate unique client ID")
+                snapshot = self._snapshot(db)
+            self._publish_names(snapshot)
+        return {**metadata, "client_id": client_id, "client_id_issued_at": now,
+                "client_id_expires_at": 0}
 
     def get(self, client_id: str, redirect: str | None = None) -> dict[str, Any] | None:
         if not _CLIENT_ID.fullmatch(client_id):
@@ -244,19 +300,22 @@ class DCRStore:
         ]
 
     def revoke(self, client_id: str) -> int:
-        """Administrative cancellation; invalidates registration and related OAuth sessions."""
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            now = int(time.time())
-            db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL",
-                       (now, client_id))
-            removed = db.execute("DELETE FROM oauth_dcr_clients WHERE client_id=?", (client_id,)).rowcount
-            if removed:
-                db.execute("INSERT INTO oauth_dcr_removals(client_id,removed_at) VALUES (?,?)",
-                           (client_id, now))
-                db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
-                           (now - REMOVAL_AUDIT_SECONDS,))
-                db.execute("""DELETE FROM oauth_dcr_removals WHERE id NOT IN
-                              (SELECT id FROM oauth_dcr_removals ORDER BY id DESC LIMIT ?)""",
-                           (MAX_REMOVAL_AUDIT,))
-            return removed
+        """Explicit cancellation; durable session revocation and complete snapshot reload."""
+        with self._mutation_lock:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                now = int(time.time())
+                db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL",
+                           (now, client_id))
+                removed = db.execute("DELETE FROM oauth_dcr_clients WHERE client_id=?", (client_id,)).rowcount
+                if removed:
+                    db.execute("INSERT INTO oauth_dcr_removals(client_id,removed_at) VALUES (?,?)",
+                               (client_id, now))
+                    db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
+                               (now - REMOVAL_AUDIT_SECONDS,))
+                    db.execute("""DELETE FROM oauth_dcr_removals WHERE id NOT IN
+                                  (SELECT id FROM oauth_dcr_removals ORDER BY id DESC LIMIT ?)""",
+                               (MAX_REMOVAL_AUDIT,))
+                snapshot = self._snapshot(db)
+            self._publish_names(snapshot)
+        return removed

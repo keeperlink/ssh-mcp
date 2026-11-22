@@ -19,7 +19,7 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, List, Protocol, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, List, Mapping, Protocol, cast
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Request
@@ -27,7 +27,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from starlette.concurrency import run_in_threadpool
 
 from . import config
-from .client_identity import UNKNOWN_AGENT, agent_label
+from .client_identity import (UNKNOWN_AGENT, agent_label, approved_dcr_names,
+                              agent_names_revision, agent_names_snapshot)
 from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
@@ -137,7 +138,12 @@ class HistoryStore:
     @staticmethod
     def _agent_key(client_id: str | None, actor: str) -> str:
         resolved = HistoryStore._client_id(client_id, actor)
-        return resolved if resolved is not None and resolved in config.MCP_CLIENT_LABELS else UNKNOWN_AGENT
+        if resolved is not None and (
+            (resolved.startswith("dcr_") and resolved in approved_dcr_names())
+            or (not resolved.startswith("dcr_") and resolved in config.MCP_CLIENT_LABELS)
+        ):
+            return resolved
+        return UNKNOWN_AGENT
 
     def _connect(self) -> sqlite3.Connection:
         db = self.jobs._connect()
@@ -270,12 +276,24 @@ class HistoryStore:
             params.append(scoped_actor)
         agent = filters.get("agent", "")
         if agent:
-            if agent in config.MCP_CLIENTS:
-                identities = config.MCP_CLIENTS[agent]["identities"]
+            # Display labels group IDs but never authorize or share their grants.
+            identities = [
+                cid for cid, label in config.MCP_CLIENT_LABELS.items()
+                if not cid.startswith("dcr_") and label == agent
+            ]
+            identities.extend(cid for cid, label in approved_dcr_names().items()
+                              if label == agent)
+            if agent == UNKNOWN_AGENT:
+                where.append("history_agent_key(client_id,actor)=?")
+                params.append(UNKNOWN_AGENT)
+            elif identities:
                 where.append("client_id IN (" + ",".join("?" for _ in identities) + ")")
                 params.extend(identities)
-            elif agent == UNKNOWN_AGENT or agent in config.MCP_CLIENT_LABELS:
-                where.append("history_agent_key(client_id,actor)=?")
+            elif agent in config.MCP_CLIENT_LABELS and not agent.startswith("dcr_"):
+                where.append("client_id=?")
+                params.append(agent)
+            elif agent in approved_dcr_names():
+                where.append("client_id=?")
                 params.append(agent)
             else:
                 raise ValueError("Invalid history agent filter")
@@ -792,7 +810,15 @@ def _approval_icon(kind: str) -> str:
             + '</svg>')
 
 
+def _agent_options(names: Mapping[str, str] | None = None) -> list[str]:
+    signed = {name for name, definition in config.MCP_CLIENTS.items()
+              if any(not cid.startswith("dcr_") for cid in definition["identities"])}
+    return sorted(signed | set((approved_dcr_names() if names is None else names).values()),
+                  key=str.casefold)
+
+
 def _history_page(csrf: str) -> str:
+    names_revision, names = agent_names_snapshot()
     story_chars = int(os.getenv("HISTORY_STORY_ID_MAX_CHARS", "16"))
     story_side = os.getenv("HISTORY_STORY_ID_TRUNCATE_FROM", "end")
     environment_label = {"lab": "LAB", "production": "PROD"}[config.MCP_ENVIRONMENT]
@@ -847,10 +873,10 @@ def _history_page(csrf: str) -> str:
         '<option value="24h" selected>Last 24 hours</option>'
         '<option value="7d">Last 7 days</option><option value="30d">Last 30 days</option>'
         '<option value="all">All time</option></select></label>'
-        '<label class="filter-agent">Agent<select name="agent">'
+        f'<label class="filter-agent">Agent<select name="agent" data-names-revision="{names_revision}">'
         '<option value="">All agents</option>' + "".join(
             f'<option value="{html.escape(label, quote=True)}">{html.escape(label)}</option>'
-            for label in sorted(config.MCP_CLIENTS, key=str.casefold)
+            for label in _agent_options(names)
         ) + '<option value="unknown">Unknown</option></select></label>'
         '<label class="filter-story">Story ID<input name="story_id" placeholder="All stories"'
         ' maxlength="80"></label>'
@@ -1158,6 +1184,13 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         result["jobs"] = decorate_jobs(result["jobs"])
         return _json(result)
 
+    @router.get("/console/api/agents")
+    def agent_names(request: Request) -> Response:
+        if not signed_in(request):
+            return _json({"error": "Unauthorized"}, 401)
+        revision, names = agent_names_snapshot()
+        return _json({"agents": _agent_options(names), "revision": revision})
+
     @router.get("/console/api/changes")
     async def changes(request: Request) -> Response:
         def read_history() -> dict[str, Any] | Response:
@@ -1183,6 +1216,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
             result.update(approvals.viewer_snapshot())
         if readiness is not None:
             result["readiness"] = readiness.snapshot()
+        result["agent_names_revision"] = agent_names_revision()
         return _json(result)
 
     @router.get("/console/api/approval-events")
