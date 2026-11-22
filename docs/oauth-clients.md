@@ -146,43 +146,37 @@ loopback callback omitted a port. Untrusted LAN HTTP callbacks,
 userinfo, fragments, unspecified schemes and open redirects are rejected.
 
 On the browser authorization page, review the **exact registered client ID**,
-self-asserted name, callback and requested OAuth scopes before entering the
-separate private login key. A DCR client cannot assert ownership of a software
-brand merely by choosing a name. Its registered client ID is not a secret;
-a fresh OAuth login still requires operator consent. Unapproved registration
-alone never grants SSH access, operator or privileged permissions. Existing
-conversation-scoped or agent-wide timed grants follow the same per-operator,
-verified OAuth client identity rules as CIMD.
+self-asserted name, callback and requested OAuth scopes. For a DCR client, the
+**Agent name** field is editable: initially it suggests the client's untrusted
+`client_name`; after authorization it shows the most recent operator-approved
+name. The approved name is saved as `operator_name` inside the existing private
+`oauth_dcr_clients.metadata` JSON **only after successful operator login-key
+authorization**. The name is a display label, never an OAuth identity or
+permission; all sessions, audit actors and timed grants remain isolated by the
+exact verified client ID. An unapproved registration displays **Unknown**.
 
-Registrations persist in the existing private SQLite OAuth database across
-restarts. Every HTTP registration attempt (including invalid Content-Type, malformed
-JSON and oversized bodies) is charged against per-source and global minute
-limits; a registration cap prevents unbounded storage. Registrations inactive for 90
-days are removed automatically only when no active OAuth session exists.
-Successful authorization/token refresh updates last use. Existing sessions
-retain their independent absolute expiry. The private backup of the existing
-database now includes DCR registrations; do not discard this database during
-upgrade or rollback.
+Registrations and their operator-approved names persist indefinitely in the
+existing private SQLite OAuth database until an administrator explicitly
+revokes a registration. Every HTTP registration attempt (including malformed
+JSON and oversized bodies) is rate-limited; the existing 4,096-registration
+cap remains. OAuth sessions and tokens retain their independent expiry.
+Approved names are loaded into a process-local map at startup and the entire
+map is refreshed after registration, operator name approval, or revocation;
+History and approval rendering never query SQLite per record. Administrative
+revocation through the separate CLI requires restarting the service to refresh
+the running process's display-name cache. Preserve the existing private SQLite
+volume across upgrades and rollbacks.
 
-### Operator-pinned dynamically registered identities
+### Operator-approved DCR agent names
 
-The DCR `client_name` is self-asserted. A verified exact `dcr_...` ID may be
-added under the signed top-level `clients` mapping, for example:
+DCR agent names no longer require an entry in the signed `clients` registry.
+At every successful OAuth authorization the operator may accept or edit the
+client's suggested name. The server stores the trusted display name against
+that exact persistent DCR ID; a new registration requires its own operator
+approval and never inherits the old registration's grants or name.
 
-```json
-{
-  "Grok": {
-    "identities": ["dcr_QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"],
-    "conversation_id": {"sources": []}
-  }
-}
-```
-
-This is a synthetic example, not a live registration. Client display labels
-never authorize OAuth or SSH. Separate registered IDs remain isolated even
-when grouped under one label. A newly registered ID must be independently
-verified and pinned in a separately signed configuration release.
-See [the unified client registry and current audit model](configuration.md).
+Only CIMD clients and explicit conversation-ID selectors need signed client
+definitions. No signed client-label fallback applies to DCR registrations.
 
 ### Administrative inspection and revocation
 

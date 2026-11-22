@@ -12,7 +12,8 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .client_metadata import _parts
@@ -21,7 +22,6 @@ from .sqlite_support import _ClosingConnection, _prepare_path
 MAX_REGISTRATIONS = 4096
 MAX_REMOVAL_AUDIT = 4096
 REMOVAL_AUDIT_SECONDS = 365 * 86400
-INACTIVE_SECONDS = 90 * 86400
 RATE_WINDOW_SECONDS = 60
 PER_IP_RATE = 12
 GLOBAL_RATE = 120
@@ -144,6 +144,42 @@ class DCRStore:
                     removed_at INTEGER NOT NULL
                 );
             """)
+        self._approved_names: Mapping[str, str] = MappingProxyType({})
+        self.reload_names()
+
+    @property
+    def approved_names(self) -> Mapping[str, str]:
+        """Process-local, atomically replaced snapshot of operator-approved names."""
+        return self._approved_names
+
+    def reload_names(self) -> None:
+        """Reload the complete map; called after every potential registration/name change."""
+        with self._connect() as db:
+            rows = db.execute("SELECT client_id,metadata FROM oauth_dcr_clients").fetchall()
+        names: dict[str, str] = {}
+        for row in rows:
+            label = json.loads(row["metadata"]).get("operator_name")
+            if isinstance(label, str) and 1 <= len(label) <= 64 and label.isprintable():
+                names[row["client_id"]] = label
+        self._approved_names = MappingProxyType(names)
+
+    def approve_name(self, client_id: str, name: str) -> None:
+        """Only the operator-authenticated OAuth consent handler may invoke this."""
+        if (not _CLIENT_ID.fullmatch(client_id) or not isinstance(name, str)
+                or name != name.strip() or not 1 <= len(name) <= 64
+                or not name.isprintable() or name.casefold() == "unknown"):
+            raise ValueError("Invalid approved agent name")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT metadata FROM oauth_dcr_clients WHERE client_id=?",
+                             (client_id,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown DCR client")
+            metadata = json.loads(row["metadata"])
+            metadata["operator_name"] = name
+            db.execute("UPDATE oauth_dcr_clients SET metadata=? WHERE client_id=?",
+                       (json.dumps(metadata, ensure_ascii=False, separators=(",", ":")), client_id))
+        self.reload_names()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
@@ -154,20 +190,11 @@ class DCRStore:
         return db
 
     def _prune(self, db: sqlite3.Connection, now: int) -> int:
-        # An active OAuth authorization always prevents cleanup, even if last_used_at is old.
-        result = db.execute("""
-            DELETE FROM oauth_dcr_clients
-            WHERE last_used_at < ?
-              AND NOT EXISTS (
-                SELECT 1 FROM oauth_sessions s
-                WHERE s.client_id = oauth_dcr_clients.client_id
-                  AND s.revoked_at IS NULL AND s.expires_at > ?
-              )
-        """, (now - INACTIVE_SECONDS, now))
+        # Registered identities and their approved names persist until explicit revocation.
         db.execute("DELETE FROM oauth_dcr_rates WHERE window_start < ?", (now - 2 * RATE_WINDOW_SECONDS,))
         db.execute("DELETE FROM oauth_dcr_removals WHERE removed_at < ?",
                    (now - REMOVAL_AUDIT_SECONDS,))
-        return result.rowcount
+        return 0
 
     def prune(self) -> int:
         with self._connect() as db:
@@ -213,11 +240,14 @@ class DCRStore:
                     db.execute("""INSERT INTO oauth_dcr_clients(client_id,metadata,issued_at,last_used_at)
                                   VALUES (?,?,?,?)""",
                                (client_id, json.dumps(metadata, separators=(",", ":")), now, now))
-                    return {**metadata, "client_id": client_id, "client_id_issued_at": now,
-                            "client_id_expires_at": 0}
+                    break
                 except sqlite3.IntegrityError:
                     continue
-            raise RuntimeError("Unable to allocate unique client ID")
+            else:
+                raise RuntimeError("Unable to allocate unique client ID")
+        self.reload_names()
+        return {**metadata, "client_id": client_id, "client_id_issued_at": now,
+                "client_id_expires_at": 0}
 
     def get(self, client_id: str, redirect: str | None = None) -> dict[str, Any] | None:
         if not _CLIENT_ID.fullmatch(client_id):
@@ -259,4 +289,5 @@ class DCRStore:
                 db.execute("""DELETE FROM oauth_dcr_removals WHERE id NOT IN
                               (SELECT id FROM oauth_dcr_removals ORDER BY id DESC LIMIT ?)""",
                            (MAX_REMOVAL_AUDIT,))
-            return removed
+        self.reload_names()
+        return removed

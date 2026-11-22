@@ -145,7 +145,7 @@ class ClientIdentityTests(unittest.TestCase):
             self.assertNotIn('value="' + extra_id + '">Agent A</option>', page)
             self.assertNotEqual(client_audit_actor(A), client_audit_actor(extra_id))
 
-    def test_exact_dcr_identity_labels_history_and_agent_filter(self):
+    def test_dcr_signed_label_is_not_trusted_without_operator_approval(self):
         with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
             actor = client_audit_actor(DCR)
             context = client_id_context.set(DCR)
@@ -153,30 +153,37 @@ class ClientIdentityTests(unittest.TestCase):
                 job = self.command(actor)
             finally:
                 client_id_context.reset(context)
-            items = self.history.list({"agent": DCR})["jobs"]
-            self.assertEqual({item["id"] for item in items}, {job})
-            self.assertEqual(items[0]["agent"], "Grok")
-            self.assertEqual(self.history.detail(job)["agent"], "Grok")
-            self.assertEqual(agent_disambiguator(DCR, config.MCP_CLIENT_LABELS), None)
-            self.assertEqual(self.history.list({"agent": A})["filtered_total"], 0)
+            self.assertEqual(self.history.detail(job)["agent"], "Unknown")
+            self.assertEqual(self.history.list({"agent": "unknown"})["jobs"][0]["id"], job)
+            with patch("app.client_identity.approved_dcr_names", return_value={DCR: "Grok"}), (
+                    patch("app.history.approved_dcr_names", return_value={DCR: "Grok"})):
+                items = self.history.list({"agent": "Grok"})["jobs"]
+                self.assertEqual({item["id"] for item in items}, {job})
+                self.assertEqual(items[0]["agent"], "Grok")
+                self.assertEqual(self.history.detail(job)["agent"], "Grok")
+                self.assertIsNone(agent_disambiguator(DCR, config.MCP_CLIENT_LABELS))
+                self.assertEqual(self.history.list({"agent": A})["filtered_total"], 0)
+                page = _history_page("synthetic")
+                self.assertIn('value="Grok">Grok</option>', page)
         self.assertEqual(self.history.detail(job)["agent"], "Unknown")
 
-    def test_exact_dcr_approval_display_is_agent_scoped_and_display_only(self):
-        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Grok"}):
+    def test_approved_dcr_name_is_display_only_in_pending_approvals(self):
+        with patch.object(config, "MCP_CLIENT_LABELS", {**LABELS, DCR: "Untrusted"}):
             pending = PendingApproval(
                 id="synthetic-approval", key=("agent:operator", DCR, "demo-node-a"),
                 tool="execute_command", reason="synthetic", summary="hostname",
                 expires_at=time.time() + 40, deadline=time.monotonic() + 40,
                 future=MagicMock(), waiter=None, client_id=DCR,
             )
-            display = pending.public()
-            self.assertEqual(display["agent"], "Grok")
-            self.assertEqual(display["client_id"], DCR)
-            self.assertEqual(display["grant_scope"], "agent")
-            self.assertIsNone(display["conversation_id"])
-            self.assertIsNone(display["client_disambiguator"])
-        display = pending.public()
-        self.assertEqual(display["agent"], "Unknown")
+            self.assertEqual(pending.public()["agent"], "Unknown")
+            with patch("app.client_identity.approved_dcr_names", return_value={DCR: "Grok"}):
+                display = pending.public()
+                self.assertEqual(display["agent"], "Grok")
+                self.assertEqual(display["client_id"], DCR)
+                self.assertEqual(display["grant_scope"], "agent")
+                self.assertIsNone(display["conversation_id"])
+                self.assertIsNone(display["client_disambiguator"])
+            self.assertEqual(pending.public()["agent"], "Unknown")
 
     def test_all_durable_kinds_retain_identity_at_admission_and_after_reopen(self):
         actor = client_audit_actor(B)

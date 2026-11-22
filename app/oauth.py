@@ -590,6 +590,16 @@ async def oauth_authorize_get(request: Request) -> Response:
     client_address = html.escape(client_id)
     client_identity_label = "Registered client ID" if client_id.startswith("dcr_") else "Verified metadata URL"
     callback_address = html.escape(redirect_uri)
+    name_field = ""
+    if client_id.startswith("dcr_"):
+        suggested = client_metadata.get("operator_name") or client_metadata["client_name"]
+        name_field = (
+            '<label for="agent_name">Agent name</label>'
+            f'<input id="agent_name" name="agent_name" type="text" maxlength="64" '
+            f'value="{html.escape(str(suggested), quote=True)}" required>'
+            '<p class="note">Confirm or edit this name. Until approved, '
+            'the suggested name is supplied by the client.</p>'
+        )
     lifetime_labels = ("1 hour", "8 hours", "24 hours", "7 days", "30 days")
     lifetime_options = "".join(
         f'<option value="{seconds}"'
@@ -619,6 +629,7 @@ async def oauth_authorize_get(request: Request) -> Response:
   <p class="note">The displayed name is supplied by the client, not independently verified.</p>
   <form method="post" action="/oauth/authorize" autocomplete="off">
     <input type="hidden" name="request_token" value="{html.escape(request_token, quote=True)}">
+    {name_field}
     <label for="mcp_login_key">MCP login key</label>
     <input id="mcp_login_key" name="mcp_login_key" type="password" required autofocus>
     <label for="session_ttl_seconds">Authorize for</label>
@@ -689,6 +700,18 @@ async def oauth_authorize_post(request: Request) -> Response:
         )
 
     await _clear_login_failures(client_ip)
+    if client_id.startswith("dcr_"):
+        approved_name = form.get("agent_name", "")
+        if (not isinstance(approved_name, str) or approved_name != approved_name.strip()
+                or not 1 <= len(approved_name) <= 64 or not approved_name.isprintable()
+                or approved_name.casefold() == "unknown"):
+            return HTMLResponse("<h1>Invalid agent name</h1>", status_code=400,
+                                headers=_security_headers())
+        try:
+            dcr_store().approve_name(client_id, approved_name)
+        except (ValueError, OSError, sqlite3.Error, RuntimeError):
+            return HTMLResponse("<h1>Unable to approve client name</h1>", status_code=503,
+                                headers=_security_headers())
     code = await _store_authorization_code(
         client_id=client_id,
         redirect_uri=redirect_uri,

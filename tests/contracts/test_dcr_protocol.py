@@ -65,14 +65,15 @@ class DCRProtocolTests(unittest.TestCase):
             "state": "synthetic-test",
         }, follow_redirects=False)
 
-    def login(self, client_id: str, redirect: str = URI):
+    def login(self, client_id: str, redirect: str = URI, *, name: str = "Synthetic CLI"):
         page = self.authorize(client_id, redirect)
         self.assertEqual(page.status_code, 200, page.text)
         request_token = re.search(r'name="request_token" value="([^"]+)"', page.text)
         self.assertIsNotNone(request_token)
-        result = self.app.post("/oauth/authorize",
-            data={"request_token": request_token.group(1), "mcp_login_key": config.MCP_LOGIN_KEY},
-            follow_redirects=False)
+        form = {"request_token": request_token.group(1), "mcp_login_key": config.MCP_LOGIN_KEY}
+        if client_id.startswith("dcr_"):
+            form["agent_name"] = name
+        result = self.app.post("/oauth/authorize", data=form, follow_redirects=False)
         self.assertEqual(result.status_code, 302)
         code = parse_qs(urlsplit(result.headers["location"]).query)["code"][0]
         return code
@@ -190,20 +191,92 @@ class DCRProtocolTests(unittest.TestCase):
             "grant_type": "refresh_token", "client_id": client,
             "refresh_token": issued["refresh_token"]}).status_code, 401)
 
-    def test_90_day_inactivity_and_active_session_protection(self):
+    def test_inactive_registrations_and_approved_names_persist_indefinitely(self):
         client = self.register().json()["client_id"]
         store = oauth.dcr_store()
-        old = int(time.time()) - 91 * 86400
+        self.exchange(client, self.login(client, name="Approved CLI"))
+        old = int(time.time()) - 400 * 86400
         with store._connect() as db:
             db.execute("UPDATE oauth_dcr_clients SET last_used_at=? WHERE client_id=?", (old, client))
-        self.assertEqual(store.prune(), 1)
-        self.assertIsNone(store.get(client))
-        client = self.register().json()["client_id"]
-        self.exchange(client, self.login(client))
-        with store._connect() as db:
-            db.execute("UPDATE oauth_dcr_clients SET last_used_at=? WHERE client_id=?", (old, client))
+            db.execute("UPDATE oauth_sessions SET expires_at=0 WHERE client_id=?", (client,))
         self.assertEqual(store.prune(), 0)
-        self.assertIsNotNone(store.get(client))
+        self.assertEqual(store.get(client)["operator_name"], "Approved CLI")
+        self.assertEqual(store.approved_names[client], "Approved CLI")
+        oauth._dcr_store.cache_clear()
+        self.assertEqual(oauth.dcr_store().approved_names[client], "Approved CLI")
+
+    def test_operator_approves_edits_and_persists_trusted_label(self):
+        registered = self.register(client_name="Suggested & Unsafe").json()
+        client = registered["client_id"]
+        store = oauth.dcr_store()
+        self.assertEqual(store.approved_names, {})
+        initial = self.authorize(client)
+        self.assertIn('name="agent_name"', initial.text)
+        self.assertIn('value="Suggested &amp; Unsafe"', initial.text)
+        self.assertNotIn("operator_name", store.get(client))
+        self.login(client, name="Reviewed CLI")
+        self.assertEqual(store.approved_names[client], "Reviewed CLI")
+        self.assertEqual(store.get(client)["client_name"], "Suggested & Unsafe")
+        self.assertIn('value="Reviewed CLI"', self.authorize(client).text)
+        self.login(client, name="Revised CLI")
+        self.assertEqual(store.approved_names[client], "Revised CLI")
+        oauth._dcr_store.cache_clear()
+        self.assertEqual(oauth.dcr_store().approved_names[client], "Revised CLI")
+
+    def test_untrusted_registration_cannot_set_operator_approved_name(self):
+        client = self.register(client_name="Grok", operator_name="Forged Brand").json()["client_id"]
+        store = oauth.dcr_store()
+        self.assertNotIn("operator_name", store.get(client))
+        self.assertEqual(store.approved_names, {})
+        self.assertIn('value="Grok"', self.authorize(client).text)
+        self.login(client, name="Operator Chosen")
+        self.assertEqual(store.get(client)["operator_name"], "Operator Chosen")
+
+    def test_reject_invalid_name_or_bad_key_without_mutating_registration(self):
+        client = self.register().json()["client_id"]
+        store = oauth.dcr_store()
+        def submit(name, key):
+            page = self.authorize(client)
+            token = re.search(r'name="request_token" value="([^"]+)"', page.text).group(1)
+            return self.app.post("/oauth/authorize", data={
+                "request_token": token, "mcp_login_key": key,
+                "agent_name": name, "decision": "grant",
+            }, follow_redirects=False)
+        for name in ("", " ", "Unknown", "A" * 65, "leading ", "bad\nline"):
+            with self.subTest(name=repr(name)):
+                self.assertEqual(submit(name, config.MCP_LOGIN_KEY).status_code, 400)
+                self.assertEqual(store.approved_names, {})
+        denied = submit("Grok", "incorrect")
+        self.assertEqual(parse_qs(urlsplit(denied.headers["location"]).query)["error"],
+                         ["access_denied"])
+        self.assertEqual(store.approved_names, {})
+        self.assertEqual(store.get(client)["client_name"], "Synthetic CLI")
+        ok = submit("Grok", config.MCP_LOGIN_KEY)
+        self.assertEqual(ok.status_code, 302)
+        self.assertEqual(store.approved_names[client], "Grok")
+        failed = submit("changed", "incorrect")
+        self.assertEqual(parse_qs(urlsplit(failed.headers["location"]).query)["error"],
+                         ["access_denied"])
+        self.assertEqual(store.approved_names[client], "Grok")
+
+    def test_approved_name_refreshes_full_cache_on_potential_mutations(self):
+        store = oauth.dcr_store()
+        initial = store.approved_names
+        one = self.register().json()["client_id"]
+        self.assertIsNot(initial, store.approved_names)
+        store.approve_name(one, "Grok")
+        approved = store.approved_names
+        self.assertEqual(dict(approved), {one: "Grok"})
+        store.approve_name(one, "Grok")  # Intentional full reload even without change.
+        self.assertIsNot(approved, store.approved_names)
+        two = self.register().json()["client_id"]
+        store.approve_name(two, "Grok")
+        self.assertEqual(set(store.approved_names), {one, two})
+        self.assertEqual(store.revoke(one), 1)
+        self.assertEqual(dict(store.approved_names), {two: "Grok"})
+        previous = store.approved_names
+        self.assertEqual(store.revoke(one), 0)
+        self.assertIsNot(previous, store.approved_names)
 
     def test_invalid_registration_attempts_are_rate_limited(self):
         from app import dcr_registry
