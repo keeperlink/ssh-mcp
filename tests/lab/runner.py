@@ -253,13 +253,16 @@ def owns(kind: str, name: str, run: str) -> bool:
     return True
 
 
-def names(run: str) -> dict[str, str]:
-    return {
+def names(run: str, *, dual_host: bool = False) -> dict[str, str]:
+    result = {
         "network": f"smt-net-{run}",
         "volume": f"smt-db-{run}",
         "ssh": f"smt-ssh-{run}",
         "mcp": f"smt-mcp-{run}",
     }
+    if dual_host:
+        result["ssh2"] = f"smt-ssh2-{run}"
+    return result
 
 
 def stop_owned_client(run: str, client_name: str) -> None:
@@ -384,33 +387,40 @@ def create_secrets(state: dict, folder: Path) -> None:
     private.mkdir(mode=0o700)
     cmd(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C",
          "disposable-ssh-mcp-mcp-lab", "-f", str(private / "identity")])
-    inventory = {
-        "version": 1,
-        "hosts": [{
-            "alias": "fixture", "address": "ssh-fixture", "port": 22,
+    def fixture_host(alias: str, address: str) -> dict:
+        return {
+            "alias": alias, "address": address, "port": 22,
             "username": "tester", "identity_file": "/run/ssh-mcp/identity",
             "known_hosts_file": "/run/ssh-mcp/known_hosts",
             "principals": ["ssh-mcp-operator"], "environment": "non-production",
             "access": state.get("access", "always-granted"),
             "privileged_access": state.get("privileged_access", "none"),
             "max_parallel": 1,
-        }],
-    }
+        }
+    hosts = [fixture_host("fixture", "ssh-fixture")]
+    if state.get("dual_host", False):
+        hosts.append(fixture_host("fixture-dest", "ssh-fixture-dest"))
+    inventory = {"version": 1, "hosts": hosts}
     save_json(private / "inventory.json", inventory)
     if state.get("privileged_access", "none") != "none":
         # Generate only disposable per-run sudo credentials. The SSH fixture
         # receives the password via a single read-only file; the MCP service
         # receives it through its existing protected JSON path. Never put
         # this value in Docker argv, environment, logs or signed inventory.
-        password = secrets.token_urlsafe(36)
-        fd = os.open((folder if sealed else private) / "fixture-sudo-password",
-                     os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(password + "\n")
+        sudo_passwords = {}
+        for host in hosts:
+            alias = host["alias"]
+            file_name = "fixture-sudo-password" if alias == "fixture" else "fixture-dest-sudo-password"
+            password = secrets.token_urlsafe(36)
+            fd = os.open((folder if sealed else private) / file_name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(password + "\n")
+            sudo_passwords[alias] = password
         (private / "protected").mkdir(mode=0o700)
         if not sealed:
             save_json(private / "protected" / "ssh-mcp-secrets",
-                      {"sudo_passwords": {"fixture": password}})
+                      {"sudo_passwords": sudo_passwords})
     env = {
         "MCP_TOKEN_SIGNING_SECRET": secrets.token_hex(32),
         "MCP_ENVIRONMENT": "lab",
@@ -438,7 +448,7 @@ def create_secrets(state: dict, folder: Path) -> None:
         "SSH_JOBS_ENABLED": "true",
         "SSH_JOBS_DB": "/var/lib/ssh-mcp/jobs.sqlite",
         "SSH_INVENTORY_FILE": "/run/ssh-mcp/inventory.json",
-        "SSH_APPROVED_ALIASES": "fixture",
+        "SSH_APPROVED_ALIASES": "fixture,fixture-dest" if state.get("dual_host", False) else "fixture",
     }
     if not sealed:
         env["MCP_LOGIN_KEY"] = secrets.token_hex(32)
@@ -490,31 +500,42 @@ def start_resources(state: dict, folder: Path) -> None:
     docker("volume", "create", *labels, nn["volume"])
     key = (folder / "secrets" / "identity.pub").read_text(encoding="utf-8").strip()
     root_enabled = state.get("privileged_access", "none") != "none"
-    fixture_sudo_mount = (
-        ["--mount", "type=bind,source=" + str(
-            folder / "fixture-sudo-password" if state.get("credentials") == "sealed-v2"
-            else folder / "secrets" / "fixture-sudo-password")
-         + ",target=/run/fixture-sudo-password,readonly"] if root_enabled else []
-    )
-    docker("run", "-d", "--name", nn["ssh"], "--network", nn["network"],
-           "--network-alias", "ssh-fixture", *labels, "--restart", "no",
-           "--pids-limit", "128", "--memory", "256m",
-           *fixture_sudo_mount, "--env", "SSH_AUTHORIZED_KEY=" + key,
-           state["fixture_image"])
-    for _ in range(40):
-        probe = cmd(["docker", "exec", nn["ssh"], "sh", "-c",
-                     "test -s /etc/ssh/ssh_host_ed25519_key.pub && pgrep -x sshd >/dev/null"],
-                    check=False)
-        if probe.returncode == 0:
-            break
-        time.sleep(0.2)
-    else:
-        raise LabError("Disposable SSH fixture never became ready")
-    pub = docker("exec", nn["ssh"], "cat", "/etc/ssh/ssh_host_ed25519_key.pub")
-    if not pub.startswith("ssh-ed25519 "):
-        raise LabError("Unexpected disposable SSH host key")
+    # Second fixture is opt-in. Both are independently running sshd
+    # containers with distinct host key pins and their own generated
+    # password file. No host ports, real host names or lateral SSH.
+    endpoints = [("ssh", "ssh-fixture", "fixture-sudo-password")]
+    if state.get("dual_host", False):
+        endpoints.append(("ssh2", "ssh-fixture-dest", "fixture-dest-sudo-password"))
+    host_keys: list[str] = []
+    for key_name, address, password_name in endpoints:
+        fixture_sudo_mount = (
+            ["--mount", "type=bind,source=" + str(
+                (folder if state.get("credentials") == "sealed-v2" else folder / "secrets")
+                / password_name) + ",target=/run/fixture-sudo-password,readonly"]
+            if root_enabled else []
+        )
+        docker("run", "-d", "--name", nn[key_name], "--network", nn["network"],
+               "--network-alias", address, *labels, "--restart", "no",
+               "--pids-limit", "128", "--memory", "256m",
+               *fixture_sudo_mount, "--env", "SSH_AUTHORIZED_KEY=" + key,
+               state["fixture_image"])
+        for _ in range(40):
+            probe = cmd(["docker", "exec", nn[key_name], "sh", "-c",
+                         "test -s /etc/ssh/ssh_host_ed25519_key.pub && pgrep -x sshd >/dev/null"],
+                        check=False)
+            if probe.returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise LabError("Disposable SSH fixture never became ready")
+        pub = docker("exec", nn[key_name], "cat", "/etc/ssh/ssh_host_ed25519_key.pub")
+        if not pub.startswith("ssh-ed25519 ") or pub in host_keys:
+            raise LabError("Expected independent disposable SSH host keys")
+        host_keys.append(pub)
     pinned = folder / "secrets" / "known_hosts"
-    pinned.write_text("ssh-fixture " + pub + "\n", encoding="utf-8")
+    pinned.write_text("".join(f"{address} {host_key}\n"
+                    for (_, address, _), host_key in zip(endpoints, host_keys)),
+                    encoding="utf-8")
     os.chmod(pinned, 0o600)
     # Docker is the already-authorized lab privilege path; this helper is --rm.
     docker("run", "--rm", "--network", "none", "--user", "0:0",
@@ -563,17 +584,18 @@ def start_resources(state: dict, folder: Path) -> None:
                "('MCP_LOGIN_KEY','HISTORY_VIEWER_PASSWORD','MCP_METRICS_TOKEN')); "
                "assert os.path.isfile(config.MCP_MANAGED_SECRETS_SOURCE)")
     verify_host_isolation(nn["mcp"])
-    result = docker(
-        "exec", nn["mcp"], "ssh", "-F", "/dev/null", "-T", "-n",
-        "-i", "/run/ssh-mcp/identity",
-        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-        "-o", "UserKnownHostsFile=/run/ssh-mcp/known_hosts",
-        "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
-        "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-        "-o", "ConnectTimeout=5", "--", "tester@ssh-fixture", "id -un",
-    )
-    if result != "tester":
-        raise LabError("Pinned SSH login into disposable fixture failed")
+    for _, address, _ in endpoints:
+        result = docker(
+            "exec", nn["mcp"], "ssh", "-F", "/dev/null", "-T", "-n",
+            "-i", "/run/ssh-mcp/identity",
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=/run/ssh-mcp/known_hosts",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
+            "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+            "-o", "ConnectTimeout=5", "--", "tester@" + address, "id -un",
+        )
+        if result != "tester":
+            raise LabError("Pinned SSH login into disposable fixture failed")
 
 
 def verify_host_isolation(mcp_name: str) -> None:
@@ -639,9 +661,11 @@ def setup(args: argparse.Namespace) -> int:
             "access": getattr(args, "access", "always-granted"),
             "privileged_access": getattr(args, "privileged_access", "none"),
             "credentials": getattr(args, "credentials", "legacy"),
+            "dual_host": bool(getattr(args, "dual_host", False)),
             "updated_at": now(), "stages": [], "tests": [],
             "workspace": str(WORKSPACES / story / run),
-            "names": names(run), "original_containers": original,
+            "names": names(run, dual_host=bool(getattr(args, "dual_host", False))),
+            "original_containers": original,
         }
         state_path = folder / "state.json"
         save_json(state_path, state)
@@ -680,9 +704,10 @@ def read_secrets(path: Path) -> list[str]:
             found.extend(s.split("=", 1)[1].strip() for s in env.read_text().splitlines()
                          if s.startswith(("MCP_LOGIN_KEY=", "MCP_TOKEN_SIGNING_SECRET=",
                                           "HISTORY_VIEWER_PASSWORD=", "MCP_METRICS_TOKEN=")))
-    sudo = path / "fixture-sudo-password"
-    if sudo.is_file() and not sudo.is_symlink():
-        found.append(sudo.read_text().strip())
+    for name in ("fixture-sudo-password", "fixture-dest-sudo-password"):
+        sudo = path / name
+        if sudo.is_file() and not sudo.is_symlink():
+            found.append(sudo.read_text().strip())
     return found
 
 
@@ -708,7 +733,9 @@ def execute_test(args: argparse.Namespace) -> int:
         if state["status"] != "active":
             raise LabError("Run is not active; inspect status and cleanup/recreate")
         nn = state["names"]
-        for key in ("network", "ssh", "mcp"):
+        for key in ("network", "ssh", "ssh2", "mcp"):
+            if key == "ssh2" and not state.get("dual_host", False):
+                continue
             kind = "network" if key == "network" else "container"
             if not owns(kind, nn[key], run):
                 raise LabError(f"Test resource disappeared: {nn[key]}")
@@ -846,7 +873,7 @@ def cleanup(args: argparse.Namespace) -> int:
         # Never touch a resource unless its exact run ownership label matches.
         # Check predictable container names too, including names that would
         # be absent from a run-label-filtered listing after an ownership change.
-        for expected in (nn["ssh"], nn["mcp"]):
+        for expected in (nn[key] for key in ("ssh", "ssh2", "mcp") if key in nn):
             owns("container", expected, run)
         for name in docker("ps", "-a", "--filter", "label=" + OWNER_LABEL + "=" + run,
                            "--format", "{{.Names}}").splitlines():
@@ -866,7 +893,8 @@ def cleanup(args: argparse.Namespace) -> int:
             # Limit this operation to the exact, validated run-owned directory.
             cmd(["sudo", "-n", "/bin/rm", "-rf", "--", str(private)])
         (folder / "mcp.env").unlink(missing_ok=True)
-        for name in ("client.env", "mcp.sealed.env", "fixture-sudo-password"):
+        for name in ("client.env", "mcp.sealed.env", "fixture-sudo-password",
+                     "fixture-dest-sudo-password"):
             path = folder / name
             if path.is_symlink():
                 raise LabError("Refusing unsafe synthetic credential cleanup")
@@ -903,7 +931,7 @@ def reconcile_cleanup(args: argparse.Namespace) -> int:
             raise LabError("Refusing to reconcile a non-active or mismatched run")
         if state["status"] not in {"active", "setup_failed", "client_cleanup_failed"}:
             raise LabError("Only incomplete cleanup may be reconciled")
-        if state["names"] != names(run):
+        if state["names"] != names(run, dual_host=state.get("dual_host", False)):
             raise LabError("Run resource names do not match their namespace")
 
         # Check both predictable names and every resource with the run label.
@@ -919,7 +947,8 @@ def reconcile_cleanup(args: argparse.Namespace) -> int:
                 or docker("network", "ls", "-q", "--filter", owner)):
             raise LabError("Run-labeled Docker resources remain; use normal cleanup")
         for path in (folder / "secrets", folder / "mcp.env", folder / "client.env",
-                     folder / "mcp.sealed.env", folder / "fixture-sudo-password"):
+                     folder / "mcp.sealed.env", folder / "fixture-sudo-password",
+                     folder / "fixture-dest-sudo-password"):
             if path.exists() or path.is_symlink():
                 raise LabError("Run-private credentials remain; use normal cleanup")
 
@@ -1000,6 +1029,8 @@ def parse_args() -> argparse.Namespace:
             p.add_argument("--privileged-access", default="none",
                            choices=("none", "restricted", "always-granted"),
                            help="Only disposable fixture root policy; uses generated password")
+            p.add_argument("--dual-host", action="store_true",
+                           help="Use two isolated synthetic SSH fixture containers and host-key pins")
         if name == "run":
             p.add_argument("--timeout", type=int, default=180)
     p = sub.add_parser("exec")
