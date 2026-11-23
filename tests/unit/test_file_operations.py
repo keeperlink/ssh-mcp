@@ -29,6 +29,150 @@ class AuditTests(unittest.TestCase):
         self.audit = FileAudit(self.store)
         self.viewer = HistoryStore(self.store)
 
+    def test_transfer_dual_host_audit_progress_and_rollback_schema(self):
+        identifier = self.audit.reserve(
+            "alice", "dest", "transfer", "/private/target.key", "TEST-355",
+        )
+        self.audit.set_source(identifier, "source")
+        self.audit.settle_approval(identifier, 0)
+        self.audit.start("alice", "dest", "transfer", "/private/target.key",
+                         "TEST-355", "relay-id-123", precreated_id=identifier)
+        self.audit.progress(identifier, 10, 100)
+        with self.assertRaises(ValueError):
+            self.audit.progress(identifier, 101, 100)
+        with self.assertRaises(ValueError):
+            self.audit.progress(identifier, -1, 100)
+        self.audit.finish(identifier, "cancelled", byte_count=10,
+                          error_code="cancelled",
+                          transfer={"direction": "relay", "source_server": "source",
+                                    "dest_server": "dest",
+                                    "source_path": "/very/private/source.key",
+                                    "dest_path": "/very/private/target.key",
+                                    "source_privileged": False,
+                                    "dest_privileged": True,
+                                    "mode": "overwrite",
+                                    "size": 100, "sha256": "a" * 64,
+                                    "private_password": "NEVER_PERSIST_THIS"})
+        rows = self.viewer.list({"host": "source", "record_kind": "file"})["jobs"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_server"], "source")
+        self.assertEqual(rows[0]["byte_count"], 10)
+        self.assertEqual(rows[0]["status"], "cancelled")
+        rows = self.viewer.list({"host": "dest", "record_kind": "file"})["jobs"]
+        self.assertEqual(len(rows), 1)
+        detail = self.viewer.detail(rows[0]["id"])
+        self.assertEqual(detail["file_metadata"]["transfer"]["source_path"],
+                         "source.key")
+        self.assertNotIn("private_password", str(detail))
+        self.assertNotIn("/very/private/", str(detail))
+        with self.store._connect() as db:
+            db.execute("DROP VIEW IF EXISTS history_events")
+            db.execute("ALTER TABLE file_operations DROP COLUMN source_server")
+        reopened = JobStore(self.store.path)
+        with reopened._connect() as db:
+            self.assertIn("source_server", {
+                row["name"] for row in db.execute("PRAGMA table_info(file_operations)")
+            })
+        self.assertIsNone(HistoryStore(reopened).detail(rows[0]["id"])["source_server"]
+                          if "source_server" in HistoryStore(reopened).detail(rows[0]["id"])
+                          else None)
+
+    def test_relay_audit_rejects_untrusted_metadata_and_formats_only_leaf_paths(self):
+        identifier = self.audit.start("alice", "dest", "transfer", "/secret/dest.key",
+                                      "TEST-355", "relay-redaction-355")
+        with self.assertRaisesRegex(ValueError, "direction"):
+            self.audit.finish(identifier, "failed", transfer={"direction": "malicious"})
+        payload = {
+            "direction": "relay",
+            "source_server": "source",
+            "dest_server": "dest",
+            "source_path": "/path/SECRET-source.bin",
+            "dest_path": "/path/SECRET-dest.bin",
+            "source_privileged": "true",
+            "dest_privileged": 1,
+            "mode": "not-permitted",
+            "sha256": "not-sha256",
+            "chunk_sha256": "g" * 64,
+            "size": -20,
+            "offset": "bad-offset",
+            "next_offset": 2**64,
+            "eof": 1,
+            "extra": "SENSITIVE_NEVER_PERSIST",
+        }
+        self.audit.finish(identifier, "failed", byte_count=0,
+                          error_code="transport_error", transfer=payload)
+        detail = self.viewer.detail("file_" + identifier)
+        relay = detail["file_metadata"]["transfer"]
+        self.assertEqual(relay["direction"], "relay")
+        self.assertEqual(relay["source_path"], "SECRET-source.bin")
+        self.assertEqual(relay["dest_path"], "SECRET-dest.bin")
+        self.assertNotIn("source_privileged", relay)
+        self.assertNotIn("dest_privileged", relay)
+        self.assertNotIn("size", relay)
+        self.assertNotIn("offset", relay)
+        self.assertNotIn("sha256", relay)
+        self.assertNotIn("mode", relay)
+        self.assertNotIn("extra", relay)
+        self.assertNotIn("SENSITIVE_NEVER_PERSIST", str(detail))
+        second = self.audit.start("alice", "dest", "transfer", "leaf",
+                                  "TEST-355", "relay-oversized-355")
+        self.audit.finish(second, "succeeded", byte_count=1,
+                          transfer={"direction": "relay", "source_server": "a" * 256,
+                                    "dest_server": 123, "source_path": 42,
+                                    "dest_path": "b" * 256,
+                                    "source_privileged": False,
+                                    "dest_privileged": True, "eof": False,
+                                    "sha256": "a" * 64, "size": 1,
+                                    "offset": 0, "next_offset": 1, "mode": "create"})
+        saved = self.viewer.detail("file_" + second)["file_metadata"]["transfer"]
+        self.assertNotIn("source_server", saved)
+        self.assertNotIn("dest_server", saved)
+        self.assertNotIn("source_path", saved)
+        self.assertNotIn("dest_path", saved)
+        self.assertFalse(saved["source_privileged"])
+        self.assertTrue(saved["dest_privileged"])
+        self.assertEqual(saved["sha256"], "a" * 64)
+        self.assertEqual(saved["size"], 1)
+        self.assertEqual(saved["mode"], "create")
+
+    def test_operator_transfer_cancellation_requires_both_registered_hosts(self):
+        from app import config
+        from app.history import HistoryStore
+        actor = config.MCP_OPERATOR_SUBJECT
+        identifier = self.audit.reserve(
+            actor, "dest", "transfer", "/private/dest", "TEST-355",
+        )
+        self.audit.set_source(identifier, "source")
+        self.audit.settle_approval(identifier, 0)
+        self.audit.start(actor, "dest", "transfer", "/private/dest",
+                         "TEST-355", "operator-relay-355",
+                         precreated_id=identifier)
+        jobs = HistoryStore(self.store)
+        job_id = "file_" + identifier
+        self.assertIsNone(jobs.cancellation_target(
+            "non-transfer", actor=None, approved_hosts={"source", "dest"},
+        ))
+        self.assertIsNone(jobs.cancellation_target(
+            job_id, actor="unknown-user", approved_hosts={"source", "dest"},
+        ))
+        self.assertIsNone(jobs.cancellation_target(
+            job_id, actor=None, approved_hosts={"dest"},
+        ))
+        self.assertIsNone(jobs.cancellation_target(
+            job_id, actor=None, approved_hosts={"source"},
+        ))
+        active = jobs.cancellation_target(
+            job_id, actor=actor, approved_hosts={"source", "dest"},
+        )
+        self.assertEqual(active["target_type"], "file")
+        self.assertEqual(active["target_id"], job_id)
+        self.assertTrue(active["available"])
+        self.audit.finish(identifier, "unknown", error_code="interrupted")
+        terminal = jobs.cancellation_target(
+            job_id, actor=None, approved_hosts={"source", "dest"},
+        )
+        self.assertFalse(terminal["available"])
+
     def test_mixed_history_and_actor_scoping(self):
         key = self.audit.start("alice", "dev", "read", "/tmp/synthetic/file.txt",
                                "TEST-235", "test-op-001")

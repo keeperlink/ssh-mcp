@@ -304,7 +304,9 @@
     if (!["queued", "running"].includes(job.status)) state.cancelling.delete(job.id);
     row.replaceChildren();
     const cells = [
-      formatTableTime(job.created_at), job.agent || "Unknown", tableStoryId(job.story_id), job.server,
+      formatTableTime(job.created_at), job.agent || "Unknown", tableStoryId(job.story_id),
+      job.source_server && job.operation_kind === "transfer"
+        ? job.source_server + " → " + job.server : job.server,
       (job.command_preview || job.command || "—").split(/\r?\n/, 1)[0],
       modeName(job.mode), statusLabel(job.status), duration(job.elapsed_seconds)
     ];
@@ -734,6 +736,15 @@
       ].forEach(([label, value]) => appendMeta(props, label, value));
       const transfer = job.file_metadata?.transfer;
       if (transfer) {
+        if (transfer.direction === "relay") {
+          [["Source host", transfer.source_server || job.source_server || "—"],
+           ["Source path", transfer.source_path || "—"],
+           ["Source root", transfer.source_privileged ? "Yes" : "No"],
+           ["Destination host", transfer.dest_server || job.server],
+           ["Destination path", transfer.dest_path || job.path_summary],
+           ["Destination root", transfer.dest_privileged ? "Yes" : "No"]
+          ].forEach(([label, value]) => appendMeta(props, label, value));
+        }
         [["Direction", transfer.direction],
          ["Transfer mode", transfer.mode || "—"],
          ["Total file bytes", transfer.size ?? "—"],

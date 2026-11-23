@@ -25,6 +25,9 @@ tag or an immutable digest for reproducible deployments.
 - Execute synchronous commands, durable asynchronous jobs and sequential
   batches; inspect bounded results after disconnects.
 - Request eligible job/batch cancellation, preserving uncertain-outcome status.
+- Relay host-to-host files (up to 1 GiB by default) through bounded memory,
+  with two-host authorization, atomic 0600 publication and SHA-256 integrity;
+  no file bytes enter MCP responses, durable audit or container disk.
 - Read/write text, preview/apply multi-file patches and transfer bounded
   binary files (native upload currently requires a ChatGPT attachment).
 - Require operator decisions for restricted hosts or privileged execution,

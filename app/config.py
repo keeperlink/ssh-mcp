@@ -87,6 +87,9 @@ SSH_MAX_ARGUMENT_BYTES = int(os.getenv("SSH_MAX_ARGUMENT_BYTES", "32768"))
 SSH_MAX_ARGUMENTS = int(os.getenv("SSH_MAX_ARGUMENTS", "32"))
 SSH_MAX_CONCURRENT = int(os.getenv("SSH_MAX_CONCURRENT", "4"))
 SSH_MAX_ACTIVE_JOBS = int(os.getenv("SSH_MAX_ACTIVE_JOBS", "32"))
+SSH_TRANSFER_MAX_BYTES = int(os.getenv("SSH_TRANSFER_MAX_BYTES", "1073741824"))
+SSH_TRANSFER_CHUNK_BYTES = int(os.getenv("SSH_TRANSFER_CHUNK_BYTES", "262144"))
+
 
 
 def is_commit_version(value: str) -> bool:
@@ -147,5 +150,8 @@ def validate_mcp_config() -> None:
             or not 1 <= SSH_MAX_ARGUMENT_BYTES <= 65536
             or not 1 <= SSH_MAX_ARGUMENTS <= 64
             or not 1 <= SSH_MAX_CONCURRENT <= 32
-            or not 1 <= SSH_MAX_ACTIVE_JOBS <= 256):
+            or not 1 <= SSH_MAX_ACTIVE_JOBS <= 256
+            or not 1 <= SSH_TRANSFER_MAX_BYTES <= 4 * 1024**3
+            or not 4096 <= SSH_TRANSFER_CHUNK_BYTES <= 4194304
+            or SSH_TRANSFER_CHUNK_BYTES > SSH_TRANSFER_MAX_BYTES):
         raise RuntimeError("Invalid operational limits")

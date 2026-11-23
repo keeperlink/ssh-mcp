@@ -220,6 +220,38 @@ class FileOperationRequest(StrictRequest):
                                      pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class TransferFileRequest(StrictRequest):
+    """Opaque, dual-host binary relay: never accepts or returns file contents."""
+    source_server: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    source_path: str = Field(min_length=1, max_length=4096)
+    dest_server: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    dest_path: str = Field(min_length=1, max_length=4096)
+    source_privileged: bool = Field(default=False, strict=True)
+    dest_privileged: bool = Field(default=False, strict=True)
+    mode: Literal["create", "overwrite"] = "create"
+    create_parents: bool = Field(default=False, strict=True)
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    wait_seconds: int = Field(default=30, ge=0, le=60, strict=True)
+    timeout_seconds: int = Field(default=config.SSH_DEFAULT_TIMEOUT_SECONDS,
+                                 ge=1, le=config.SSH_MAX_TIMEOUT_SECONDS, strict=True)
+    reason: str = Field(min_length=1, max_length=200)
+    story_id: str | None = Field(default=None, min_length=1, max_length=80,
+                                 pattern=r"^[^\s\x00-\x1F\x7F-\x9F]+$")
+    operation_id: str | None = Field(default=None, min_length=8, max_length=120,
+                                     pattern=r"^[A-Za-z0-9_-]+$")
+
+    @model_validator(mode="after")
+    def valid_hosts_and_paths(self) -> Self:
+        if self.source_server == self.dest_server:
+            raise ValueError("Host-to-host transfer requires different approved hosts")
+        if any("\x00" in p for p in (self.source_path, self.dest_path)):
+            raise ValueError("File paths must not contain NUL")
+        if self.mode == "create" and self.expected_sha256 is not None:
+            raise ValueError("Destination preimage checksum applies only to overwrite")
+        return self
+
+
 class ReadFileRequest(FileOperationRequest):
     """Bounded text read with opaque continuation and optional full-file SHA."""
     cursor: str | None = Field(default=None, max_length=2048)

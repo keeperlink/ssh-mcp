@@ -95,6 +95,14 @@ def approval_summary(name: str, arguments: dict[str, Any],
             " ".join(arg[:90] for arg in step.argv[:6])
             for step in batch.commands
         )[:500]
+    if name == "transfer_file":
+        source = _display_path(str(arguments.get("source_path", "")), None)
+        dest = _display_path(str(arguments.get("dest_path", "")), None)
+        src_host = str(arguments.get("source_server", ""))[:64]
+        dest_host = str(arguments.get("dest_server", ""))[:64]
+        src_root = " (root)" if arguments.get("source_privileged") is True else ""
+        dest_root = " (root)" if arguments.get("dest_privileged") is True else ""
+        return f"transfer_file: {src_host}:{source}{src_root} -> {dest_host}:{dest}{dest_root}"
     if name == "apply_patch":
         request = ApplyPatchRequest.model_validate(arguments)
         actions = _parse_patch(request.patch)

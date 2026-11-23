@@ -166,6 +166,8 @@ class HistoryStore:
         item["record_kind"] = row["record_kind"]
         item["operation_kind"] = row["operation_kind"]
         item["path_summary"] = row["path_summary"]
+        if row["source_server"] is not None:
+            item["source_server"] = row["source_server"]
         item["byte_count"] = row["byte_count"]
         item["error_code"] = row["error_code"]
         item["reason"] = None
@@ -333,8 +335,13 @@ class HistoryStore:
                     where.append("UPPER(story_id)=?")
                     params.append(value.upper())
                     continue
-            where.append(f"{column}=?")
-            params.append(value)
+            if key == "host":
+                where.append("(server=? OR (record_kind='file' AND operation_kind='transfer' "
+                             "AND source_server=?))")
+                params.extend([value, value])
+            else:
+                where.append(f"{column}=?")
+                params.append(value)
         command = filters.get("command", "").strip()
         if command:
             if len(command) > 64:
@@ -600,10 +607,24 @@ class HistoryStore:
     def cancellation_target(
         self, job_id: str, *, actor: str | None, approved_hosts: set[str],
     ) -> dict[str, Any] | None:
-        """Resolve browser command rows to actor-owned jobs or parent batches."""
+        """Resolve browser command, batch and transfer rows to cancellable tasks."""
         if not JOB_ID.fullmatch(job_id):
             return None
         with self._connect() as db:
+            if job_id.startswith("file_"):
+                transfer = db.execute(
+                    "SELECT actor,server,source_server,status,operation_kind "
+                    "FROM file_operations WHERE id=?", (job_id[5:],),
+                ).fetchone()
+                if (transfer is None or transfer["operation_kind"] != "transfer"
+                        or not _operator_actor(transfer["actor"])
+                        or (actor is not None and transfer["actor"] != actor)
+                        or transfer["server"] not in approved_hosts
+                        or transfer["source_server"] not in approved_hosts):
+                    return None
+                return {"target_type": "file", "target_id": job_id,
+                        "actor": str(transfer["actor"]),
+                        "available": transfer["status"] == "running"}
             job = db.execute(
                 "SELECT id,actor,server,status,cancel_requested FROM jobs WHERE id=?",
                 (job_id,),
@@ -1108,6 +1129,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                           approvals: ApprovalManager | None = None,
                           job_manager: JobManager | None = None,
                           batch_manager: BatchCanceller | None = None,
+                          relay: Any = None,
                           readiness: ReadinessMonitor | None = None) -> APIRouter:
     """Create browser-only routes; operator actions never execute SSH commands."""
     secret = os.getenv("HISTORY_VIEWER_PASSWORD", "")
@@ -1140,7 +1162,16 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                 batches_enabled=batch_manager is not None,
             ))
         for item in items:
-            item["cancel_available"] = item["id"] in eligible
+            available = item["id"] in eligible
+            if (relay is not None and item.get("record_kind") == "file"
+                    and item.get("operation_kind") == "transfer"
+                    and _operator_actor(item.get("actor"))
+                    and item.get("server") in approved_set
+                    and item.get("source_server") in approved_set
+                    and item.get("status") == "running"):
+                active = relay._active.get(str(item["id"]))
+                available = active is not None and not active.done()
+            item["cancel_available"] = available
         return items
 
     def signed_in(request: Request, *, touch: bool = True) -> bool:
@@ -1520,7 +1551,13 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                     return _json({"error": "Job unavailable"}, 404)
                 if not target["available"]:
                     return _json({"error": "Job no longer cancellable"}, 409)
-                if target["target_type"] == "batch":
+                if target["target_type"] == "file":
+                    if relay is None:
+                        return _json({"error": "Transfer cancellation unavailable"}, 404)
+                    result = await relay.cancel(
+                        target["actor"], target["target_id"],
+                    )
+                elif target["target_type"] == "batch":
                     if batch_manager is None:
                         return _json({"error": "Batch cancellation unavailable"}, 404)
                     result = batch_manager.cancel(

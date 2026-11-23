@@ -135,6 +135,7 @@ if os.getenv("HISTORY_VIEWER_ENABLED", "false").lower() == "true":
         manager.store, approved_hosts=manager.executor.list_servers(MCP_OPERATOR_SUBJECT),
         approvals=_approvals, job_manager=manager,
         batch_manager=_job_registry.get("batches"),
+        relay=_job_registry.get("relay"),
         readiness=getattr(manager.executor, "readiness", None),
     ))
 

@@ -74,6 +74,71 @@ same patch with a fresh operation ID after reviewing
 the preview. Stops/rollbacks and stale-content
 diagnostics are described in [Patch workflows](patch-workflows.md).
 
+## Host-to-host relay (`transfer_file`)
+
+`transfer_file` copies one ordinary file from **one approved SSH host to
+another**. The SSH-MCP service opens two independently pinned SSH sessions,
+streams fixed-size chunks through bounded process memory, and never includes
+binary data in MCP tool results or SQLite. Neither host needs SSH keys
+or direct network access to the other. Source and destination have independent
+normal/root approvals; a grant for one host does not authorize the other.
+Root access requires the current per-host sudo unlock policy.
+
+~~~yaml
+transfer_file:
+  source_server: demo-node-a
+  source_path: artifacts/candidate.deb
+  dest_server: demo-node-b
+  dest_path: artifacts/candidate.deb
+  mode: create
+  create_parents: false
+  wait_seconds: 30
+  timeout_seconds: 900
+  reason: Copy a previously verified package
+  story_id: EXAMPLE-123
+  operation_id: unique-approved-copy-001
+~~~
+
+Paths may be absolute or relative to the effective remote user's HOME.
+`source_privileged` and `dest_privileged` default to `false`; privileged
+destination files belong to root, and ordinary destination files belong to
+the connected SSH user. New files always use `0600`. Optional
+`source_sha256` checks the immutable source bytes; `expected_sha256`
+checks an existing destination before **overwrite** and is rejected
+for `mode=create`. Default create mode fails if the destination exists.
+
+The relay verifies the source digest before beginning the destination
+write. A temporary private file in the destination directory is committed
+atomically only after full-size and digest verification, a confirmed complete
+source SSH exchange, and destination pre-image revalidation. Transfers to
+the same normalized destination path are serialized within the service.
+No transfer deletes the source. File contents never pass through the model
+or MCP client.
+
+Small transfers return `succeeded` directly. If still active after
+`wait_seconds` (0–60, default 30), the tool returns `running` with a durable
+`file_...` history ID. Use `get_job`, `list_jobs` or the Operator Console
+to monitor. `cancel_job` requests cancellation and closes both channels;
+a confirmed incomplete receiver removes its private stage. If cancellation
+or publication cannot be confirmed, the terminal result is `unknown`, not
+a guarantee that the destination is untouched. **Inspect the destination
+before retrying**, particularly after an overwrite. The service removes
+orphaned, unlocked private stages on later authorized transfers, never stages
+still held by a live transfer.
+
+Managed signed `service.json` may include an optional `transfer` section:
+
+~~~json
+{"transfer": {"max_bytes": 1073741824, "chunk_bytes": 262144}}
+~~~
+
+Standalone mode uses `SSH_TRANSFER_MAX_BYTES` and
+`SSH_TRANSFER_CHUNK_BYTES`. Defaults are 1 GiB maximum file size and
+256 KiB chunks; hard ceilings are 4 GiB and 4 MiB respectively, with
+chunks no larger than the maximum file size. Transfer execution also obeys
+the existing SSH timeout and host/global concurrency limits. No temporary
+relay files are written inside the SSH-MCP container.
+
 ## Native binary upload (current client limitation)
 
 `upload_file` uses a **native ChatGPT attached file** in the
