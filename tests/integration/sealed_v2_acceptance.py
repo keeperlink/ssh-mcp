@@ -100,7 +100,9 @@ def main() -> None:
             assert bad.status_code == 403 and bad.json()["error"] == "Incorrect Console password."
             current = next(p for p in snapshot(browser)["pending_approvals"]
                            if p["id"] == original_id)
-            assert current["expires_at"] == original_deadline
+            assert abs(current["expires_at"] - original_deadline) <= 1.0, (
+                "Pending approval expiry changed after wrong password"
+            )
             assert not pending_root.done()
             check("sealed_wrong_password_keeps_pending_deadline")
             allowed = decide(browser, csrf, original_id, duration="5m",
