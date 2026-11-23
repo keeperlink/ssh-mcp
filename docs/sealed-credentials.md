@@ -119,13 +119,34 @@ the originating MCP tool request releases the credential before returning.
 Timed root grants continue to expire/revoke only by their approved scope.
 The Console clears its root-password input on every submission and error.
 
-**Activation guard still in force:** hardcoded
+**Production activation guard still in force:** hardcoded
 `SEALED_RUNTIME_READY=False` is unchanged. No v2 runtime activation,
 signing, production cutover or credential rotation is authorized by this
 source change. Actual sudo implementations must independently pass LAB
 conclusive safety and fresh root-proof tests. DB recovery/cutover, offline
 rekey and mandatory rotation of old plaintext credentials remain separate
 gates before declaring SKY-347 complete.
+
+### Stage 3C: disposable LAB-only sealed activation fixture
+
+The separately installed, immutable `tests/lab/runner.py` can prepare
+`--credentials sealed-v2` with only synthetic SSH identities and host
+aliases. It builds a clearly labeled disposable **derivative** of the
+reviewed application image with a single source-verified activation
+override in the installed wheel. The committed application and normal
+production release image still refuse v2 at startup; no environment
+variable can enable it in the normal image. Generated OAuth/Console
+passwords and metrics bearer values reach the synthetic test client only,
+while the sudo fixture password reaches only the SSH test host. The
+sealed service reads verifiers and a per-host AES-GCM envelope in its
+protected source file. All artifacts require owner-checked LAB cleanup.
+
+Stage/activate the new **eight-file** runner only after paired merges
+and separate LAB approval. `tests/integration/sealed_v2_acceptance.py`
+covers live synthetic OAuth, Console, metrics, Locked host discovery,
+sudo unlocks and revocation. This is LAB-only evidence, not approval for
+Jenkins credential changes, signing, deployment, remote password
+rotation or production sealed-mode cutover and rollback.
 
 **Temporary compatibility boundary:** the old managed v1 schema remains
 accepted solely to preserve existing offline fixtures and current deployed

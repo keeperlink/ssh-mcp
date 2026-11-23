@@ -16,7 +16,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.client_registry import parse_clients, sources_for
+from app.runtime_files import managed_secrets_fingerprint
+from app.sealed_credentials import unseal_sudo, validate_v2_secrets, verify_password, verify_token
 from tests.lab import runner
+from tests.lab import sealed_fixture
 from tests.lab.client import CLIENT_ID
 
 
@@ -52,6 +55,133 @@ def state_for(root: Path, status: str = "active") -> tuple[Path, dict]:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_sealed_image_derives_from_normal_reviewed_image_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            calls: list[list[str]] = []
+            state = {"commit": SHA, "workspace": temp, "credentials": "sealed-v2"}
+
+            def fake_cmd(argv, **_kwargs):
+                calls.append(argv)
+
+            def fake_docker(*argv, **_kwargs):
+                if argv[-1] == "{{.Id}}":
+                    return "sha256:disposable"
+                if "org.sshmcp.lab-sealed-activation" in argv[-1]:
+                    return "synthetic-only"
+                return SHA
+
+            with patch.object(runner, "cmd", side_effect=fake_cmd), \
+                 patch.object(runner, "docker", side_effect=fake_docker):
+                runner.build_image(state, Path(temp))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][:3], ["docker", "build", "--progress=plain"])
+            self.assertEqual(calls[0][-1], temp)
+            self.assertIn("--network=none", calls[1])
+            self.assertIn(str(runner.RUNNER / "fixture" / "sealed-v2.Dockerfile"),
+                          calls[1])
+            self.assertIn("BASE_IMAGE=smt-mcp-" + SHA[:12] + ":local", calls[1])
+            self.assertEqual(state["image"], "smt-mcp-sealed-" + SHA[:12] + ":local")
+            self.assertEqual(state["image_id"], "sha256:disposable")
+
+    def test_disposable_v2_seals_sudo_and_separates_client_from_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            private = folder / "secrets"
+            protected = private / "protected"
+            protected.mkdir(parents=True)
+            (private / "identity").write_text(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A" * 120
+                + "\n-----END OPENSSH PRIVATE KEY-----\n"
+            )
+            (private / "inventory.json").write_text(json.dumps({
+                "hosts": [{
+                    "alias": "fixture", "address": "ssh-fixture", "username": "tester",
+                    "environment": "non-production", "privileged_access": "restricted",
+                }],
+            }))
+            sudo = "synthetic-only-sudo-password-" + "s" * 40
+            (folder / "fixture-sudo-password").write_text(sudo + "\n")
+            (folder / "mcp.env").write_text(
+                "MCP_ENVIRONMENT=lab\nMCP_ISSUER=http://localhost\n"
+                "SSH_APPROVED_ALIASES=fixture\nMCP_TOKEN_SIGNING_SECRET=" + "a" * 64 + "\n"
+            )
+            with patch.object(sealed_fixture, "DATA", folder):
+                sealed_fixture.main()
+                with self.assertRaises(RuntimeError):
+                    sealed_fixture.main()
+            server = (folder / "mcp.env").read_text()
+            client = (folder / "client.env").read_text()
+            sealed_text = (protected / "ssh-mcp-secrets").read_text()
+            v2 = json.loads(sealed_text)
+            validate_v2_secrets(v2)
+            self.assertEqual(v2["version"], 2)
+            self.assertEqual(len(v2["sealed_sudo"]), 1)
+            self.assertNotIn(sudo, sealed_text)
+            self.assertNotIn(sudo, server)
+            self.assertNotIn(sudo, client)
+            credentials = dict(line.split("=", 1) for line in client.splitlines())
+            self.assertNotIn(credentials["MCP_LOGIN_KEY"], server)
+            self.assertNotIn(credentials["HISTORY_VIEWER_PASSWORD"], server)
+            self.assertNotIn(credentials["MCP_METRICS_TOKEN"], server)
+            self.assertNotIn("MCP_LOGIN_KEY=", server)
+            self.assertNotIn("HISTORY_VIEWER_PASSWORD=", server)
+            self.assertNotIn("MCP_METRICS_TOKEN=", server)
+            self.assertIn("MCP_MANAGED_SECRETS_VERSION=2", server)
+            self.assertIn(managed_secrets_fingerprint(v2), server)
+            self.assertTrue(verify_password(credentials["MCP_LOGIN_KEY"],
+                                            v2["oauth_login_verifier"], "oauth-login"))
+            self.assertTrue(verify_password(credentials["HISTORY_VIEWER_PASSWORD"],
+                                            v2["viewer_verifier"], "console-login"))
+            self.assertTrue(verify_token(credentials["MCP_METRICS_TOKEN"],
+                                         v2["metrics_verifier"]))
+            self.assertEqual(
+                unseal_sudo(credentials["HISTORY_VIEWER_PASSWORD"],
+                            v2["sealed_sudo"]["fixture"], deployment="lab",
+                            issuer="http://localhost", alias="fixture", username="tester"),
+                sudo,
+            )
+            self.assertEqual((folder / "client.env").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((protected / "ssh-mcp-secrets").stat().st_mode & 0o777, 0o600)
+            self.assertIn(sudo, runner.read_secrets(folder))
+            self.assertNotIn(sudo, runner.redact("value=" + sudo, runner.read_secrets(folder)))
+
+    def test_sealed_fixture_generation_has_no_network_or_server_login_password(self) -> None:
+        with local_state() as root:
+            folder = root / "sealed"
+            folder.mkdir()
+            commands: list[list[str]] = []
+            with patch.object(runner, "cmd", side_effect=lambda argv, **_kw: commands.append(argv)):
+                runner.create_secrets(
+                    {"access": "restricted", "privileged_access": "restricted",
+                     "credentials": "sealed-v2",
+                     "image": "smt-mcp-sealed-reviewed:local"}, folder,
+                )
+            self.assertTrue((folder / "fixture-sudo-password").exists())
+            self.assertFalse((folder / "secrets" / "fixture-sudo-password").exists())
+            self.assertFalse((folder / "secrets" / "protected" / "ssh-mcp-secrets").exists())
+            self.assertNotIn("MCP_LOGIN_KEY=", (folder / "mcp.env").read_text())
+            self.assertNotIn("HISTORY_VIEWER_PASSWORD=", (folder / "mcp.env").read_text())
+            generator = commands[-1]
+            self.assertEqual(generator[:4], ["docker", "run", "--rm", "--network"])
+            self.assertEqual(generator[4], "none")
+            self.assertEqual(generator[generator.index("--workdir") + 1], "/tmp")
+            self.assertIn("--read-only", generator)
+            self.assertIn("--cap-drop", generator)
+            self.assertIn("/runner/sealed_fixture.py", generator)
+
+    def test_sealed_v2_is_an_explicit_setup_only_flag(self) -> None:
+        with patch.object(sys, "argv", [
+            "ssh-mcp-test", "setup", "--story", "TEST-347", "--commit", SHA,
+            "--credentials", "sealed-v2",
+        ]):
+            self.assertEqual(runner.parse_args().credentials, "sealed-v2")
+        with patch.object(sys, "argv", [
+            "ssh-mcp-test", "run", "--story", "TEST-347", "--commit", SHA,
+            "--credentials", "sealed-v2",
+        ]):
+            with self.assertRaises(SystemExit):
+                runner.parse_args()
+
     def test_restricted_fixture_requires_explicit_opt_in_and_private_viewer_secret(self) -> None:
         with local_state() as root:
             for mode in ("always-granted", "restricted"):
@@ -501,6 +631,33 @@ class IsolationTests(unittest.TestCase):
 
 
 class SessionTests(unittest.TestCase):
+    def test_sealed_client_receives_only_client_credentials(self) -> None:
+        with local_state() as root, patch.object(runner, "trusted_runner_sha", return_value=SHA), \
+             patch.object(runner, "owns", return_value=True), \
+             patch.object(runner, "ensure_no_orphan_clients"), \
+             patch.object(runner, "stop_owned_client"):
+            folder, state = state_for(root)
+            state["credentials"] = "sealed-v2"
+            runner.save_json(folder / "state.json", state)
+            Path(state["workspace"]).mkdir(parents=True)
+            (folder / "mcp.env").write_text("MCP_TOKEN_SIGNING_SECRET=synthetic-secret\n")
+            (folder / "client.env").write_text("MCP_LOGIN_KEY=synthetic-client\n")
+            executed: list[str] = []
+
+            def fake_cmd(argv, **kwargs):
+                executed.extend(argv)
+                kwargs["output"].write_text("RESULT sealed_client_isolated=PASS\n")
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+            with patch.object(runner, "cmd", side_effect=fake_cmd):
+                self.assertEqual(runner.execute_test(argparse.Namespace(
+                    run=RUN, command=["python3", "/runner/smoke.py"], timeout=10)), 0)
+            self.assertEqual(
+                executed[executed.index("--env-file") + 1], str(folder / "client.env"),
+            )
+            self.assertNotIn(str(folder / "mcp.env"), executed)
+            self.assertEqual(executed.count("--env-file"), 1)
+
     def test_resumes_active_run_without_chat_history(self) -> None:
         with local_state() as root:
             folder, _ = state_for(root)

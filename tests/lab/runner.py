@@ -90,7 +90,8 @@ def trusted_runner_sha() -> str:
     if git("cat-file", "-t", sha) != "commit":
         raise LabError("Pinned runner commit missing from local Git cache")
     for rel in ("runner.py", "source.json", "client.py", "smoke.py",
-                "fixture/Dockerfile", "fixture/entrypoint.sh"):
+                "fixture/Dockerfile", "fixture/entrypoint.sh",
+                "fixture/sealed-v2.Dockerfile", "sealed_fixture.py"):
         expected = git("rev-parse", f"{sha}:tests/lab/{rel}")
         actual = text(["git", "hash-object", "--no-filters", str(RUNNER / rel)])
         if expected != actual:
@@ -339,6 +340,22 @@ def build_image(state: dict, folder: Path) -> None:
     if docker("image", "inspect", image, "--format",
               f"{{{{index .Config.Labels \"{IMAGE_LABEL}\"}}}}") != state["commit"]:
         raise LabError("Local application image SHA label mismatch")
+    if state.get("credentials") == "sealed-v2":
+        # The application commit retains SEALED_RUNTIME_READY=False. Only the
+        # independently pinned LAB runner may create this isolated derivative
+        # image; no production release/build target accepts this activation.
+        derived = f"smt-mcp-sealed-{state['commit'][:12]}:local"
+        cmd(["docker", "build", "--network=none", "--progress=plain",
+             "-f", str(RUNNER / "fixture" / "sealed-v2.Dockerfile"),
+             "--build-arg", "BASE_IMAGE=" + image,
+             "--label", IMAGE_LABEL + "=" + state["commit"],
+             "-t", derived, str(RUNNER / "fixture")],
+            output=folder / "sealed-build.log", timeout=180)
+        if docker("image", "inspect", derived, "--format",
+                  "{{index .Config.Labels \"org.sshmcp.lab-sealed-activation\"}}") != "synthetic-only":
+            raise LabError("Disposable sealed LAB activation marker missing")
+        image = derived
+        state["image"] = image
     state["image_id"] = docker("image", "inspect", image, "--format", "{{.Id}}")
 
 
@@ -362,6 +379,7 @@ def build_fixture(state: dict, folder: Path) -> None:
 
 
 def create_secrets(state: dict, folder: Path) -> None:
+    sealed = state.get("credentials") == "sealed-v2"
     private = folder / "secrets"
     private.mkdir(mode=0o700)
     cmd(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C",
@@ -385,15 +403,15 @@ def create_secrets(state: dict, folder: Path) -> None:
         # receives it through its existing protected JSON path. Never put
         # this value in Docker argv, environment, logs or signed inventory.
         password = secrets.token_urlsafe(36)
-        fd = os.open(private / "fixture-sudo-password",
+        fd = os.open((folder if sealed else private) / "fixture-sudo-password",
                      os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(password + "\n")
         (private / "protected").mkdir(mode=0o700)
-        save_json(private / "protected" / "ssh-mcp-secrets",
-                  {"sudo_passwords": {"fixture": password}})
+        if not sealed:
+            save_json(private / "protected" / "ssh-mcp-secrets",
+                      {"sudo_passwords": {"fixture": password}})
     env = {
-        "MCP_LOGIN_KEY": secrets.token_hex(32),
         "MCP_TOKEN_SIGNING_SECRET": secrets.token_hex(32),
         "MCP_ENVIRONMENT": "lab",
         "MCP_ISSUER": "http://localhost",
@@ -422,8 +440,10 @@ def create_secrets(state: dict, folder: Path) -> None:
         "SSH_INVENTORY_FILE": "/run/ssh-mcp/inventory.json",
         "SSH_APPROVED_ALIASES": "fixture",
     }
-    if (state.get("access") == "restricted"
-            or state.get("privileged_access", "none") != "none"):
+    if not sealed:
+        env["MCP_LOGIN_KEY"] = secrets.token_hex(32)
+    if not sealed and (state.get("access") == "restricted"
+                       or state.get("privileged_access", "none") != "none"):
         # Isolated test-only operator credentials, never reused by the
         # installed lab service or published to logs.
         env["HISTORY_VIEWER_ENABLED"] = "true"
@@ -433,6 +453,22 @@ def create_secrets(state: dict, folder: Path) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         for key, value in env.items():
             handle.write(f"{key}={value}\n")
+    if sealed:
+        (private / "protected").mkdir(mode=0o700, exist_ok=True)
+        # Generate Argon2id verifiers and AES-GCM entries using the already
+        # built candidate wheel, with no network, host secrets or real SSH.
+        # Client plaintext is written to client.env, never the service env.
+        cmd(["docker", "run", "--rm", "--network", "none",
+             "--user", f"{os.getuid()}:{os.getgid()}",
+             "--workdir", "/tmp",
+             "--read-only", "--cap-drop", "ALL",
+             "--security-opt", "no-new-privileges:true",
+             "--pids-limit", "64", "--memory", "512m",
+             "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+             "--mount", "type=bind,source=" + str(folder) + ",target=/lab-data",
+             "--mount", "type=bind,source=" + str(RUNNER) + ",target=/runner,readonly",
+             "--entrypoint", "python", state["image"],
+             "/runner/sealed_fixture.py"], timeout=120)
 
 
 def start_resources(state: dict, folder: Path) -> None:
@@ -455,7 +491,9 @@ def start_resources(state: dict, folder: Path) -> None:
     key = (folder / "secrets" / "identity.pub").read_text(encoding="utf-8").strip()
     root_enabled = state.get("privileged_access", "none") != "none"
     fixture_sudo_mount = (
-        ["--mount", "type=bind,source=" + str(folder / "secrets" / "fixture-sudo-password")
+        ["--mount", "type=bind,source=" + str(
+            folder / "fixture-sudo-password" if state.get("credentials") == "sealed-v2"
+            else folder / "secrets" / "fixture-sudo-password")
          + ",target=/run/fixture-sudo-password,readonly"] if root_enabled else []
     )
     docker("run", "-d", "--name", nn["ssh"], "--network", nn["network"],
@@ -497,7 +535,8 @@ def start_resources(state: dict, folder: Path) -> None:
            + ",target=/run/ssh-mcp,readonly",
            *(
                ["--mount", "type=bind,source=" + str(folder / "secrets" / "protected")
-                + ",target=/run/secrets,readonly"] if root_enabled else []
+                + ",target=/run/secrets,readonly"]
+               if root_enabled and state.get("credentials") != "sealed-v2" else []
            ),
            "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
            "--env-file", str(folder / "mcp.env"), state["image"])
@@ -513,6 +552,16 @@ def start_resources(state: dict, folder: Path) -> None:
         time.sleep(0.2)
     if not ready:
         raise LabError("Disposable MCP never reached HTTP readiness")
+    if state.get("credentials") == "sealed-v2":
+        # Validate the actual running process image and *server* environment,
+        # never trust the fixture input files alone as proof of v2 activation.
+        docker("exec", nn["mcp"], "python", "-c",
+               "import os; from app import config; "
+               "assert config.MCP_MANAGED_SECRETS_VERSION == '2'; "
+               "assert config.SEALED_RUNTIME_READY and config.MCP_ENVIRONMENT == 'lab'; "
+               "assert not any(os.getenv(k) for k in "
+               "('MCP_LOGIN_KEY','HISTORY_VIEWER_PASSWORD','MCP_METRICS_TOKEN')); "
+               "assert os.path.isfile(config.MCP_MANAGED_SECRETS_SOURCE)")
     verify_host_isolation(nn["mcp"])
     result = docker(
         "exec", nn["mcp"], "ssh", "-F", "/dev/null", "-T", "-n",
@@ -589,6 +638,7 @@ def setup(args: argparse.Namespace) -> int:
             "pr": args.pr, "status": "provisioning", "started_at": now(),
             "access": getattr(args, "access", "always-granted"),
             "privileged_access": getattr(args, "privileged_access", "none"),
+            "credentials": getattr(args, "credentials", "legacy"),
             "updated_at": now(), "stages": [], "tests": [],
             "workspace": str(WORKSPACES / story / run),
             "names": names(run), "original_containers": original,
@@ -608,7 +658,9 @@ def setup(args: argparse.Namespace) -> int:
             save_json(state_path, state)
         except Exception as exc:
             state["status"] = "setup_failed"
-            state["failure_kind"] = "BUILD_FAILURE" if state["stages"][-1]["name"] == "docker_build" else "INFRA_FAILURE"
+            state["failure_kind"] = ("BUILD_FAILURE" if state["stages"]
+                                     and state["stages"][-1]["name"] == "docker_build"
+                                     else "INFRA_FAILURE")
             state["last_error"] = f"{type(exc).__name__}: {str(exc)[:280]}"
             save_json(state_path, state)
             print(f"SETUP=FAIL run_id={run} class={state['failure_kind']} "
@@ -621,12 +673,17 @@ def setup(args: argparse.Namespace) -> int:
 
 
 def read_secrets(path: Path) -> list[str]:
-    env = path / "mcp.env"
-    if not env.is_file():
-        return []
-    return [s.split("=", 1)[1].strip() for s in env.read_text().splitlines()
-            if s.startswith(("MCP_LOGIN_KEY=", "MCP_TOKEN_SIGNING_SECRET=",
-                             "HISTORY_VIEWER_PASSWORD="))]
+    found = []
+    for name in ("mcp.env", "client.env"):
+        env = path / name
+        if env.is_file():
+            found.extend(s.split("=", 1)[1].strip() for s in env.read_text().splitlines()
+                         if s.startswith(("MCP_LOGIN_KEY=", "MCP_TOKEN_SIGNING_SECRET=",
+                                          "HISTORY_VIEWER_PASSWORD=", "MCP_METRICS_TOKEN=")))
+    sudo = path / "fixture-sudo-password"
+    if sudo.is_file() and not sudo.is_symlink():
+        found.append(sudo.read_text().strip())
+    return found
 
 
 def redact(text_value: str, secret_values: list[str]) -> str:
@@ -671,7 +728,12 @@ def execute_test(args: argparse.Namespace) -> int:
             "--mount", "type=bind,source=" + state["workspace"] + ",target=/source,readonly",
             "--mount", "type=bind,source=" + str(RUNNER) + ",target=/runner,readonly",
             "--workdir", "/source",
-            "--env-file", str(folder / "mcp.env"),
+            # The sealed client must not inherit the server-side JWT signer,
+            # protected source path, or verifier configuration.
+            "--env-file", str(folder / (
+                "client.env" if state.get("credentials") == "sealed-v2"
+                else "mcp.env"
+            )),
             "--env", "SSH_MCP_TEST_URL=http://mcp:8000",
             "--env", "SSH_MCP_TEST_STORY=" + state["story"],
             "--env", "PYTHONPATH=/runner:/source",
@@ -804,6 +866,11 @@ def cleanup(args: argparse.Namespace) -> int:
             # Limit this operation to the exact, validated run-owned directory.
             cmd(["sudo", "-n", "/bin/rm", "-rf", "--", str(private)])
         (folder / "mcp.env").unlink(missing_ok=True)
+        for name in ("client.env", "mcp.sealed.env", "fixture-sudo-password"):
+            path = folder / name
+            if path.is_symlink():
+                raise LabError("Refusing unsafe synthetic credential cleanup")
+            path.unlink(missing_ok=True)
         ensure_originals(state)
         state["status"] = "cleaned"
         state["cleaned_at"] = now()
@@ -851,7 +918,8 @@ def reconcile_cleanup(args: argparse.Namespace) -> int:
                 or docker("volume", "ls", "-q", "--filter", owner)
                 or docker("network", "ls", "-q", "--filter", owner)):
             raise LabError("Run-labeled Docker resources remain; use normal cleanup")
-        for path in (folder / "secrets", folder / "mcp.env"):
+        for path in (folder / "secrets", folder / "mcp.env", folder / "client.env",
+                     folder / "mcp.sealed.env", folder / "fixture-sudo-password"):
             if path.exists() or path.is_symlink():
                 raise LabError("Run-private credentials remain; use normal cleanup")
 
@@ -923,6 +991,9 @@ def parse_args() -> argparse.Namespace:
         p.add_argument("--commit", required=True)
         p.add_argument("--pr", type=int, help="Optional PR number: fetch exact PR head, verify SHA")
         if name == "setup":
+            p.add_argument("--credentials", default="legacy",
+                           choices=("legacy", "sealed-v2"),
+                           help="Disposable LAB credential format, not a deployment switch")
             p.add_argument("--access", default="always-granted",
                            choices=("always-granted", "restricted"),
                            help="Only the disposable SSH fixture's signed access policy")

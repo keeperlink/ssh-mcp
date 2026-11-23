@@ -12,6 +12,7 @@ These feature-oriented entrypoints execute **outside** offline unit discovery. U
 | patch_agent_workflow.py | Full source/test/docs preview, reconciliation and apply over SSH |
 | approval_access.py | Live SSE + browser approvals gating real SSH, expiry and revocation |
 | privileged_access.py | Real sudo in four host/root policy combinations with durable audit |
+| sealed_v2_acceptance.py | LAB-only sealed-v2 OAuth/Console/metrics, Locked readiness, scoped sudo grants and revocation on synthetic credentials |
 | browser_layout_check.py | Native headless Chrome check using synthetic local API in CI |
 | run_openssh_interop.sh | Separately authorized rootless Docker/OpenSSH interoperability |
 
