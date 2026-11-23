@@ -88,6 +88,7 @@ class Audit:
     def __init__(self) -> None:
         self.status = "running"
         self.byte_count = 0
+        self.error_code: str | None = None
         self.transfer: dict | None = None
 
     def start(self, *_args: object, precreated_id: str | None = None) -> str:
@@ -106,6 +107,7 @@ class Audit:
                error_code: str | None = None, transfer: dict | None = None) -> None:
         assert identifier == "relay1"
         self.status, self.byte_count, self.transfer = status, byte_count, transfer
+        self.error_code = error_code
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -206,12 +208,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_collision_and_wrong_preimage_preserve_target(self) -> None:
         self.dest.write_bytes(b"existing")
-        collision, _ = await self.run_transfer(self.request())
+        collision, collision_audit = await self.run_transfer(self.request())
         self.assertEqual(collision["status"], "failed", collision)
-        wrong, _ = await self.run_transfer(self.request(
+        self.assertEqual(collision["error"]["code"], "already_exists")
+        self.assertEqual(collision_audit.error_code, "already_exists")
+        wrong, wrong_audit = await self.run_transfer(self.request(
             mode="overwrite", expected_sha256="f" * 64,
         ))
         self.assertEqual(wrong["status"], "failed", wrong)
+        self.assertEqual(wrong["error"]["code"], "precondition_failed")
+        self.assertEqual(wrong_audit.error_code, "precondition_failed")
         self.assertEqual(self.dest.read_bytes(), b"existing")
 
     async def test_transport_error_before_ssh_open_is_unknown(self) -> None:

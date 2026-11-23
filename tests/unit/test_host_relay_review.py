@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.host_relay import (
-    HostRelayService, RelayFailure, _argv, _receipt, _ready,
+    HostRelayService, RelayFailure, _argv, _receipt, _ready, _receiver_rejection,
     _sudo_challenge_line, _sudo_prompt,
 )
 from app.relay_scripts import SOURCE, RECEIVER
@@ -140,6 +140,40 @@ class FramingTests(unittest.IsolatedAsyncioTestCase):
     def test_privileged_script_requires_unique_nonce_parameter(self) -> None:
         with self.assertRaisesRegex(ValueError, "marker missing"):
             _argv("pass", [], True)
+
+    async def test_receiver_refusal_requires_confirmed_channel_and_clean_output(self) -> None:
+        for code, expected in ((73, "already_exists"), (75, "precondition_failed")):
+            for after_commit in (False, True):
+                with self.subTest(code=code, after_commit=after_commit):
+                    class Receiver:
+                        channel_complete = True
+                        stdout = asyncio.StreamReader()
+                        async def wait(self) -> int:
+                            return code
+                    receiver = Receiver()
+                    receiver.stdout.feed_eof()
+                    with self.assertRaises(RelayFailure) as raised:
+                        await _receiver_rejection(
+                            receiver, after_commit=after_commit,
+                        )  # type: ignore[arg-type]
+                    self.assertEqual(raised.exception.code, expected)
+                    self.assertFalse(raised.exception.uncertain)
+
+        class Receiver:
+            channel_complete = False
+            stdout = asyncio.StreamReader()
+            async def wait(self) -> int:
+                return 73
+        for receipt, complete in ((b"", False), (b"partial", True)):
+            receiver = Receiver()
+            receiver.channel_complete = complete
+            receiver.stdout.feed_eof()
+            with self.assertRaises(RelayFailure) as raised:
+                await _receiver_rejection(
+                    receiver, after_commit=True, receipt=receipt,
+                )  # type: ignore[arg-type]
+            self.assertEqual(raised.exception.code, "transport_error")
+            self.assertTrue(raised.exception.uncertain)
 
     async def test_nonprivileged_readiness_unchanged(self) -> None:
         reader = asyncio.StreamReader()

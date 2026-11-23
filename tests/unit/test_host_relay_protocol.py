@@ -86,6 +86,27 @@ class RelayProtocolTests(unittest.TestCase):
                                       mode="overwrite").returncode, 0)
         self.assertEqual(target.read_bytes(), b"replacement")
 
+    def test_create_collision_after_receiver_ready_is_specific(self) -> None:
+        target = self.root / "raced-target"
+        payload = b"data waiting for commit"
+        digest = hashlib.sha256(payload).hexdigest()
+        args = [sys.executable, "-u", "-c", RECEIVER, str(target),
+                "create", "0", str(len(payload)), digest, "-", "4096",
+                "40000", "DEST-test", "0"]
+        with subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE) as proc:
+            assert proc.stderr is not None
+            marker = proc.stderr.readline()
+            self.assertEqual(marker, b"\x1eDEST-test\x1e\n")
+            # Inject a competing publication AFTER the receiver passed its
+            # initial exists check and created its private staging file.
+            target.write_bytes(b"published by another writer")
+            received, errors = proc.communicate(payload + b"COMMIT!", timeout=15)
+            self.assertEqual(proc.returncode, 73, errors)
+            self.assertEqual(received, b"")
+        self.assertEqual(target.read_bytes(), b"published by another writer")
+        self.assertFalse(list(self.root.glob(".ssh-mcp-transfer-*")))
+
     def test_pruner_does_not_remove_locked_stage(self) -> None:
         import fcntl
 

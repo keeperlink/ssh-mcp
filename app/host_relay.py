@@ -75,6 +75,21 @@ async def _ready(reader: Any, token: str, *, sudo_prompt: str | None = None,
     raise RelayFailure("invalid_response")
 
 
+async def _receiver_rejection(
+    proc: SSHChannelProcess, *, after_commit: bool, receipt: bytes = b"",
+) -> None:
+    """Trust only an authenticated, fully closed remote helper exit status.
+
+    Exit 73/75 are defined by our fixed receiver and precede publication.
+    EOF or an unconfirmed SSH exit cannot establish that no write occurred.
+    """
+    status = await proc.wait()
+    if (proc.channel_complete and not receipt and status in (73, 75)
+            and not await proc.stdout.read(1)):
+        raise RelayFailure("already_exists" if status == 73 else "precondition_failed")
+    raise RelayFailure("transport_error", uncertain=after_commit)
+
+
 async def _receipt(reader: Any) -> bytes:
     """Read a complete, bounded commit confirmation, never one SSH packet."""
     result = bytearray()
@@ -298,13 +313,20 @@ class HostRelayService:
                     if req.dest_privileged:
                         await self._sudo(dest, actor, req.dest_server, roots[1],
                                          marker="DEST-" + nonce, close=False)
-                    await _ready(
-                        dest.stderr, "DEST-" + nonce,
-                        sudo_prompt=(_sudo_prompt("DEST-" + nonce)
-                                     if req.dest_privileged else None),
-                        readiness=getattr(self.executor, "readiness", None),
-                        alias=req.dest_server,
-                    )
+                    try:
+                        await _ready(
+                            dest.stderr, "DEST-" + nonce,
+                            sudo_prompt=(_sudo_prompt("DEST-" + nonce)
+                                         if req.dest_privileged else None),
+                            readiness=getattr(self.executor, "readiness", None),
+                            alias=req.dest_server,
+                        )
+                    except RelayFailure as exc:
+                        if exc.code != "transport_error":
+                            raise
+                        # EOF before the receiver's ready marker may be its
+                        # deliberate, clean refusal of an existing target.
+                        await _receiver_rejection(dest, after_commit=False)
                     if dest.stdin is None:
                         raise RelayFailure("transport_error", uncertain=True)
                     local = hashlib.sha256()
@@ -330,7 +352,10 @@ class HostRelayService:
                     dest.stdin.close()
                     line = await _receipt(dest.stdout)
                     if not await _finish_channel(dest):
-                        raise RelayFailure("transport_error", uncertain=True)
+                        # Also handle a concurrent create collision at the
+                        # final link(), but never infer failure safety from
+                        # an incomplete channel or a partial receipt.
+                        await _receiver_rejection(dest, after_commit=True, receipt=line)
                     try:
                         result = json.loads(line)
                         if (result.get("ok") is not True or result.get("size") != total
