@@ -130,10 +130,18 @@ def main() -> None:
                         {"argv": ["id", "-un"]}, {"argv": ["id", "-un"]},
                     ],
                 })
-            assert not result.get("isError") and data
-            assert data["status"] == "succeeded" and len(data["steps"]) == 2
-            assert all(step["status"] == "succeeded"
-                       and step["root_started"] is True for step in data["steps"])
+                assert not result.get("isError") and data
+                assert data["status"] == "succeeded" and len(data["steps"]) == 2
+                for step in data["steps"]:
+                    assert (step["status"] == "succeeded"
+                            and step["stdout"].strip() == "root"
+                            and step["job_id"]), step
+                    job_result, job_data = worker.call(
+                        "get_job", {"job_id": step["job_id"]},
+                    )
+                    assert not job_result.get("isError") and job_data
+                    job = job_data["job"]
+                    assert job["status"] == "succeeded" and job["root_started"] is True, job
             check("sealed_timed_grant_two_step_root_batch")
 
             grants = snapshot(browser)["active_grants"]
