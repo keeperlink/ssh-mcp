@@ -148,7 +148,7 @@ REPO_NAME=REVIEWED_REPOSITORY_SLUG
   test -f "$install/PINNED_COMMIT" && test ! -L "$install/PINNED_COMMIT"
   test "$(cat "$install/PINNED_COMMIT")" = "$RUNNER_SHA"
   test "$(git --git-dir="$cache" cat-file -t "$RUNNER_SHA")" = commit
-  for file in runner.py source.json client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
+  for file in runner.py source.json client.py smoke.py sealed_fixture.py fixture/Dockerfile fixture/entrypoint.sh fixture/sealed-v2.Dockerfile; do
     test -f "$install/$file" && test ! -L "$install/$file"
     expected=$(git --git-dir="$cache" rev-parse "$RUNNER_SHA:tests/lab/$file")
     actual=$(git hash-object --no-filters "$install/$file")
@@ -194,7 +194,7 @@ REPO_NAME=REVIEWED_REPOSITORY_SLUG
     test -f "$install/PINNED_COMMIT" && test ! -L "$install/PINNED_COMMIT"
     test "$(cat "$install/PINNED_COMMIT")" = "$RUNNER_SHA"
     test "$(git --git-dir="$cache" cat-file -t "$RUNNER_SHA")" = commit
-    for file in runner.py source.json client.py smoke.py fixture/Dockerfile fixture/entrypoint.sh; do
+    for file in runner.py source.json client.py smoke.py sealed_fixture.py fixture/Dockerfile fixture/entrypoint.sh fixture/sealed-v2.Dockerfile; do
       test -f "$install/$file" && test ! -L "$install/$file"
       expected=$(git --git-dir="$cache" rev-parse "$RUNNER_SHA:tests/lab/$file")
       actual=$(git hash-object --no-filters "$install/$file")
@@ -317,6 +317,50 @@ secret is kept in a read-only private file, not printed in arguments,
 inventory, logs or environment. Direct root login and SSH password
 authentication remain disabled. Default privileged access is `none`.
 
+## Sealed-v2 disposable LAB activation (SKY-347)
+
+Only after independent review, separate approval and merge of the paired
+source changes, stage and activate the immutable pinned runner under the LAB
+lock, verifying all **eight** files listed above. Never run a candidate
+checkout's runner, alter production configuration, or use real credentials.
+
+The committed application and normal image retain
+`SEALED_RUNTIME_READY=False`. For an explicit
+`setup --credentials sealed-v2` only, the trusted runner builds the normal
+source-identified application image, then a **disposable derivative** using
+`fixture/sealed-v2.Dockerfile`. That layer changes exactly the installed
+wheel's activation constant and labels the image
+`org.sshmcp.lab-sealed-activation=synthetic-only`. It is **not publishable
+or deployable** and there is no production environment activation switch.
+Regular LAB tests use the unmodified candidate image.
+
+The runner generates disposable per-run SSH, OAuth, Console, metrics and
+sudo credentials. A networkless, nonroot container uses the reviewed
+`sealed_fixture.py` and candidate wheel's Argon2id/AES-GCM implementation
+to produce the strict v2 secret. The service mount contains **no plaintext
+OAuth/Console/metrics/sudo passwords**. Only the synthetic test client
+receives `client.env` with login values; only the SSH fixture receives the
+separate sudo-password file. Neither plaintext file is mounted into the
+service. Every generated file is private, run-owned and removed at cleanup.
+
+```sh
+ssh-mcp-test setup --story SKY-347 --commit FULL_REVIEWED_MERGED_SHA \
+  --credentials sealed-v2 --access restricted --privileged-access restricted
+ssh-mcp-test exec --run RUN_ID -- \
+  python3 /source/tests/integration/sealed_v2_acceptance.py
+ssh-mcp-test results --run RUN_ID
+ssh-mcp-test cleanup --run RUN_ID
+ssh-mcp-test status
+```
+
+Read the resulting live acceptance and cleanup reports; verify no run-owned
+Docker resources or generated passwords remain and shared LAB services
+are unchanged. This test covers OAuth, Console, metrics, Locked discovery,
+wrong-password retry, fresh sudo proof, timed reuse, scope isolation,
+root batch, revocation and logout. Separate LAB acceptance for restart,
+rekey, interrupted rotation and sealed-compatible rollback remains required
+before any production proposal.
+
 ## Interrupted runs and cleanup reconciliation
 
 ```sh
@@ -352,7 +396,7 @@ the exact names of unrelated containers that disappeared from the
 preserved original snapshot; preserve the audit trail.
 
 Only then, after independent review and approval, **repeat the
-independent SHA/marker/five-blob verification above** for this exact
+independent SHA/marker/eight-file verification above** for this exact
 staged pin before invoking it. Use the pinned runner **directly by its
 absolute path**, without changing the launcher:
 
