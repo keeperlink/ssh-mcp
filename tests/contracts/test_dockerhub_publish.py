@@ -34,7 +34,7 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn("python tests/tools/validate.py", workflow)
         validator = (ROOT / "tests/tools/validate.py").read_text()
         self.assertIn('"mypy", "--strict"', validator)
-        self.assertIn('"check", "app", "ops", "tests", "scripts"', validator)
+        self.assertIn('"check", "app", "ssh_mcp_secrets", "ops", "tests", "scripts"', validator)
         self.assertIn("node --check", workflow)
         self.assertIn("node --version", workflow)
         self.assertIn("command -v node", workflow)

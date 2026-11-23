@@ -143,9 +143,11 @@ def installed_wheel(temp: Path, env: dict[str, str]) -> None:
     isolated_env.pop("PYTHONPATH", None)
     run("assert tests import only the installed wheel and CLI",
         [str(isolated_python), "-c",
-         "import app,sys;from pathlib import Path;"
+         "import app,ssh_mcp_secrets,sys;from pathlib import Path;"
          "venv=Path(sys.prefix).resolve();"
          "path=Path(app.__file__).resolve();"
+         "assert path.is_relative_to(venv),(path,venv);"
+         "path=Path(ssh_mcp_secrets.__file__).resolve();"
          "assert path.is_relative_to(venv),(path,venv);"
          "assert (venv/'bin'/'oauth-sessions').is_file();"
          "assert (venv/'bin'/'ssh-mcp-ctl').is_file();"
@@ -169,10 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         checks += 1
         if args.mode != "unit":
             run("compile Python source",
-                [sys.executable, "-m", "compileall", "-q", "app", "ops",
+                [sys.executable, "-m", "compileall", "-q", "app", "ssh_mcp_secrets", "ops",
                  "scripts", "tests"], env=env)
             run("Ruff", [str(Path(sys.executable).parent / "ruff"),
-                         "check", "app", "ops", "tests", "scripts"], env=env)
+                         "check", "app", "ssh_mcp_secrets", "ops", "tests", "scripts"], env=env)
             run("mypy strict", [sys.executable, "-m", "mypy", "--strict", *MYPY_FILES],
                 env=env)
             checks += 3

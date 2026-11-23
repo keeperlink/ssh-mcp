@@ -59,7 +59,7 @@ warn_unused_ignores = true
 
 [tool.coverage.run]
 branch = true
-source = ["app"]
+source = ["app", "ssh_mcp_secrets"]
 
 [tool.coverage.report]
 show_missing = true

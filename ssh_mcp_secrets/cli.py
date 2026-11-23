@@ -20,7 +20,7 @@ import stat
 import sys
 from typing import Any, Iterator
 
-from app.runtime_files import managed_secrets_fingerprint
+from app.runtime_files import _https_url, managed_secrets_fingerprint
 from app.sealed_credentials import (
     create_token_verifier, create_verifier, from_legacy,
     rotate_console, rotate_host_sudo, validate_v2_secrets, verify_password,
@@ -44,10 +44,8 @@ class ActivationUncertain(RuntimeError):
 
 def _binding(deployment: str, issuer: str) -> None:
     if (deployment not in ("lab", "production") or type(issuer) is not str
-            or not 8 <= len(issuer) <= 2048
-            or not issuer.startswith("https://") and not (
-                deployment == "lab" and issuer == "http://localhost"
-            )):
+            or not (_https_url(issuer, origin_only=True)
+                    or (deployment == "lab" and issuer == "http://localhost"))):
         raise RotationError("Invalid or non-HTTPS deployment binding")
 
 
@@ -268,8 +266,8 @@ def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
             "stage_sha256": _digest(raw), "operation": operation, "host": host,
             "sealed_digest": managed_secrets_fingerprint(changed),
         }
-        _write_new(staged, raw)
         try:
+            _write_new(staged, raw)
             _write_new(manifest, (json.dumps(metadata, sort_keys=True) + "\n").encode())
             _sync(source.parent)
         except BaseException:
@@ -280,7 +278,8 @@ def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
         return staged
 
 
-def _prepared(source: Path, staged: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _prepared(source: Path, staged: Path, *,
+              require_current_source: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
     _private_dir(source.parent)
     if (staged.parent != source.parent or not staged.name.startswith(_STAGE_PREFIX)
             or not re.fullmatch(r"\.ssh-mcp-stage-[a-f0-9]{24}\.json", staged.name)):
@@ -300,7 +299,7 @@ def _prepared(source: Path, staged: Path) -> tuple[dict[str, Any], dict[str, Any
     validate_v2_secrets(data)
     if _digest(raw) != info["stage_sha256"] or managed_secrets_fingerprint(data) != info["sealed_digest"]:
         raise RotationError("Staged revision integrity failed")
-    if _source(source)[1] != info["source_sha256"]:
+    if require_current_source and _source(source)[1] != info["source_sha256"]:
         raise RotationError("Active source changed: restage required")
     return info, data
 
@@ -326,7 +325,9 @@ def activate(*, source: Path, staged: Path, stopped: bool,
 
 def discard(*, source: Path, staged: Path) -> None:
     with _locked(source):
-        _prepared(source, staged)
+        # Stale stages must remain removable after an unrelated activation.
+        # Still verify the same private sibling path, manifest and full digest.
+        _prepared(source, staged, require_current_source=False)
         staged.unlink()
         staged.with_name(staged.name + ".plan").unlink()
         _sync(source.parent)

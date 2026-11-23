@@ -65,7 +65,9 @@ alias. Migration accepts only legacy v1 source; other modes require v2.
    missing sidecar, bad ownership or permissions is rejected. A failed or
    interrupted stage leaves the active revision untouched. To discard an
    intact staged pair, use `ssh-mcp-secrets discard --source "$SOURCE"
-   --staged "$STAGED_PATH"`.
+   --staged "$STAGED_PATH"`. Discard also permits obsolete stages after
+   the active revision has changed, but it always verifies stage integrity
+   and the protected directory first.
 3. Confirm independently: administrative recovery and retained backups;
    the correct sealed-format-compatible signed target and rollback image;
    downstream consumer handoff; stopped application and stopped database

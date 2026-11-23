@@ -170,6 +170,74 @@ class OperatorRotationTests(unittest.TestCase):
         with self.assertRaises(cli.RotationError):
             cli._prepared(self.source, candidate)
 
+    def test_discard_stale_stage_after_another_revision_activated(self):
+        stale = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        current = self.stage("oauth", OAUTH, NEW_OAUTH, NEW_OAUTH)
+        cli.activate(source=self.source, staged=current, stopped=True,
+                     recovery=True, consumers=True, migration_ready=False)
+        with self.assertRaises(cli.RotationError):
+            cli._prepared(self.source, stale)
+        self.assertTrue(stale.is_file())
+        cli.discard(source=self.source, staged=stale)
+        self.assertFalse(stale.exists())
+        self.assertFalse(stale.with_name(stale.name + ".plan").exists())
+        self.assertTrue(verify_password(NEW_OAUTH, cli._source(self.source)[0]["oauth_login_verifier"],
+                                        "oauth-login"))
+
+    def test_stale_discard_still_rejects_corrupted_stage(self):
+        stale = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        current = self.stage("oauth", OAUTH, NEW_OAUTH, NEW_OAUTH)
+        cli.activate(source=self.source, staged=current, stopped=True,
+                     recovery=True, consumers=True, migration_ready=False)
+        stale.write_bytes(stale.read_bytes() + b" ")
+        with self.assertRaises(cli.RotationError):
+            cli.discard(source=self.source, staged=stale)
+        self.assertTrue(stale.exists())
+
+    def test_partial_staged_file_is_removed_when_write_or_fsync_fails(self):
+        original = self.source.read_bytes()
+        for failure in ("write", "fsync"):
+            with self.subTest(failure=failure):
+                with patch.object(cli.getpass, "getpass",
+                                  side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
+                    if failure == "write":
+                        real_write = cli._write_new
+
+                        def interrupted_write(path: Path, data: bytes) -> None:
+                            if path.name.endswith(".json"):
+                                path.write_bytes(data[:16])  # Partial generated key material.
+                                path.chmod(0o600)
+                                raise OSError("synthetic interrupted stage")
+                            real_write(path, data)
+
+                        target = patch.object(cli, "_write_new", side_effect=interrupted_write)
+                    else:
+                        target = patch.object(cli.os, "fsync", side_effect=OSError("synthetic disk full"))
+                    with target:
+                        with self.assertRaises(OSError):
+                            cli.stage(**self.params("console"))
+                self.assertEqual(self.source.read_bytes(), original)
+                self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
+    def test_manifest_write_failure_removes_complete_candidate(self):
+        original = self.source.read_bytes()
+        real_write = cli._write_new
+
+        def interrupted_manifest(path: Path, data: bytes) -> None:
+            if path.name.endswith(".plan"):
+                path.write_bytes(data[:12])
+                path.chmod(0o600)
+                raise OSError("synthetic interrupted manifest")
+            real_write(path, data)
+
+        with patch.object(cli.getpass, "getpass",
+                          side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
+            with patch.object(cli, "_write_new", side_effect=interrupted_manifest):
+                with self.assertRaises(OSError):
+                    cli.stage(**self.params("console"))
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
     def test_private_file_permissions_symlinks_and_unknown_alias(self):
         self.source.chmod(0o644)
         with self.assertRaises(cli.RotationError):
@@ -199,6 +267,21 @@ class OperatorRotationTests(unittest.TestCase):
             cli.plan(**{**self.params(), "deployment": "production",
                         "issuer": "http://not-a-trusted-issuer.example"})
         self.assertEqual(cli._source(self.source)[0], self.sealed)
+
+    def test_binding_rejects_noncanonical_issuers_before_sealing(self):
+        for issuer in (
+            "https://testing.example.org/", "https://testing.example.org/mcp",
+            "https://testing.example.org/?x=1", "https://testing.example.org/#frag",
+            "https://alice@testing.example.org", "https://testing.example.org  ",
+            "https://127.0.0.1", "http://testing.example.org",
+        ):
+            with self.subTest(issuer=issuer):
+                with self.assertRaises(cli.RotationError):
+                    cli.plan(**{**self.params(), "issuer": issuer})
+        self.assertIn("PLAN=PASS", cli.plan(**self.params()))
+        self.assertIn("PLAN=PASS", cli.plan(**{**self.params(), "issuer": "http://localhost"}))
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**{**self.params(), "deployment": "production", "issuer": "http://localhost"})
 
     def test_cli_cannot_accept_credentials_without_real_terminal(self):
         output = io.StringIO()
@@ -238,6 +321,151 @@ class OperatorRotationTests(unittest.TestCase):
         self.assertNotIn(NEW_CONSOLE, output.getvalue() + errors.getvalue())
         self.assertTrue(candidate.exists())
 
+    def test_rejects_untrusted_directories_and_lock(self):
+        with self.assertRaises(cli.RotationError):
+            cli._private_dir(Path("relative"))
+        symlink = self.root / "linked"
+        symlink.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(cli.RotationError):
+            cli._private_dir(symlink)
+        self.root.chmod(0o750)
+        with self.assertRaises(cli.RotationError):
+            cli._private_dir(self.root)
+        self.root.chmod(0o700)
+        lock = self.root / ".ssh-mcp-secrets.lock"
+        lock.write_bytes(b"lock")
+        lock.chmod(0o644)
+        with self.assertRaises(cli.RotationError):
+            cli.stage(**self.params("console"))
+
+    def test_invalid_json_and_unsigned_inventory_are_rejected(self):
+        for raw in (b'{"version":1,"version":1}', b'[]'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(cli.RotationError):
+                    cli._decode(raw)
+        self.write_private(self.source, {"version": 99})
+        with self.assertRaises(cli.RotationError):
+            cli._source(self.source)
+        self.write_private(self.source, self.sealed)
+        for hosts in (None, [], ["not-object"],
+                      [{"alias": "Invalid!", "username": "gateway"}],
+                      [{"alias": "demo-node-a", "username": "Invalid!"}]):
+            with self.subTest(hosts=hosts):
+                self.inventory.write_text(json.dumps({"version": 1, "hosts": hosts}))
+                with self.assertRaises(cli.RotationError):
+                    cli._hosts(self.inventory)
+        self.inventory.write_text(json.dumps({"version": 2, "hosts": []}))
+        with self.assertRaises(cli.RotationError):
+            cli._hosts(self.inventory)
+
+    def test_invalid_operation_or_unsigned_host_denied(self):
+        for operation, host in (("console", "demo-node-a"),
+                                ("sudo", None), ("undefined", None),
+                                ("migrate", None), ("sudo", "demo-node-c")):
+            with self.subTest(operation=operation, host=host):
+                with self.assertRaises(cli.RotationError):
+                    cli.plan(**self.params(operation, host))
+        self.write_private(self.source, LEGACY)
+        altered = dict(LEGACY, sudo_passwords={"unapproved": SUDO})
+        self.write_private(self.source, altered)
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**self.params("migrate"))
+        self.write_private(self.source, self.sealed)
+        revised = dict(self.sealed, sealed_sudo={
+            **self.sealed["sealed_sudo"], "unapproved": self.sealed["sealed_sudo"]["demo-node-a"]
+        })
+        self.write_private(self.source, revised)
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**self.params())
+
+    def test_invalid_old_credentials_and_confirmations_preserve_source(self):
+        before = self.source.read_bytes()
+        for operation in ("oauth", "metrics"):
+            with self.subTest(operation=operation):
+                with patch.object(cli.getpass, "getpass", return_value="wrong-old-credential"):
+                    with self.assertRaises(cli.RotationError):
+                        cli.stage(**self.params(operation))
+        with patch.object(cli.getpass, "getpass",
+                          side_effect=(CONSOLE, NEW_CONSOLE, "different-confirmation")):
+            with self.assertRaises(cli.RotationError):
+                cli.stage(**self.params("console"))
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
+    def test_source_changed_during_rekey_is_rejected_before_staging(self):
+        before = self.source.read_bytes()
+        real_source = cli._source
+        calls = 0
+
+        def changed(path: Path):
+            nonlocal calls
+            calls += 1
+            value, digest = real_source(path)
+            return value, digest if calls == 1 else "0" * 64
+
+        with patch.object(cli, "_source", side_effect=changed):
+            with patch.object(cli.getpass, "getpass",
+                              side_effect=(OAUTH, NEW_OAUTH, NEW_OAUTH)):
+                with self.assertRaises(cli.RotationError):
+                    cli.stage(**self.params("oauth"))
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
+    def test_prepared_stage_rejects_foreign_path_and_invalid_manifest(self):
+        candidate = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        bad = self.root / "wrong-name.json"
+        with self.assertRaises(cli.RotationError):
+            cli._prepared(self.source, bad)
+        sidecar = candidate.with_name(candidate.name + ".plan")
+        manifest = json.loads(sidecar.read_text())
+        manifest["unexpected_key"] = True
+        self.write_private(sidecar, manifest)
+        with self.assertRaises(cli.RotationError):
+            cli._prepared(self.source, candidate)
+
+    def test_cli_plan_stage_activate_and_discard_dispatch(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(cli.main([
+                "plan", "--source", str(self.source), "--inventory", str(self.inventory),
+                "--deployment", "lab", "--issuer", BIND["issuer"],
+                "--operation", "console",
+            ]), 0)
+        self.assertIn("PLAN=PASS", output.getvalue())
+        with patch.object(cli.sys, "stdin") as stdin, patch.object(cli.sys, "stderr") as stderr:
+            stdin.isatty.return_value = True
+            stderr.isatty.return_value = True
+            with patch.object(cli.getpass, "getpass",
+                              side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
+                with redirect_stdout(output):
+                    self.assertEqual(cli.main([
+                        "stage", "--source", str(self.source), "--inventory", str(self.inventory),
+                        "--deployment", "lab", "--issuer", BIND["issuer"],
+                        "--operation", "console",
+                    ]), 0)
+        self.assertIn("STAGE=PASS", output.getvalue())
+        stages = list(self.root.glob(".ssh-mcp-stage-*.json"))
+        self.assertEqual(len(stages), 1)
+        with redirect_stdout(output):
+            self.assertEqual(cli.main([
+                "activate", "--source", str(self.source), "--staged", str(stages[0]),
+                "--confirm-stopped", "--confirm-recovery", "--confirm-consumers-ready",
+            ]), 0)
+        self.assertIn("ACTIVATE=PASS", output.getvalue())
+        with patch.object(cli, "activate", side_effect=cli.ActivationUncertain("synthetic")):
+            with redirect_stderr(io.StringIO()) as error:
+                self.assertEqual(cli.main([
+                    "activate", "--source", str(self.source), "--staged", str(stages[0]),
+                    "--confirm-stopped", "--confirm-recovery", "--confirm-consumers-ready",
+                ]), 2)
+            self.assertIn("uncertain", error.getvalue())
+        # Exercise discard dispatch using a valid stage pinned to a separate new revision.
+        fresh = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        with redirect_stdout(output):
+            self.assertEqual(cli.main([
+                "discard", "--source", str(self.source), "--staged", str(fresh),
+            ]), 0)
+        self.assertIn("DISCARD=PASS", output.getvalue())
 
 if __name__ == "__main__":
     unittest.main()
