@@ -70,6 +70,7 @@ async def require_host_access(
     steps: Callable[[], list[dict[str, str | bool]]] | None = None,
     disconnected: Callable[[], Awaitable[bool]] | None = None,
     privileged: bool = False, client_id: str | None = None,
+    operation_timeout_seconds: int = 300,
     on_approved: Callable[[ApprovalCode], None] | None = None,
 ) -> ApprovalCode:
     """One entry gate for every host-reaching MCP method.
@@ -111,6 +112,7 @@ async def require_host_access(
             disconnected=disconnected,
             host_required=host_required, root_required=root_required,
             actor=actor,
+            operation_timeout_seconds=operation_timeout_seconds,
             before_prompt=before_prompt,
         )
     else:

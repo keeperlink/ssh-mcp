@@ -95,7 +95,9 @@ single-use memory object. A fixed fresh sudo probe uses a nonce-bound
 prompt and the root-only `id -u` marker. The original pending grant,
 Console session and sealed-host safety are checked before the credential
 write and again at atomic grant issuance, along with approval deadline,
-client/actor scope and revocation generation.
+the originating MCP request's live disconnect state, client/actor scope
+and revocation generation. Every authenticated Console logout invalidates
+even in-flight prepared credentials, whether or not any root grant exists.
 
 The opaque capability follows one request's task context into queued jobs
 and sequential batches without being stored in their audit records.
@@ -106,6 +108,16 @@ finish normally but later batch steps are rejected. Explicit authenticated
 Console logout revokes all root unlocks without removing ordinary host
 grants. Passive cookie expiry does not shorten timed grants. Immutable
 Python strings cannot be guaranteed to be physically zeroized.
+
+A one-request credential's safety expiry covers the validated operation
+timeout plus a bounded 60-second margin (never longer than 16 hours), not
+a fixed five-minute lease. The process releases its plaintext memory
+reference immediately after the single command, accepted asynchronous
+job, or **whole** batch finishes, including failure/cancellation. A
+successfully queued job or shielded batch owns that release; otherwise
+the originating MCP tool request releases the credential before returning.
+Timed root grants continue to expire/revoke only by their approved scope.
+The Console clears its root-password input on every submission and error.
 
 **Activation guard still in force:** hardcoded
 `SEALED_RUNTIME_READY=False` is unchanged. No v2 runtime activation,

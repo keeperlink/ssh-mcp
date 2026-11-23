@@ -56,6 +56,7 @@ class PendingApproval:
     grant_root: bool = False
     client_id: str | None = None
     actor: str = ""
+    operation_timeout_seconds: int = 300
     # The generation and deadline observed when admission began. Explicit
     # revocations are distinguishable from natural grant expiry.
     host_revoke_generation: int = 0
@@ -261,6 +262,29 @@ class ApprovalManager:
             return None
         return request
 
+    async def root_request_live(self, request_id: str) -> PendingApproval | None:
+        """Check the originating MCP disconnect, not just the Console session."""
+        request = self.root_request(request_id)
+        if request is None:
+            return None
+        if request.disconnected is not None and await request.disconnected():
+            self._finish(request_id, "denied_disconnected")
+            return None
+        return self.root_request(request_id)
+
+    async def decide_unlocked_live(
+        self, request_id: str, *, duration: str, prepared: PreparedUnlock,
+        still_authorized: Callable[[], bool],
+    ) -> bool:
+        """No await between the last MCP disconnect check and grant commit."""
+        if await self.root_request_live(request_id) is None:
+            prepared.discard()
+            return False
+        return self.decide_unlocked(
+            request_id, duration=duration, prepared=prepared,
+            still_authorized=still_authorized,
+        )
+
     def decide_unlocked(
         self, request_id: str, *, duration: str, prepared: PreparedUnlock,
         still_authorized: Callable[[], bool],
@@ -282,7 +306,12 @@ class ApprovalManager:
             prepared.discard()
             return False
         now = time.monotonic()
-        seconds = DURATIONS[duration] or 300
+        # A request-only capability must cover its single admitted operation,
+        # including queued capacity and all batch steps; the terminal task
+        # releases it immediately, regardless of the safety expiry.
+        seconds = DURATIONS[duration] or min(
+            57600, max(60, request.operation_timeout_seconds + 60),
+        )
         expires = now + seconds
         try:
             handle = self.root_unlocks.commit(
@@ -299,6 +328,10 @@ class ApprovalManager:
             root_generation = self._revoke_generations.get((key, "root"), 0)
             host_generation = self._revoke_generations.get((key, "host"), 0)
             existing_host_required = request.host_required and not request.grant_host
+
+            def forget_once() -> None:
+                self._once_root_access.pop(request_id, None)
+
             access = RootAccess(
                 self.root_unlocks, handle, prepared.scope,
                 lambda: (not self.closed and
@@ -307,6 +340,7 @@ class ApprovalManager:
                          and self._revoke_generations.get((key, "host"), 0) == host_generation
                          and (not existing_host_required or
                               self.grants.get(key, 0) > time.monotonic())),
+                on_finished=forget_once,
             )
             self._once_root_access[request_id] = access
         else:
@@ -340,9 +374,11 @@ class ApprovalManager:
             self._note_revoke(key, "root")
             self._drop_root(key)
             self._invalidate_dependents(key, root=True)
-        for request_id, access in tuple(self._once_root_access.items()):
-            self.root_unlocks.revoke(access.handle)
-            self._once_root_access.pop(request_id, None)
+        # Also poison any PreparedUnlock currently awaiting a final commit,
+        # even if no earlier root grant existed at logout time.
+        self.root_unlocks.clear()
+        self._timed_root_access.clear()
+        self._once_root_access.clear()
         self._signal()
 
     def _note_revoke(self, key: GrantKey, kind: str) -> None:
@@ -383,6 +419,7 @@ class ApprovalManager:
                       root_required: bool = False,
                       client_id: str | None = None,
                       actor: str = "",
+                      operation_timeout_seconds: int = 300,
                       before_prompt: Callable[[], Awaitable[None]] | None = None) -> ApprovalCode:
         if self.closed:
             raise SSHDenied("Approval manager has stopped")
@@ -427,6 +464,7 @@ class ApprovalManager:
                     key, tool=tool, reason=reason, summary=summary, steps=steps,
                     disconnected=disconnected, host_required=host_required,
                     root_required=root_required, client_id=client_id, actor=actor,
+                    operation_timeout_seconds=operation_timeout_seconds,
                 )
             if len(self.pending) >= MAX_PENDING:
                 raise SSHDenied("Approval queue is full")
@@ -452,6 +490,7 @@ class ApprovalManager:
             ),
             client_id=client_id,
             actor=actor,
+            operation_timeout_seconds=operation_timeout_seconds,
             host_revoke_generation=self._revoke_generations.get((key, "host"), 0),
             root_revoke_generation=self._revoke_generations.get((key, "root"), 0),
             host_expiry_at=self.grants.get(key, 0),

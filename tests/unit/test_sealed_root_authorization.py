@@ -44,12 +44,14 @@ class SealedRootGrantTests(unittest.IsolatedAsyncioTestCase):
         self.sealed = seal_sudo(CONSOLE, SUDO, deployment="lab", issuer=ISSUER,
                                 alias=HOST, username="gateway")
 
-    async def pending(self, *, key=KEY, host_required=False):
+    async def pending(self, *, key=KEY, host_required=False,
+                      operation_timeout_seconds=300):
         async def request():
             result = await self.manager.require(
                 key, tool="execute_command", reason="TEST-347 root admission",
                 summary="Synthetic root operation", host_required=host_required,
                 root_required=True, client_id=CLIENT, actor=ACTOR,
+                operation_timeout_seconds=operation_timeout_seconds,
             )
             return result, root_access_context.get()
         task = asyncio.create_task(request())
@@ -71,8 +73,12 @@ class SealedRootGrantTests(unittest.IsolatedAsyncioTestCase):
             username="gateway",
         )
 
-    async def issue(self, duration="once", *, key=KEY, host_required=False):
-        task, pending = await self.pending(key=key, host_required=host_required)
+    async def issue(self, duration="once", *, key=KEY, host_required=False,
+                    operation_timeout_seconds=300):
+        task, pending = await self.pending(
+            key=key, host_required=host_required,
+            operation_timeout_seconds=operation_timeout_seconds,
+        )
         prepared = self.prepare(pending, duration=duration)
         self.assertTrue(self.manager.decide_unlocked(
             pending.id, prepared=prepared, duration=duration,
@@ -174,6 +180,62 @@ class SealedRootGrantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(KEY, self.manager.grants)
         self.assertNotIn(KEY, self.manager.root_grants)
         self.assertFalse(access.valid(host=HOST, actor=ACTOR))
+
+    async def test_logout_without_prior_grants_invalidates_inflight_prepared_password(self):
+        task, pending = await self.pending()
+        prepared = self.prepare(pending, duration="5m")
+        epoch = self.manager.root_unlocks._epoch
+        self.assertFalse(self.manager.root_grants)
+        self.manager.revoke_all_root()
+        self.assertGreater(self.manager.root_unlocks._epoch, epoch)
+        self.assertFalse(self.manager.decide_unlocked(
+            pending.id, duration="5m", prepared=prepared,
+            still_authorized=lambda: True,
+        ))
+        self.assertIsNone(prepared.password)
+        self.assertFalse(self.manager.root_grants)
+        self.assertFalse(self.manager.root_unlocks._entries)
+        self.assertTrue(self.manager.decide(pending.id, grant=False))
+        with self.assertRaises(Exception):
+            await task
+
+    async def test_disconnected_mcp_request_does_not_issue_timed_root_unlock(self):
+        task, pending = await self.pending()
+        state = [False]
+
+        async def disconnected():
+            return state[0]
+
+        pending.disconnected = disconnected
+        prepared = self.prepare(pending, duration="16h")
+        state[0] = True
+        self.assertFalse(await self.manager.decide_unlocked_live(
+            pending.id, duration="16h", prepared=prepared,
+            still_authorized=lambda: True,
+        ))
+        self.assertIsNone(prepared.password)
+        self.assertFalse(self.manager.root_grants)
+        self.assertFalse(self.manager.root_unlocks._entries)
+        with self.assertRaises(Exception):
+            await task
+
+    async def test_once_grant_covers_long_batch_safety_window_and_releases_on_finish(self):
+        _, access = await self.issue("once", operation_timeout_seconds=900)
+        entry = self.manager.root_unlocks._entries[access.handle]
+        self.assertGreater(entry.expires - time.monotonic(), 900)
+        # Simulate 301 seconds elapsed after grant: unlike the former fixed
+        # five-minute TTL, the same admitted operation can still use sudo.
+        current = self.manager.root_unlocks._clock
+        self.manager.root_unlocks._clock = lambda: current() + 301
+        try:
+            self.assertEqual(access.require(host=HOST, actor=ACTOR), SUDO)
+        finally:
+            self.manager.root_unlocks._clock = current
+        access.finish()
+        self.assertFalse(access.valid(host=HOST, actor=ACTOR))
+        self.assertNotIn(access.scope.issuance, self.manager._once_root_access)
+        self.assertNotIn(access.handle, self.manager.root_unlocks._entries)
+        access.finish()  # Idempotent terminal cleanup.
 
     async def test_invalidated_timed_secret_requires_fresh_root_password(self):
         _, old = await self.issue("5m", host_required=True)
@@ -529,6 +591,105 @@ class SealedRootGrantTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(result["status"], "succeeded")
                 self.assertEqual(result["steps"][0]["status"], "succeeded")
                 self.assertNotEqual(result["steps"][1]["status"], "succeeded")
+
+    async def test_once_root_is_released_after_all_batch_steps_not_first_step(self):
+        _, access = await self.issue("once", operation_timeout_seconds=900)
+        host = HostSpec(
+            alias=HOST, address="synthetic.example.invalid", port=22,
+            username="gateway", principals=[ACTOR], environment="non-production",
+            identity_file=Path("/synthetic/id"),
+            known_hosts_file=Path("/synthetic/known"), access="restricted",
+            privileged_access="restricted",
+        )
+        executor = SSHExecutor(
+            {HOST: host}, enabled=True, sealed_sudo={HOST: self.sealed},
+            readiness_settings=ReadinessSettings(authorized=True),
+        )
+        executor.readiness._states[HOST].last_ssh = time.monotonic()
+        executor.readiness._states[HOST].safety_confirmed = True
+        with tempfile.TemporaryDirectory() as d:
+            jobs = JobManager(executor, JobStore(Path(d) / "jobs.sqlite"))
+            batches = BatchManager(jobs)
+            request = ExecuteCommandsRequest.model_validate({
+                "server": HOST, "reason": "TEST-347 once batch lifetime",
+                "privileged": True, "timeout_seconds": 900,
+                "commands": [
+                    {"argv": ["/usr/bin/id", "-u"]},
+                    {"argv": ["/usr/bin/id", "-u"]},
+                ],
+            })
+            dispatched = []
+
+            async def completed(_host, _request, _start, _on_output, **kwargs):
+                self.assertTrue(kwargs["password_permitted"]())
+                self.assertTrue(access.valid(host=HOST, actor=ACTOR))
+                dispatched.append(True)
+                return SSHResult(HOST, "succeeded", 0, "0", "", .01, root_started=True)
+
+            with (patch.object(executor, "authorized_host", return_value=host),
+                  patch.object(executor, "_run", side_effect=completed)):
+                token = root_access_context.set(access)
+                try:
+                    response = await batches.execute(ACTOR, request, admitted_root=True)
+                finally:
+                    root_access_context.reset(token)
+            self.assertEqual(response["status"], "succeeded")
+            self.assertEqual(len(dispatched), 2)
+            self.assertTrue(access.operation.delegated)
+            self.assertTrue(access.operation.finished)
+            self.assertFalse(access.valid(host=HOST, actor=ACTOR))
+            self.assertNotIn(access.scope.issuance, self.manager._once_root_access)
+
+    async def test_once_root_async_job_releases_only_when_job_finishes(self):
+        _, access = await self.issue("once", operation_timeout_seconds=720)
+        host = HostSpec(
+            alias=HOST, address="synthetic.example.invalid", port=22,
+            username="gateway", principals=[ACTOR], environment="non-production",
+            identity_file=Path("/synthetic/id"),
+            known_hosts_file=Path("/synthetic/known"), access="restricted",
+            privileged_access="restricted",
+        )
+        executor = SSHExecutor(
+            {HOST: host}, enabled=True, sealed_sudo={HOST: self.sealed},
+            readiness_settings=ReadinessSettings(authorized=True),
+        )
+        executor.readiness._states[HOST].last_ssh = time.monotonic()
+        executor.readiness._states[HOST].safety_confirmed = True
+        with tempfile.TemporaryDirectory() as d:
+            jobs = JobManager(executor, JobStore(Path(d) / "jobs.sqlite"))
+            command = ExecuteCommandRequest(
+                server=HOST, argv=["/usr/bin/id", "-u"],
+                privileged=True, timeout_seconds=720,
+                reason="TEST-347 background once release",
+            )
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def completed(_host, _request, _start, _on_output, **kwargs):
+                started.set()
+                await release.wait()
+                self.assertTrue(kwargs["password_permitted"]())
+                return SSHResult(HOST, "succeeded", 0, "0", "", .01, root_started=True)
+
+            with (patch.object(executor, "authorized_host", return_value=host),
+                  patch.object(executor, "_run", side_effect=completed)):
+                token = root_access_context.set(access)
+                try:
+                    row = jobs.submit(ACTOR, command, admitted_root=True)
+                finally:
+                    root_access_context.reset(token)
+                self.assertTrue(access.operation.delegated)
+                await asyncio.wait_for(started.wait(), timeout=2)
+                self.assertFalse(access.operation.finished)
+                self.assertTrue(access.valid(host=HOST, actor=ACTOR))
+                release.set()
+                for _ in range(100):
+                    if access.operation.finished:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertEqual(jobs.store.get(ACTOR, row["id"])["status"], "succeeded")
+                self.assertTrue(access.operation.finished)
+                self.assertFalse(access.valid(host=HOST, actor=ACTOR))
 
 
     async def test_closed_manager_disallows_new_root_issuance_and_context_reuse(self):

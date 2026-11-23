@@ -211,6 +211,15 @@ class GrantUnlocks:
             self._epoch += 1
             self._remove(handle)
 
+    def finish(self, handle: str) -> None:
+        """Release a completed single-request credential, without a global revoke.
+
+        Ordinary completion must not invalidate a different approval's
+        concurrently prepared credential by bumping the revocation epoch.
+        """
+        with self._lock:
+            self._remove(handle)
+
     def revoke_scope(self, key: GrantKey) -> None:
         with self._lock:
             self._epoch += 1
@@ -239,6 +248,14 @@ class GrantUnlocks:
             self._closed = True
 
 
+@dataclass(slots=True)
+class RootOperationState:
+    """Only the one originating MCP request may transfer task ownership."""
+
+    delegated: bool = False
+    finished: bool = False
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RootAccess:
     """Opaque live capability propagated to a single approved tool task.
@@ -252,6 +269,12 @@ class RootAccess:
     handle: str = field(repr=False)
     scope: UnlockScope
     authorized: Callable[[], bool] = field(repr=False, compare=False)
+    on_finished: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    operation: RootOperationState = field(
+        default_factory=RootOperationState, repr=False, compare=False,
+    )
 
     def require(self, *, host: str, actor: str) -> str:
         if (host != self.scope.host or actor != self.scope.actor
@@ -265,6 +288,27 @@ class RootAccess:
         except InvalidCredential:
             return False
         return True
+
+    def delegate(self) -> None:
+        """Only a successfully scheduled async job/batch owns later release."""
+        if self.scope.kind == "request":
+            self.operation.delegated = True
+
+    def finish(self) -> None:
+        """Idempotently release a one-request unlock after command/batch exit."""
+        if self.scope.kind != "request" or self.operation.finished:
+            return
+        self.operation.finished = True
+        self.registry.finish(self.handle)
+        if self.on_finished is not None:
+            self.on_finished()
+
+
+def finish_once_root(*, unless_delegated: bool = False) -> None:
+    """Best-effort terminal release, including pre-scheduling MCP failures."""
+    access = root_access_context.get()
+    if access is not None and (not unless_delegated or not access.operation.delegated):
+        access.finish()
 
 
 # Each MCP request gets its own explicit root admission. Background command

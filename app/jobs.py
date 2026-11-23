@@ -26,6 +26,7 @@ from .client_identity import client_id_context
 from .conversation_access import conversation_id_context
 from .file_audit import init_file_schema
 from .approval_status import approval_status_context, decode
+from .grant_unlocks import finish_once_root, root_access_context
 from .output_codec import OutputCorruption, encode as encode_output, decode as decode_output
 from .sqlite_support import _ClosingConnection, _prepare_path
 from .ssh_executor import ReadinessDenied, SSHDenied, SSHExecutor, SSHResult, OutputLimitExceeded
@@ -712,6 +713,9 @@ class JobManager:
         task = asyncio.create_task(self._run(
             job_id, actor, request, admitted_root=admitted_root,
         ))
+        access = root_access_context.get()
+        if request.privileged and access is not None:
+            access.delegate()
         self._tasks[job_id] = task
         task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
         result = self.store.get(actor, job_id)
@@ -725,6 +729,7 @@ class JobManager:
         max_output_bytes: int | None = None,
         admitted_root: bool = False,
         precreated_id: str | None = None,
+        retain_once_unlock: bool = False,
     ) -> tuple[str, SSHResult | None]:
         """Run synchronously while recording the same durable audit lifecycle."""
         if request.privileged and not admitted_root:
@@ -745,11 +750,28 @@ class JobManager:
             return job_id, await self._run(
                 job_id, actor, request, on_started=on_started,
                 max_output_bytes=max_output_bytes, admitted_root=admitted_root,
+                retain_once_unlock=retain_once_unlock,
             )
         finally:
             self._sync_tasks.pop(job_id, None)
 
     async def _run(
+        self, job_id: str, actor: str, request: ExecuteCommandRequest, *,
+        max_output_bytes: int | None = None,
+        admitted_root: bool = False,
+        on_started: Callable[[str], None] | None = None,
+        retain_once_unlock: bool = False,
+    ) -> SSHResult | None:
+        try:
+            return await self._run_inner(
+                job_id, actor, request, max_output_bytes=max_output_bytes,
+                admitted_root=admitted_root, on_started=on_started,
+            )
+        finally:
+            if request.privileged and not retain_once_unlock:
+                finish_once_root()
+
+    async def _run_inner(
         self, job_id: str, actor: str, request: ExecuteCommandRequest, *,
         max_output_bytes: int | None = None,
         admitted_root: bool = False,

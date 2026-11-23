@@ -35,7 +35,7 @@ from .form_body import read_bounded_body
 from .approvals import ApprovalManager, DURATIONS
 from .jobs import JobStore
 from .readiness import ReadinessMonitor
-from .ssh_executor import SSHExecutor
+from .ssh_executor import SSHDenied, SSHExecutor
 from .sealed_credentials import validate_verifier, verify_password
 from .auth_workers import run_auth
 from .grant_unlocks import UnlockScope, PreparedUnlock
@@ -1395,7 +1395,7 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                 return _json({"error": "Sudo unlock unavailable"}, 503)
             if not await run_in_threadpool(signed_in, request, touch=False):
                 return _json({"error": "Unauthorized"}, 401)
-            if approvals.root_request(approval_id) is not pending:
+            if await approvals.root_request_live(approval_id) is not pending:
                 return _json({"error": "Approval unavailable or expired"}, 404)
             scope = UnlockScope(
                 pending.key, actor=pending.actor,
@@ -1437,13 +1437,19 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
                     await executor.check_readiness_live(pending.key[2], privileged=False)
                 except (ValueError, RuntimeError):
                     return _json({"error": "Host safety verification failed"}, 409)
-                if not still_authorized() or not await executor.verify_unlocked_sudo(
-                    pending.actor, pending.key[2], prepared.password or "",
-                    permitted=still_authorized,
-                ):
+                if await approvals.root_request_live(approval_id) is not pending:
+                    return _json({"error": "Approval unavailable or expired"}, 404)
+                try:
+                    proved = (still_authorized() and await executor.verify_unlocked_sudo(
+                        pending.actor, pending.key[2], prepared.password or "",
+                        permitted=still_authorized,
+                    ))
+                except SSHDenied:
+                    proved = False
+                if not proved:
                     return _json({"error": "Host sudo verification failed"}, 409)
                 async with decision_lock:
-                    if not approvals.decide_unlocked(
+                    if not await approvals.decide_unlocked_live(
                         approval_id, duration=duration, prepared=prepared,
                         still_authorized=still_authorized,
                     ):

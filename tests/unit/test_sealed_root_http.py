@@ -189,6 +189,57 @@ class SealedRootHttpTests(unittest.TestCase):
         self.assertEqual(self.executor.live_checks, 1)
         self.assertEqual(self.executor.sudo_checks, 1)
 
+    def test_originating_mcp_disconnect_before_sudo_proof_blocks_grant(self):
+        request_id = self._queue()
+
+        async def disconnected():
+            return True
+
+        self.approvals.pending[request_id].disconnected = disconnected
+        response = self._grant(request_id, password=PASSWORD, duration="16h")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.executor.sudo_checks, 0)
+        self.assertFalse(self.approvals.root_grants)
+        self.assertFalse(self.approvals.root_unlocks._entries)
+
+    def test_originating_mcp_disconnect_during_sudo_proof_blocks_commit(self):
+        request_id = self._queue()
+        disconnected_now = [False]
+
+        async def disconnected():
+            return disconnected_now[0]
+
+        self.approvals.pending[request_id].disconnected = disconnected
+        self.executor.before_proof = lambda: disconnected_now.__setitem__(0, True)
+        response = self._grant(request_id, password=PASSWORD, duration="16h")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.executor.sudo_checks, 1)
+        self.assertFalse(self.approvals.root_grants)
+        self.assertFalse(self.approvals.root_unlocks._entries)
+
+    def test_logout_during_sudo_proof_with_no_prior_grants_prevents_commit(self):
+        request_id = self._queue()
+        self.assertFalse(self.approvals.root_grants)
+        self.executor.before_proof = self.approvals.revoke_all_root
+        response = self._grant(request_id, password=PASSWORD, duration="16h")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.executor.sudo_checks, 1)
+        self.assertFalse(self.approvals.root_grants)
+        self.assertFalse(self.approvals.root_unlocks._entries)
+
+    def test_sudo_identity_preflight_denial_returns_409_not_500(self):
+        request_id = self._queue()
+        from unittest.mock import AsyncMock
+        from app.ssh_executor import SSHDenied
+        self.executor.verify_unlocked_sudo = AsyncMock(
+            side_effect=SSHDenied("Synthetic lost host authorization"),
+        )
+        response = self._grant(request_id, password=PASSWORD)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "Host sudo verification failed")
+        self.assertFalse(self.approvals.root_grants)
+        self.assertFalse(self.approvals.root_unlocks._entries)
+
     def test_proof_safety_lost_during_sudo_challenge_fails_closed(self):
         request_id = self._queue()
         self.executor.before_proof = lambda: setattr(self.executor.readiness, "safe", False)

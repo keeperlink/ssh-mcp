@@ -447,11 +447,18 @@
       return;
     state.busy = true;
     updateClock();
+    // Never retain the operator's Console password in the visible input
+    // while a network/proxy/SSH response is outstanding, including failures.
+    const body = new URLSearchParams({ ...fields, csrf: csrf() });
+    if (!revoke) {
+      $("approval-root-password").value = "";
+      if ("console_password" in fields) fields.console_password = "";
+    }
     try {
       const response = await fetch(path, {
         method: "POST", credentials: "same-origin", cache: "no-store",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ ...fields, csrf: csrf() }),
+        body,
       });
       if (response.status === 401) {
         location.assign("/console/login");
@@ -471,17 +478,21 @@
           throw new Error("Grant state unavailable; refresh required");
         applySnapshot(snapshot);
       } else if (!response.ok) {
-        if (response.status === 403 || response.status === 429) {
-          const result = await response.json();
-          if (result.error === "Incorrect Console password."
-              || result.error === "Too many incorrect password attempts. Try again later.") {
-            $("approval-root-password").value = "";
-            const feedback = $("approval-feedback");
-            feedback.textContent = result.error;
-            feedback.hidden = false;
+        // Reverse proxies can return an HTML 403/429; never assume JSON.
+        let result = null;
+        if (response.headers.get("content-type")?.includes("application/json")) {
+          try { result = await response.json(); } catch { /* HTTP error still applies */ }
+        }
+        if ([400, 403, 409, 429, 503].includes(response.status)
+            && typeof result?.error === "string"
+            && result.error.length <= 180) {
+          const feedback = $("approval-feedback");
+          feedback.textContent = result.error;
+          feedback.hidden = false;
+          if (!$("approval-root-password-group").hidden) {
             $("approval-root-password").focus();
-            return;
           }
+          return;
         }
         if (response.status === 404) {
           state.pending.delete(id);
@@ -502,6 +513,7 @@
       feedback.textContent = error.message || "Could not contact server";
       feedback.hidden = false;
     } finally {
+      if (!revoke) $("approval-root-password").value = "";
       state.busy = false;
       tick();
     }
