@@ -351,6 +351,68 @@ class TransferToolTests(unittest.TestCase):
         self.assertIsNot(captured[0], captured[1])
         self.assertEqual([r.finished for r in unlocks], [1, 1])
 
+    def test_approval_audit_preserves_source_explicit_when_dest_config(self) -> None:
+        from app.approval_status import ApprovalCode
+        codes = [ApprovalCode.APPROVED_EXPLICIT, ApprovalCode.APPROVED_CONFIG]
+        async def mixed(*_args, **_kwargs):
+            return codes.pop(0)
+        with patch.object(mcp_gateway, "require_host_access", mixed):
+            response, body = self.tool("transfer_file", self.request())
+        self.assertFalse(response.get("isError"), body)
+        with sqlite3.connect(self.db) as db:
+            code = db.execute(
+                "SELECT approval_status FROM file_operations"
+            ).fetchone()[0]
+        self.assertEqual(code, int(ApprovalCode.APPROVED_EXPLICIT))
+
+    def test_approval_audit_preserves_timed_when_other_is_config(self) -> None:
+        from app.approval_status import ApprovalCode
+        codes = [ApprovalCode.APPROVED_TIMED, ApprovalCode.APPROVED_CONFIG]
+        async def mixed(*_args, **_kwargs):
+            return codes.pop(0)
+        with patch.object(mcp_gateway, "require_host_access", mixed):
+            response, body = self.tool("transfer_file", self.request())
+        self.assertFalse(response.get("isError"), body)
+        with sqlite3.connect(self.db) as db:
+            code = db.execute(
+                "SELECT approval_status FROM file_operations"
+            ).fetchone()[0]
+        self.assertEqual(code, int(ApprovalCode.APPROVED_TIMED))
+
+    def test_root_context_never_leaks_from_sealed_source_to_other_host(self) -> None:
+        from app.approval_status import ApprovalCode
+        from app.grant_unlocks import root_access_context
+        self.executor.privileged.update(("demo-node-a", "demo-node-b"))
+        sealed_root = SimpleNamespace(operation=SimpleNamespace(delegated=False),
+                                       finish=lambda: None)
+        observed = []
+        async def admitted(*args, **_kwargs):
+            observed.append((args[2], root_access_context.get()))
+            if args[2] == "demo-node-a":
+                root_access_context.set(sealed_root)
+            # Legacy destination approval intentionally leaves ContextVar alone.
+            return ApprovalCode.APPROVED_TIMED
+        captures = []
+        async def capture(relay, actor, req, *, precreated_id, roots):
+            captures.extend(roots)
+            identifier = relay.audit.start(
+                actor, req.dest_server, "transfer", req.dest_path,
+                req.story_id, req.operation_id, precreated_id=precreated_id,
+            )
+            relay.audit.finish(identifier, "succeeded")
+            return {"status": "succeeded", "history_id": "file_" + identifier}
+        with patch.object(mcp_gateway, "require_host_access", admitted), patch.object(
+            mcp_gateway.HostRelayService, "transfer", capture,
+        ):
+            response, body = self.tool("transfer_file", self.request(
+                source_privileged=True, dest_privileged=True,
+            ))
+        self.assertFalse(response.get("isError"), body)
+        self.assertEqual([x[0] for x in observed], ["demo-node-a", "demo-node-b"])
+        self.assertEqual([x[1] for x in observed], [None, None])
+        self.assertIs(captures[0], sealed_root)
+        self.assertIsNone(captures[1])
+
     def test_error_during_privileged_admission_releases_unlock(self) -> None:
         from app.approval_status import ApprovalCode, ApprovalRejected
         from app.grant_unlocks import root_access_context

@@ -406,6 +406,9 @@ def create_mcp_server(*, job_registry: dict | None = None,
                 (request.source_server, request.source_path, request.source_privileged),
                 (request.dest_server, request.dest_path, request.dest_privileged),
             )):
+                # ContextVar is request-local, but a previous endpoint's
+                # sealed unlock must never authorize a different host.
+                root_access_context.set(None)
                 code = await require_host_access(
                     executor, actor, alias,
                     session_id=sid if isinstance(sid, str) else None,
@@ -420,9 +423,17 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     privileged=privileged,
                     operation_timeout_seconds=request.timeout_seconds,
                 )
-                response_code = code
+                priority = {
+                    ApprovalCode.APPROVED_CONFIG: 0,
+                    ApprovalCode.APPROVED_TIMED: 1,
+                    ApprovalCode.APPROVED_EXPLICIT: 2,
+                }
+                if (response_code is None or
+                        priority.get(code, -1) > priority.get(response_code, -1)):
+                    response_code = code
                 if privileged:
                     roots[index] = root_access_context.get()
+                root_access_context.set(None)
             files.audit.settle_approval(
                 audit_id, int(response_code or ApprovalCode.APPROVED_CONFIG),
             )

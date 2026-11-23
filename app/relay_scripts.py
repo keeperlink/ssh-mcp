@@ -14,6 +14,13 @@ maximum, chunk = int(maximum), int(chunk)
 path = path if os.path.isabs(path) else os.path.join(os.path.expanduser("~"), path)
 if root == "1" and os.geteuid() != 0:
     sys.exit(126)
+def write_all(stream, data):
+    view = memoryview(data)
+    while view:
+        written = stream.write(view)
+        if written is None or written <= 0:
+            raise OSError("Short stream write")
+        view = view[written:]
 def fingerprint(s):
     return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 try:
@@ -34,14 +41,14 @@ try:
         f.seek(0)
         sys.stderr.buffer.write(b"\x1e"+marker.encode("ascii")+b"\x1e\n")
         sys.stderr.buffer.flush()
-        sys.stdout.buffer.write(struct.pack(">Q", start.st_size)+h.digest())
+        write_all(sys.stdout.buffer, struct.pack(">Q", start.st_size)+h.digest())
         remaining = start.st_size
         actual = hashlib.sha256()
         while remaining:
             data = f.read(min(chunk, remaining))
             if not data:
                 sys.exit(76)
-            sys.stdout.buffer.write(data)
+            write_all(sys.stdout.buffer, data)
             actual.update(data)
             remaining -= len(data)
         sys.stdout.buffer.flush()
@@ -62,6 +69,13 @@ path = path if os.path.isabs(path) else os.path.join(os.path.expanduser("~"), pa
 parent = os.path.dirname(path)
 stage = None
 fd = None
+def write_all(stream, data):
+    view = memoryview(data)
+    while view:
+        written = stream.write(view)
+        if written is None or written <= 0:
+            raise OSError("Short destination write")
+        view = view[written:]
 def preimage():
     if expected == "-":
         return
@@ -126,10 +140,12 @@ try:
             block = sys.stdin.buffer.read(min(chunk, remaining))
             if not block:
                 sys.exit(76)
-            target.write(block)
+            write_all(target, block)
             h.update(block)
             remaining -= len(block)
         os.fsync(fd)
+    if os.fstat(fd).st_size != size:
+        sys.exit(76)
     # Only an explicit post-source-verification COMMIT may publish.
     if h.hexdigest() != digest or sys.stdin.buffer.read(7) != b"COMMIT!":
         sys.exit(76)

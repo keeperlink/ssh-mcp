@@ -24,7 +24,7 @@ from .grant_unlocks import RootAccess
 from .relay_scripts import SOURCE, RECEIVER
 from .sealed_credentials import InvalidCredential
 from .ssh_channel import ChannelConnectionError, SSHChannelProcess, open_command
-from .ssh_executor import SSHDenied, SSHExecutor
+from .ssh_executor import SSHDenied, SSHExecutor, _supplied_password_rejected
 
 
 class RelayFailure(Exception):
@@ -44,8 +44,17 @@ async def _exact(reader: Any, size: int) -> bytes:
     return bytes(chunks)
 
 
-async def _ready(reader: Any, token: str) -> None:
+def _sudo_challenge_line(data: bytes | bytearray, prompt: bytes) -> bool:
+    """Only a real sudo or sudo-rs prompt at the current line can unlock."""
+    line = data.rstrip().rsplit(b"\n", 1)[-1]
+    native = b"[sudo: " + prompt + b"]"
+    return line in (prompt, native) or line.startswith(native + b" ")
+
+
+async def _ready(reader: Any, token: str, *, sudo_prompt: str | None = None,
+                 readiness: Any = None, alias: str | None = None) -> None:
     marker = b"\x1e" + token.encode("ascii") + b"\x1e\n"
+    prompt = sudo_prompt.encode("ascii") if sudo_prompt else None
     pending = bytearray()
     while len(pending) < 4096:
         item = await reader.read(1)
@@ -54,7 +63,28 @@ async def _ready(reader: Any, token: str) -> None:
         pending.extend(item)
         if pending.endswith(marker):
             return
+        # A rejected sudo password may request a second attempt without
+        # closing the binary destination stdin. Do not wait until timeout.
+        if prompt is not None and (
+            _sudo_challenge_line(pending, prompt)
+            or _supplied_password_rejected(bytes(pending))
+        ):
+            if readiness is not None and alias is not None:
+                readiness.suspend(alias)
+            raise RelayFailure("permission_denied")
     raise RelayFailure("invalid_response")
+
+
+async def _receipt(reader: Any) -> bytes:
+    """Read a complete, bounded commit confirmation, never one SSH packet."""
+    result = bytearray()
+    while True:
+        part = await reader.read(1025 - len(result))
+        if not part:
+            return bytes(result)
+        result.extend(part)
+        if len(result) > 1024:
+            raise RelayFailure("invalid_response", uncertain=True)
 
 
 def _sudo_prompt(marker: str) -> str:
@@ -99,6 +129,8 @@ class HostRelayService:
         self.executor = executor
         self.audit = audit
         self._active: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._pending_roots: dict[str, tuple[RootAccess | None, RootAccess | None]] = {}
+        self._stopping = False
         self._locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -106,6 +138,8 @@ class HostRelayService:
     async def transfer(self, actor: str, req: TransferFileRequest,
                        *, precreated_id: str, roots: tuple[RootAccess | None,
                                                           RootAccess | None]) -> dict[str, Any]:
+        if self._stopping:
+            raise RuntimeError("Transfer service is shutting down")
         try:
             self.executor.authorized_host(actor, req.source_server)
             self.executor.authorized_host(actor, req.dest_server)
@@ -124,10 +158,21 @@ class HostRelayService:
         # caller; one-request root unlocks must be delegated explicitly.
         task = asyncio.create_task(self._run(actor, req, identifier, roots))
         self._active[history_id] = task
+        self._pending_roots[history_id] = roots
         for root in roots:
             if root is not None:
                 root.delegate()
-        task.add_done_callback(lambda _: self._active.pop(history_id, None))
+        def complete(_task: asyncio.Task[dict[str, Any]]) -> None:
+            self._active.pop(history_id, None)
+            pending = self._pending_roots.pop(history_id, ())
+            if _task.cancelled():
+                # Cancelled before _run ever started: no finally block ran.
+                # These updates are idempotent for an already-settled row.
+                self.audit.finish(identifier, "unknown", error_code="interrupted")
+                for access in pending:
+                    if access is not None:
+                        access.finish()
+        task.add_done_callback(complete)
         wait = min(req.wait_seconds, req.timeout_seconds)
         if wait:
             try:
@@ -153,6 +198,23 @@ class HostRelayService:
         return {"job_id": job_id, "cancellation_requested": True,
                 "status": "running"}
 
+    async def shutdown(self) -> None:
+        """Cancel active relays and complete any not-yet-started audit rows."""
+        self._stopping = True
+        pending = list(self._active.items())
+        for _, task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*(task for _, task in pending), return_exceptions=True)
+        for job_id, _ in pending:
+            # _run finally closes channels when it starts; if cancellation
+            # happened before its first step, finish the durable row here.
+            self.audit.finish(job_id[5:], "unknown", error_code="interrupted")
+            for root in self._pending_roots.pop(job_id, ()):
+                if root is not None:
+                    root.finish()
+            self._active.pop(job_id, None)
+
     async def _run(self, actor: str, req: TransferFileRequest, identifier: str,
                    roots: tuple[RootAccess | None, RootAccess | None]) -> dict[str, Any]:
         moved = 0
@@ -163,6 +225,7 @@ class HostRelayService:
         src: SSHChannelProcess | None = None
         dest: SSHChannelProcess | None = None
         confirmed_cleanup = False
+        last_progress = 0.0
         history_id = "file_" + identifier
         lock_key = (req.dest_server, posixpath.normpath(req.dest_path))
         lock = self._locks.get(lock_key)
@@ -188,6 +251,11 @@ class HostRelayService:
                                 raise SSHDenied("Privileged transfer disabled")
                             if alias in self.executor._sealed_sudo and root is None:
                                 raise SSHDenied("Privileged transfer unlock missing")
+                            readiness = getattr(self.executor, "readiness", None)
+                            if (alias in self.executor._sealed_sudo
+                                    and readiness is not None
+                                    and readiness.password_suspended(alias)):
+                                raise SSHDenied("Privileged password suspended")
                         self.executor.require_ready(
                             alias, privileged=privileged and alias not in self.executor._sealed_sudo,
                         )
@@ -204,7 +272,13 @@ class HostRelayService:
                     if req.source_privileged:
                         await self._sudo(src, actor, req.source_server, roots[0],
                                          marker="SRC-" + nonce)
-                    await _ready(src.stderr, "SRC-" + nonce)
+                    await _ready(
+                        src.stderr, "SRC-" + nonce,
+                        sudo_prompt=(_sudo_prompt("SRC-" + nonce)
+                                     if req.source_privileged else None),
+                        readiness=getattr(self.executor, "readiness", None),
+                        alias=req.source_server,
+                    )
                     head = await _exact(src.stdout, 40)
                     total = struct.unpack(">Q", head[:8])[0]
                     sha256 = head[8:].hex()
@@ -224,7 +298,13 @@ class HostRelayService:
                     if req.dest_privileged:
                         await self._sudo(dest, actor, req.dest_server, roots[1],
                                          marker="DEST-" + nonce, close=False)
-                    await _ready(dest.stderr, "DEST-" + nonce)
+                    await _ready(
+                        dest.stderr, "DEST-" + nonce,
+                        sudo_prompt=(_sudo_prompt("DEST-" + nonce)
+                                     if req.dest_privileged else None),
+                        readiness=getattr(self.executor, "readiness", None),
+                        alias=req.dest_server,
+                    )
                     if dest.stdin is None:
                         raise RelayFailure("transport_error", uncertain=True)
                     local = hashlib.sha256()
@@ -234,7 +314,11 @@ class HostRelayService:
                         await dest.stdin.drain()
                         local.update(block)
                         moved += len(block)
-                        self.audit.progress(identifier, moved, total)
+                        now = asyncio.get_running_loop().time()
+                        if now - last_progress >= 1.0:
+                            self.audit.progress(identifier, moved, total)
+                            last_progress = now
+                    self.audit.progress(identifier, moved, total)
                     if local.hexdigest() != sha256:
                         raise RelayFailure("changed_file")
                     # The source must have completed with a confirmed remote
@@ -244,8 +328,7 @@ class HostRelayService:
                     dest.stdin.write(b"COMMIT!")
                     await dest.stdin.drain()
                     dest.stdin.close()
-                    proof = await _exact(dest.stdout, 1)
-                    line = proof + await dest.stdout.read(1023)
+                    line = await _receipt(dest.stdout)
                     if not await _finish_channel(dest):
                         raise RelayFailure("transport_error", uncertain=True)
                     try:
@@ -272,14 +355,13 @@ class HostRelayService:
                     )
                 except (asyncssh.Error, OSError, RuntimeError, TimeoutError):
                     confirmed_cleanup = False
-            source_stopped = src is None
+            # The source is read-only and may be blocked writing to an SSH
+            # window we stopped draining. Abort it instead of waiting on EOF.
             if src is not None:
-                try:
-                    await asyncio.wait_for(src.wait(), timeout=2)
-                    source_stopped = src.channel_complete
-                except (asyncssh.Error, OSError, RuntimeError, TimeoutError):
-                    source_stopped = False
-            status = "cancelled" if confirmed_cleanup and source_stopped else "unknown"
+                src.connection.abort()
+            # Confirmed destination nonzero exit proves stage cleanup;
+            # source termination itself is not a destination write hazard.
+            status = "cancelled" if confirmed_cleanup else "unknown"
         except TimeoutError:
             status, code = "unknown", "timeout"
         except RelayFailure as exc:
@@ -328,6 +410,10 @@ class HostRelayService:
         # never feed a plaintext password into the destination file stream.
         prompt = _sudo_prompt(marker).encode("ascii")
         ready_marker = b"\x1e" + marker.encode("ascii") + b"\x1e\n"
+        readiness = getattr(self.executor, "readiness", None)
+        if (alias in self.executor._sealed_sudo
+                and readiness is not None and readiness.password_suspended(alias)):
+            raise SSHDenied("Privileged password suspended")
         received = bytearray()
         for _ in range(4096):
             block = await proc.stderr.read(1)
@@ -335,11 +421,16 @@ class HostRelayService:
                 raise SSHDenied("Privileged sudo challenge unavailable")
             received.extend(block)
             if received.endswith(ready_marker):
+                if readiness is not None:
+                    readiness.mark_passwordless_root(alias)
                 raise SSHDenied("Privileged sudo prompt was bypassed")
-            if received.endswith(prompt):
+            if _sudo_challenge_line(received, prompt):
                 break
         else:
             raise SSHDenied("Privileged sudo challenge invalid")
+        if (alias in self.executor._sealed_sudo
+                and readiness is not None and readiness.password_suspended(alias)):
+            raise SSHDenied("Privileged password suspended")
         proc.stdin.write(password.encode("utf-8") + b"\n")
         await proc.stdin.drain()
         password = None

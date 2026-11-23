@@ -74,6 +74,9 @@ async def lifespan(_app: FastAPI):
             _approvals.shutdown()
             if readiness is not None:
                 await readiness.stop()
+            relay = _job_registry.get("relay")
+            if relay is not None:
+                await relay.shutdown()
             batches = _job_registry.get("batches")
             if batches is not None:
                 await batches.shutdown()
