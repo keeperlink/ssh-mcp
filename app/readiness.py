@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Collection
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -96,6 +96,8 @@ class HostHealth:
     previous_active: bool = False
     previous_sudo_ready: bool = False
     last_warning: str | None = None
+    sealed: bool = False
+    safety_confirmed: bool = False
 
 
 class ReadinessMonitor:
@@ -105,7 +107,10 @@ class ReadinessMonitor:
         self, settings: ReadinessSettings, hosts: Mapping[str, bool],
         probe: Callable[[str, ProbeKind], Awaitable[ProbeResult]],
         *, clock: Callable[[], float] = time.monotonic,
+        sealed_hosts: Collection[str] = (),
     ) -> None:
+        if set(sealed_hosts) - set(hosts):
+            raise ValueError("Unknown sealed readiness host")
         self.settings = settings
         self._probe = probe
         self._clock = clock
@@ -113,6 +118,7 @@ class ReadinessMonitor:
         self._states = {
             alias: HostHealth(
                 expects_sudo=expects_sudo,
+                sealed=alias in sealed_hosts and expects_sudo,
                 ssh_reason="pending" if settings.authorized else "probe_authorization_missing",
                 sudo_reason="pending" if expects_sudo else "not_configured",
             )
@@ -172,6 +178,9 @@ class ReadinessMonitor:
                     else "passwordless_root" if state.unsafe
                     else "ssh_readiness_stale" if state.last_ssh is not None
                     else state.ssh_reason or "pending")
+        if privileged and state.sealed:
+            return ("sudo_authentication_suspended" if state.suspended else
+                    "sudo_locked" if state.safety_confirmed else "safety_unconfirmed")
         if privileged and not self.sudo_ready(alias):
             return ("sudo_authentication_suspended" if state.suspended
                     else state.sudo_reason or "sudo_readiness_stale")
@@ -235,6 +244,36 @@ class ReadinessMonitor:
                 self._ssh_failed(alias, identity)
                 return False
             safety = await self._attempt(alias, "safety")
+            if state.sealed:
+                # A sealed credential is never opened by readiness polling or
+                # the operator's manual recheck. Safety is proven solely from
+                # the pinned SSH identity and conclusive no-password sudo
+                # refusal. Inconclusive safety blocks root even if SSH works.
+                if safety.unsafe:
+                    state.safety_confirmed = False
+                    self._ssh_failed(alias, safety)
+                    return False
+                if state.unsafe and not safety.ok:
+                    # An inconclusive check cannot undo a prior confirmed
+                    # unsafe-passwordless-root latch while locked. Require
+                    # new conclusive proof before marking the host active.
+                    self._ssh_failed(alias, safety)
+                    return False
+                if safety.ok:
+                    state.safety_confirmed = True
+                    self._ssh_succeeded(alias)
+                    if not state.suspended:
+                        state.sudo_reason = "sudo_locked"
+                elif safety.needs_corroboration:
+                    state.safety_confirmed = False
+                    self._ssh_succeeded(alias)
+                    state.sudo_reason = "safety_unconfirmed"
+                else:
+                    state.safety_confirmed = False
+                    self._ssh_failed(alias, safety)
+                    return False
+                self._transitions(alias)
+                return self.active(alias) and not privileged
             corroborate = safety.needs_corroboration and not safety.unsafe
             scoped_retry = state.suspended and resume_generation == state.suspension_generation
             may_probe_sudo = state.expects_sudo and (not state.suspended or scoped_retry)
@@ -315,8 +354,20 @@ class ReadinessMonitor:
 
     def discovery(self, alias: str) -> dict[str, bool | str]:
         self._transitions(alias)
-        return {"status": "active" if self.active(alias) else "offline",
-                "sudo_ready": self.sudo_ready(alias)}
+        state = self._states[alias]
+        result: dict[str, bool | str] = {
+            "status": "active" if self.active(alias) else "offline",
+            "sudo_ready": self.sudo_ready(alias),
+        }
+        if state.sealed:
+            result.update({
+                "sudo_state": ("offline" if not self.active(alias) else
+                               "safety_unconfirmed" if not state.safety_confirmed else
+                               "suspended" if state.suspended else "locked"),
+                "locked": self.active(alias) and state.safety_confirmed
+                and not state.suspended,
+            })
+        return result
 
     def detail(self, alias: str) -> dict[str, object]:
         state = self._states[alias]
@@ -330,8 +381,10 @@ class ReadinessMonitor:
             "sudo_reason": (self.denial(alias, privileged=True) or state.sudo_reason
                             if state.expects_sudo else "not_configured"),
             "degraded": (not self.active(alias) or bool(state.ssh_reason)
-                         or state.expects_sudo and (
-                             not self.sudo_ready(alias) or bool(state.sudo_reason))),
+                         or (state.sealed and
+                             (not state.safety_confirmed or state.suspended))
+                         or (not state.sealed and state.expects_sudo and (
+                             not self.sudo_ready(alias) or bool(state.sudo_reason)))),
         })
         return result
 
@@ -343,5 +396,9 @@ class ReadinessMonitor:
     async def recheck(self, alias: str) -> dict[str, object]:
         if alias not in self._states or not self.settings.authorized:
             raise ValueError("Host readiness recheck unavailable")
-        ok = await self.check(alias, resume=True, privileged=self._states[alias].expects_sudo)
+        state = self._states[alias]
+        ok = await self.check(
+            alias, resume=not state.sealed,
+            privileged=state.expects_sudo and not state.sealed,
+        )
         return {**self.detail(alias), "recheck_ok": ok}

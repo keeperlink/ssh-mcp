@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import os
+import json
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -45,6 +46,85 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.probe = AsyncMock(return_value=ProbeResult(True))
         self.m = ReadinessMonitor(ReadinessSettings(authorized=True),
                 {"demo-node-a": True, "demo-node-b": False}, self.probe, clock=lambda: self.now)
+
+    async def test_sealed_host_is_locked_not_degraded_and_never_probes_password(self):
+        calls: list[str] = []
+
+        async def probe(_alias: str, kind: str) -> ProbeResult:
+            calls.append(kind)
+            return ProbeResult(True)
+
+        monitor = ReadinessMonitor(
+            ReadinessSettings(authorized=True),
+            {"demo-node-a": True}, probe, clock=lambda: self.now,
+            sealed_hosts=("demo-node-a",),
+        )
+        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertEqual(calls, ["identity", "safety"])
+        self.assertTrue(monitor.active("demo-node-a"))
+        self.assertFalse(monitor.sudo_ready("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a"), None)
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "sudo_locked")
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "locked")
+        self.assertTrue(monitor.discovery("demo-node-a")["locked"])
+        self.assertFalse(monitor.detail("demo-node-a")["degraded"])
+        self.assertEqual(monitor.snapshot()["degraded_count"], 0)
+        self.assertFalse((await monitor.recheck("demo-node-a"))["degraded"])
+        self.assertEqual(calls, ["identity", "safety", "identity", "safety"])
+        self.assertEqual(monitor.settings.interval_seconds, 30)
+        with self.assertNoLogs("app.readiness", "WARNING"):
+            self.assertTrue(await monitor.check("demo-node-a"))
+        monitor.suspend("demo-node-a")
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "suspended")
+        self.assertFalse(monitor.discovery("demo-node-a")["locked"])
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True),
+                         "sudo_authentication_suspended")
+        self.assertTrue(monitor.detail("demo-node-a")["degraded"])
+        self.assertTrue((await monitor.recheck("demo-node-a"))["recheck_ok"])
+        self.assertNotIn("sudo", calls)
+        self.assertNotIn("sudo_challenge", calls)
+
+    async def test_sealed_safety_unconfirmed_never_attempts_sudo_password(self):
+        calls: list[str] = []
+
+        async def probe(_alias: str, kind: str) -> ProbeResult:
+            calls.append(kind)
+            if kind == "safety":
+                return ProbeResult(False, "root_unconfirmed", needs_corroboration=True)
+            return ProbeResult(True)
+
+        monitor = ReadinessMonitor(
+            ReadinessSettings(authorized=True),
+            {"demo-node-a": True}, probe, sealed_hosts=("demo-node-a",),
+        )
+        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertTrue(monitor.active("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "safety_unconfirmed")
+        self.assertTrue(monitor.detail("demo-node-a")["degraded"])
+        self.assertTrue((await monitor.recheck("demo-node-a"))["degraded"])
+        self.assertEqual(calls, ["identity", "safety", "identity", "safety"])
+
+    async def test_sealed_unsafe_passwordless_sudo_fails_closed(self):
+        monitor = ReadinessMonitor(
+            ReadinessSettings(authorized=True), {"demo-node-a": True},
+            AsyncMock(side_effect=[ProbeResult(True),
+                                   ProbeResult(False, "passwordless_root", unsafe=True)]),
+            sealed_hosts=("demo-node-a",),
+        )
+        self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertFalse(monitor.active("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a"), "passwordless_root")
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "offline")
+        monitor._probe = AsyncMock(side_effect=[
+            ProbeResult(True),
+            ProbeResult(False, "root_unconfirmed", needs_corroboration=True),
+        ])
+        self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a"), "passwordless_root")
+        monitor._probe = AsyncMock(side_effect=[ProbeResult(True), ProbeResult(True)])
+        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "sudo_locked")
 
     async def test_retention_stale_and_recovery(self):
         a = "demo-node-a"
@@ -300,6 +380,88 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
     def result(self, status="succeeded", code=0, out="fixture", *, root=None, reason=None, rejected=False):
         return SSHResult(self.a,status,code,out,"",.01,root_started=root,
                          failure_kind=reason,password_rejected=rejected)
+
+    async def test_sealed_executor_loads_envelope_and_never_password_probes_in_background(self):
+        from app.sealed_credentials import seal_sudo
+        sealed = seal_sudo(
+            "synthetic-console-password-not-real", "synthetic-sudo-not-real",
+            deployment="lab", issuer="https://testing.example.org",
+            alias=self.a, username=self.host.username,
+        )
+        executor = SSHExecutor(
+            {self.a: self.host}, enabled=True, sealed_sudo={self.a: sealed},
+            readiness_settings=ReadinessSettings(authorized=True),
+        )
+        self.assertEqual(executor._sudo_passwords, {})
+        self.assertIn(self.a, executor._sealed_sudo)
+        self.assertNotIn("synthetic-sudo-not-real", repr(executor._sealed_sudo))
+        with patch.object(executor, "_run", new_callable=AsyncMock) as run:
+            run.side_effect = [
+                self.result(out=self.host.username),
+                self.result("command_error", 1, "", reason="sudo_password_required"),
+            ]
+            self.assertTrue(await executor.readiness.check(self.a))
+            self.assertEqual([x.args[1].argv for x in run.await_args_list],
+                             [["/usr/bin/id", "-un"], ["/usr/bin/id", "-u"]])
+            self.assertIsNone(run.await_args_list[1].kwargs["sudo_password"])
+            self.assertTrue(run.await_args_list[1].kwargs["no_password"])
+            self.assertEqual(executor.discover_hosts("fixture", [])[self.a]["sudo_state"], "locked")
+            self.assertEqual(executor.readiness.snapshot()["degraded_count"], 0)
+            with self.assertRaisesRegex(ReadinessDenied, "sudo_locked"):
+                executor.require_ready(self.a, privileged=True)
+            run.reset_mock()
+            self.assertEqual((await executor._readiness_probe(self.a, "sudo")).reason,
+                             "sudo_locked")
+            run.assert_not_awaited()
+
+    async def test_sealed_executors_cannot_mix_plaintext_and_envelopes(self):
+        with self.assertRaises(ValueError):
+            SSHExecutor({self.a: self.host}, enabled=True,
+                        sudo_passwords={self.a: "synthetic"},
+                        sealed_sudo={self.a: {"algorithm": "aes-256-gcm"}})
+        with self.assertRaises(ValueError):
+            SSHExecutor({self.a: self.host}, enabled=True,
+                        sealed_sudo={"demo-node-b": {"algorithm": "aes-256-gcm"}})
+
+    async def test_managed_v2_environment_loads_only_encrypted_sudo_envelopes(self):
+        from app import config, runtime_files
+        from app.sealed_credentials import from_legacy
+        old = {
+            "version": 1,
+            "oauth_login_key": "synthetic-oauth-" + "a" * 40,
+            "oauth_signing_key": "synthetic-signing-" + "b" * 40,
+            "viewer_password": "synthetic-console-secret-256",
+            "metrics_token": "synthetic-metrics-" + "m" * 40,
+            "ssh_private_key": ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
+                                "synthetic-not-real-key\n"
+                                "-----END OPENSSH PRIVATE KEY-----"),
+            "sudo_passwords": {self.a: "synthetic-sudo-not-real"},
+        }
+        sealed = from_legacy(
+            old, console_password=old["viewer_password"], deployment="lab",
+            issuer="https://testing.example.org", hosts={self.a: self.host.username},
+        )
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "managed.json"
+            source.write_text(json.dumps(sealed))
+            source.chmod(0o600)
+            with (patch.object(runtime_files, "SECRETS", source),
+                  patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+                  patch("app.ssh_executor.load_inventory", return_value={self.a: self.host}),
+                  patch.dict(os.environ, {
+                      "SSH_EXECUTOR_ENABLED": "true",
+                      "SSH_INVENTORY_FILE": "/fixture/inventory",
+                      "SSH_APPROVED_ALIASES": self.a,
+                      "SSH_READINESS_AUTHORIZED": "true",
+                  })):
+                loaded = SSHExecutor.from_environment()
+                self.assertFalse(loaded._sudo_passwords)
+                self.assertEqual(loaded._sealed_sudo[self.a], sealed["sealed_sudo"][self.a])
+                self.assertTrue(loaded.readiness._states[self.a].sealed)
+                self.assertEqual(loaded.discover_hosts("fixture", [])[self.a]["sudo_ready"], False)
+                source.write_text(json.dumps({**sealed, "sudo_passwords": old["sudo_passwords"]}))
+                with self.assertRaisesRegex(Exception, "Protected sudo secret configuration"):
+                    SSHExecutor.from_environment()
 
     async def test_fixed_probes_and_transient_failure(self):
         with patch.object(self.executor, "_run", new_callable=AsyncMock) as run:

@@ -23,6 +23,37 @@ change the audit database, and this cannot be overridden by environment.
 The later reviewed root-unlock/readiness and explicit database-recovery
 stage must remove this guard before any v2 production activation.
 
+### Stage 3A: in-memory grant handles and sealed readiness
+
+`app.grant_unlocks.GrantUnlocks` adds a bounded, process-memory-only
+credential registry. Each high-entropy opaque handle is bound to an exact
+operator actor, OAuth client, agent-or-conversation key, signed host alias,
+root-grant issuance, operation identity and secret generation, with a
+monotonic maximum 16-hour deadline. Callers must recheck the handle at
+capacity admission and immediately before sudo password submission.
+Revocation and operator logout clear the affected handles; credential
+rotation and service shutdown clear all handles. Immutable Python strings
+cannot be guaranteed to be zeroized after use. There are **no persistent
+unlock handles, derived keys or sudo passwords**.
+
+The signed executor can load v2 sealed host envelopes without storing their
+plaintext. Its 30-second readiness monitor performs only pinned-identity
+SSH and noninteractive passwordless-root safety checks while sealed.
+Conclusive safe refusal displays **Locked**, not Offline/Degraded; ambiguous
+evidence displays **Safety unconfirmed** and blocks root, and confirmed
+unsafe passwordless-root remains latched until conclusive safe evidence.
+Operator rechecks also remain password-free while locked. The Console uses
+the same status vocabulary.
+
+**Stage 3A does not yet wire** these handles to the privileged approval
+password field, the shared Console-login throttle, fresh live sudo proof,
+root grant issuance/revocation, or command/queued-job/batch password
+submission. Its locked root entrypoint remains intentionally denied;
+`SEALED_RUNTIME_READY=False` is unchanged. Do not treat this preparatory
+stage as authorization to activate or deploy v2. The next stage must
+integrate these boundaries and validate the actual deployed sudo
+implementations in an independently approved LAB environment.
+
 **Temporary compatibility boundary:** the old managed v1 schema remains
 accepted solely to preserve existing offline fixtures and current deployed
 behavior during staged development. The final sealed cutover must reject v1

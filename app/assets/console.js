@@ -189,7 +189,11 @@
       const values = [
         alias,
         host.status !== "active" ? "Offline" : host.ssh_reason ? "Recent failure · still eligible" : "Active",
-        !host.sudo_configured ? "N/A" : host.sudo_ready ? "Ready" : "Unavailable",
+        !host.sudo_configured ? "N/A"
+          : host.sudo_state === "locked" ? "Locked"
+          : host.sudo_state === "safety_unconfirmed" ? "Safety unconfirmed"
+          : host.sudo_state === "suspended" ? "Suspended"
+          : host.sudo_ready ? "Ready" : "Unavailable",
         formatRelative(host.last_check),
         formatRelative(host.last_success),
         host.sudo_configured ? formatRelative(host.last_sudo_success) : "N/A",
@@ -206,6 +210,8 @@
       row.cells[1].className = host.status !== "active" ? "readiness-bad"
         : host.ssh_reason ? "readiness-warning" : "readiness-good";
       row.cells[2].className = !host.sudo_configured ? "readiness-neutral"
+        : host.sudo_state === "locked" ? "readiness-neutral"
+        : host.sudo_state === "safety_unconfirmed" ? "readiness-warning"
         : !host.sudo_ready ? "readiness-bad"
         : host.sudo_reason ? "readiness-warning" : "readiness-good";
     }
