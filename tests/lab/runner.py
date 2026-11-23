@@ -398,6 +398,18 @@ def create_secrets(state: dict, folder: Path) -> None:
         "MCP_ENVIRONMENT": "lab",
         "MCP_ISSUER": "http://localhost",
         "MCP_RESOURCE": "http://localhost/mcp",
+        # Modern clients accept conversation identifiers only from sources
+        # explicitly pinned to their verified OAuth identity. Without this
+        # test-only declaration, X-OpenAI-Session is ignored and restricted
+        # approvals become agent-scoped, breaking conversation acceptance.
+        "MCP_CLIENTS": json.dumps({
+            "Synthetic LAB": {
+                "identities": ["https://chatgpt.com/oauth/client.json"],
+                "conversation_id": {
+                    "sources": [{"type": "header", "name": "X-OpenAI-Session"}],
+                },
+            },
+        }, separators=(",", ":"), sort_keys=True),
         "MCP_CIMD_VALIDATE_REMOTE": "false",
         "MCP_ALLOWED_HOSTS": "localhost,localhost:*,127.0.0.1,127.0.0.1:*",
         "MCP_BIND_HOST": "0.0.0.0",

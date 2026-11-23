@@ -272,6 +272,11 @@ For approvals, setup accepts `--access restricted` and a temporary
 Console password. Test the authenticated Grant/Deny, session expiry,
 revoke and SSE workflow using the reviewed source script:
 
+The generated LAB-only `MCP_CLIENTS` configuration permits the
+`X-OpenAI-Session` conversation header for the fixture client's explicit
+OAuth identity. Production continues to ignore unregistered headers and
+use agent-scoped grants without an approved conversation selector.
+
 ```sh
 ssh-mcp-test setup --story ISSUE_KEY --commit FULL_SHA \
   --access restricted
