@@ -8,11 +8,12 @@ COPY pyproject.toml ./
 RUN python -c "import tomllib; from pathlib import Path; data=tomllib.loads(Path('pyproject.toml').read_text()); Path('/runtime-requirements.txt').write_text(chr(10).join(data['project']['dependencies']) + chr(10))" \
     && python -m pip wheel --disable-pip-version-check --no-cache-dir --wheel-dir=/dependency-wheels -r /runtime-requirements.txt
 
-# App-only wheel build: changing app/* does not invalidate dependency wheels.
+# Application wheel build: changing packaged sources does not invalidate dependency wheels.
 FROM python:3.14-slim-trixie AS application-wheel
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY app/ ./app/
+COPY ssh_mcp_secrets/ ./ssh_mcp_secrets/
 RUN python -m pip wheel --disable-pip-version-check --no-cache-dir --no-deps --wheel-dir=/application-wheel .
 
 FROM python:3.14-slim-trixie AS runtime-base
@@ -71,7 +72,7 @@ COPY --chown=10001:10001 docs/ /validation/docs/
 USER 10001:10001
 WORKDIR /validation
 RUN python -m pip check \
-    && python -c "from pathlib import Path; import app; assert '/site-packages/' in str(Path(app.__file__).resolve()), 'Tests must import the installed production wheel'" \
+    && python -c "from pathlib import Path; import app,ssh_mcp_secrets; assert all('/site-packages/' in str(Path(package.__file__).resolve()) for package in (app,ssh_mcp_secrets)), 'Tests must import the installed production wheel'" \
     && MCP_ISSUER=http://localhost MCP_RESOURCE=http://localhost/mcp MCP_CIMD_VALIDATE_REMOTE=false \
        MCP_LOGIN_KEY=synthetic-test-login-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
        MCP_TOKEN_SIGNING_SECRET=synthetic-test-signing-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \

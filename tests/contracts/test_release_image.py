@@ -1,4 +1,5 @@
 """Protect the shared SSH-MCP OCI release image and isolated runtime contract."""
+from importlib.util import find_spec
 import os
 import re
 import shlex
@@ -153,6 +154,24 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertIn("COPY --from=dependency-wheels", base)
         self.assertIn("FROM runtime-base AS runtime", dockerfile)
         self.assertIn("FROM runtime AS runtime-tests", dockerfile)
+
+    def test_oci_wheel_copies_every_declared_package_source(self):
+        """The Docker wheel builder must ship the same packages as local wheel tests."""
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        included = project["tool"]["setuptools"]["packages"]["find"]["include"]
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        dependencies, application = dockerfile.split(
+            "FROM python:3.14-slim-trixie AS application-wheel", 1
+        )
+        application = application.split("FROM python:3.14-slim-trixie AS runtime-base", 1)[0]
+        for pattern in included:
+            self.assertTrue(pattern.endswith("*") and "/" not in pattern, pattern)
+            package = pattern[:-1]
+            # Installed-wheel fixtures intentionally do not include app/ sources.
+            self.assertIsNotNone(find_spec(package), package)
+            self.assertIn(f"COPY {package}/ ./{package}/", application)
+            self.assertNotIn(f"COPY {package}/", dependencies)
+        self.assertIn("import app,ssh_mcp_secrets;", dockerfile)
 
 
 
