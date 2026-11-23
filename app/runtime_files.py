@@ -139,7 +139,7 @@ def _positive(value: Any, maximum: int) -> bool:
 
 def _valid_settings(settings: dict[str, Any]) -> None:
     required = {"version", "environment", "clients", *SECTIONS}
-    if (not required <= set(settings) <= required | {"logging", "readiness"}
+    if (not required <= set(settings) <= required | {"logging", "readiness", "transfer"}
             or settings["version"] != 1 or
             any(type(settings[section]) is not dict or
                 not (keys <= set(settings[section]) <= (keys | VIEWER_OPTIONAL)
@@ -148,6 +148,14 @@ def _valid_settings(settings: dict[str, Any]) -> None:
                      if section == "oauth" else set(settings[section]) == keys)
                 for section, keys in SECTIONS.items())):
         raise ValueError("Invalid service setting schema")
+    transfer = settings.get("transfer", {"max_bytes": 1073741824, "chunk_bytes": 262144})
+    if (type(transfer) is not dict or set(transfer) != {"max_bytes", "chunk_bytes"}
+            or type(transfer["max_bytes"]) is not int
+            or type(transfer["chunk_bytes"]) is not int
+            or not 1 <= transfer["max_bytes"] <= 4 * 1024**3
+            or not 4096 <= transfer["chunk_bytes"] <= 4194304
+            or transfer["chunk_bytes"] > transfer["max_bytes"]):
+        raise ValueError("Invalid signed SSH transfer limits")
     ReadinessSettings.from_mapping(settings.get("readiness", {}))
     clients = parse_clients(settings["clients"])
     for definition in clients.values():
@@ -353,6 +361,8 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         "SSH_APPROVED_ALIASES": ",".join(aliases),
         "SSH_OUTPUT_LIMIT_BYTES": str(ssh["max_output_bytes"]),
         "SSH_MAX_CONCURRENT": str(ssh["max_concurrent"]),
+        "SSH_TRANSFER_MAX_BYTES": str(cfg.get("transfer", {}).get("max_bytes", 1073741824)),
+        "SSH_TRANSFER_CHUNK_BYTES": str(cfg.get("transfer", {}).get("chunk_bytes", 262144)),
         "SSH_MAX_TIMEOUT_SECONDS": str(ssh["max_timeout_seconds"]),
         "SSH_DEFAULT_TIMEOUT_SECONDS": str(ssh["default_timeout_seconds"]),
         "SSH_MAX_ARGUMENT_BYTES": str(ssh["max_argument_bytes"]),

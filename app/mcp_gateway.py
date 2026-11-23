@@ -39,13 +39,14 @@ from .contracts import (
     CancelJobRequest, ExecuteCommandRequest, GetJobOutputRequest,
     GetJobRequest, GetJobStatsRequest, ListJobsRequest, ListServersRequest,
     ReadFileRequest, WriteFileRequest, ApplyPatchRequest,
-    UploadFileRequest, DownloadFileRequest,
+    UploadFileRequest, DownloadFileRequest, TransferFileRequest,
     ExecuteCommandsRequest, GetBatchRequest, ListBatchesRequest, CancelBatchRequest,
 )
 from .batch import BatchManager
-from .grant_unlocks import finish_once_root, root_access_context
+from .grant_unlocks import RootAccess, finish_once_root, root_access_context
 from .jobs import JobManager, JobStore
 from .file_transfer import BinaryTransferService
+from .host_relay import HostRelayService
 from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
 from .history import HistoryStore
 from .operational import service_status, service_version
@@ -254,6 +255,15 @@ FILE_TOOLS = [
 FILE_TOOLS[-2].meta = {
     **(FILE_TOOLS[-2].meta or {}), "openai/fileParams": ["file"],
 }
+FILE_TOOLS.append(_job_tool(
+    "transfer_file",
+    "Transfer a file from one approved SSH host to another through the server's "
+    "bounded memory only; no file contents reach the MCP client, tools or audit. "
+    "Supports independent root access, atomic create/overwrite and SHA-256 "
+    "preconditions. A large transfer continues asynchronously; poll get_job, "
+    "cancel with cancel_job. An uncertain result is never safe to retry blindly.",
+    TransferFileRequest, read_only=False,
+))
 FILE_TOOL_NAMES = frozenset(tool.name for tool in FILE_TOOLS)
 
 # Temporary, opt-in capability test. It is not a binary transfer API and
@@ -311,6 +321,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
     jobs: JobManager | None = None
     batches: BatchManager | None = None
     files: BinaryTransferService | None = None
+    relay: HostRelayService | None = None
     if os.getenv("SSH_JOBS_ENABLED") == "true":
         if executor is None:
             raise RuntimeError("Job tools require SSH MCP authorization")
@@ -328,6 +339,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
         jobs = JobManager(executor, store, max_active=config.SSH_MAX_ACTIVE_JOBS)
         batches = BatchManager(jobs)
         files = BinaryTransferService(executor, store)
+        relay = HostRelayService(executor, files.audit)
     probe_enabled = os.getenv("SSH_BINARY_PROBE_ENABLED", "false").lower() == "true"
     if probe_enabled and executor is None:
         raise RuntimeError("Binary capability probe requires SSH OAuth authorization")
@@ -335,6 +347,7 @@ def create_mcp_server(*, job_registry: dict | None = None,
         job_registry["executor"] = executor
         job_registry["jobs"] = jobs
         job_registry["batches"] = batches
+        job_registry["relay"] = relay
     history = HistoryStore(jobs.store) if jobs is not None else None
     started_monotonic = time.monotonic()
 
@@ -348,6 +361,114 @@ def create_mcp_server(*, job_registry: dict | None = None,
                    *(FILE_TOOLS if files is not None else []),
                    *([BINARY_PROBE_TOOL] if probe_enabled else [])]
         )
+
+    async def _transfer_tool(_ctx, arguments: dict, actor: str, token):
+        if files is None or relay is None or executor is None:
+            return _error("Host-to-host file relay requires durable SSH auditing")
+        try:
+            request = TransferFileRequest.model_validate(arguments)
+        except ValidationError:
+            return _error("Invalid transfer_file request")
+        for alias in (request.source_server, request.dest_server):
+            try:
+                executor.authorized_host(actor, alias)
+            except SSHDenied:
+                return _error("Host-to-host SSH access denied")
+        if request.operation_id and files.audit.operation_id_exists(request.operation_id):
+            return _result({
+                "status": "failed", "operation_id": request.operation_id,
+                "error": {"code": "duplicate_operation",
+                          "message": "Operation ID already exists; inspect job before retry"},
+            }, is_error=True)
+        audit_id: str | None = None
+        try:
+            audit_id = files.audit.reserve(
+                actor, request.dest_server, "transfer", request.dest_path,
+                request.story_id,
+            )
+            files.audit.set_source(audit_id, request.source_server)
+        except (sqlite3.DatabaseError, RuntimeError, ValueError, OSError):
+            # Never strand an awaiting_approval row if an additive source
+            # metadata write fails after reservation but before the prompt.
+            if audit_id is not None:
+                try:
+                    files.audit.settle_approval(audit_id, None, denied=True)
+                except (sqlite3.DatabaseError, RuntimeError, ValueError, OSError):
+                    pass
+            return _error("Durable transfer auditing unavailable")
+        assert audit_id is not None
+        roots: list[RootAccess | None] = [None, None]
+        authorized = False
+        response_code: ApprovalCode | None = None
+        sid = (token.claims or {}).get("sid")
+        try:
+            for index, (alias, path, privileged) in enumerate((
+                (request.source_server, request.source_path, request.source_privileged),
+                (request.dest_server, request.dest_path, request.dest_privileged),
+            )):
+                # ContextVar is request-local, but a previous endpoint's
+                # sealed unlock must never authorize a different host.
+                root_access_context.set(None)
+                code = await require_host_access(
+                    executor, actor, alias,
+                    session_id=sid if isinstance(sid, str) else None,
+                    conversation_id=conversation_id_context.get(),
+                    approvals=approvals, tool="transfer_file",
+                    client_id=token.client_id,
+                    reason=request.reason,
+                    summary=lambda: approval_summary("transfer_file", arguments),
+                    disconnected=(_ctx.request.is_disconnected
+                                  if _ctx is not None and
+                                  isinstance(_ctx.request, Request) else None),
+                    privileged=privileged,
+                    operation_timeout_seconds=request.timeout_seconds,
+                )
+                priority = {
+                    ApprovalCode.APPROVED_CONFIG: 0,
+                    ApprovalCode.APPROVED_TIMED: 1,
+                    ApprovalCode.APPROVED_EXPLICIT: 2,
+                }
+                if (response_code is None or
+                        priority.get(code, -1) > priority.get(response_code, -1)):
+                    response_code = code
+                if privileged:
+                    roots[index] = root_access_context.get()
+                root_access_context.set(None)
+            files.audit.settle_approval(
+                audit_id, int(response_code or ApprovalCode.APPROVED_CONFIG),
+            )
+            authorized = True
+            data = await relay.transfer(actor, request, precreated_id=audit_id,
+                                        roots=(roots[0], roots[1]))
+            return _result(data, is_error=data["status"] not in {"succeeded", "running"})
+        except ApprovalRejected as rejected:
+            if not authorized:
+                files.audit.settle_approval(
+                    audit_id, int(rejected.approval_code), denied=True,
+                )
+            return _error("SSH host access denied or requires operator approval")
+        except asyncio.CancelledError:
+            if not authorized:
+                files.audit.settle_approval(audit_id, None, denied=True)
+            raise
+        except (SSHDenied, ReadinessDenied, ValueError, RuntimeError, OSError,
+                sqlite3.DatabaseError):
+            if authorized:
+                # A confirmed pre-scheduling error leaves a queued, approved
+                # request; mark it terminal without masking a running operation.
+                try:
+                    files.audit.reject_unscheduled(audit_id, error_code="transport_error")
+                except (sqlite3.DatabaseError, RuntimeError, ValueError, OSError):
+                    pass
+            else:
+                files.audit.settle_approval(audit_id, None, denied=True)
+            return _error("Transfer authorization or audit confirmation unavailable")
+        finally:
+            # The relay delegates request-scoped unlocks when task scheduling
+            # succeeds. Finish any handle never transferred to a background task.
+            for access in roots:
+                if access is not None and not access.operation.delegated:
+                    access.finish()
 
     async def dispatch_tool(_ctx, params: CallToolRequestParams):
         if params.name not in {"list_servers", "execute_command", *JOB_TOOL_NAMES,
@@ -371,6 +492,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
         # Client-specific actor partitioning applies only after this gate.
         actor = client_audit_actor(token.client_id)
         arguments = dict(params.arguments or {})
+        if params.name == "transfer_file":
+            return await _transfer_tool(_ctx, arguments, actor, token)
         # Keep the existing structured validation errors for batches before
         # the shared host gate; no CWD preflight or SSH occurs in this step.
         batch_request: ExecuteCommandsRequest | None = None
@@ -769,7 +892,11 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     return _result(data) if data is not None else _error("Job unavailable")
                 if params.name == "cancel_job":
                     query = CancelJobRequest.model_validate(arguments)
-                    data = jobs.cancel(actor, query.job_id, reason=query.reason)
+                    data = (
+                        await relay.cancel(actor, query.job_id)
+                        if relay is not None and query.job_id.startswith("file_")
+                        else jobs.cancel(actor, query.job_id, reason=query.reason)
+                    )
                     return _result(data) if data is not None else _error("Job unavailable")
             assert command_request is not None
             request = command_request

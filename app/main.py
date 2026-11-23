@@ -74,6 +74,9 @@ async def lifespan(_app: FastAPI):
             _approvals.shutdown()
             if readiness is not None:
                 await readiness.stop()
+            relay = _job_registry.get("relay")
+            if relay is not None:
+                await relay.shutdown()
             batches = _job_registry.get("batches")
             if batches is not None:
                 await batches.shutdown()
@@ -135,6 +138,7 @@ if os.getenv("HISTORY_VIEWER_ENABLED", "false").lower() == "true":
         manager.store, approved_hosts=manager.executor.list_servers(MCP_OPERATOR_SUBJECT),
         approvals=_approvals, job_manager=manager,
         batch_manager=_job_registry.get("batches"),
+        relay=_job_registry.get("relay"),
         readiness=getattr(manager.executor, "readiness", None),
     ))
 

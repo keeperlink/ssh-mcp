@@ -17,8 +17,8 @@ from .conversation_access import conversation_id_context
 from .client_identity import client_id_context
 from .approval_status import approval_status_context
 
-KINDS = frozenset({"inspect", "read", "write", "patch", "patch_preview", "upload", "download"})
-FILE_STATES = frozenset({"running", "succeeded", "failed", "partial", "unknown"})
+KINDS = frozenset({"inspect", "read", "write", "patch", "patch_preview", "upload", "download", "transfer"})
+FILE_STATES = frozenset({"running", "succeeded", "failed", "partial", "unknown", "cancelled"})
 _ERRORS = frozenset({
     "not_found", "permission_denied", "invalid_request", "invalid_protocol",
     "unsupported_operation", "payload_limit", "bootstrap_check_failed",
@@ -26,7 +26,7 @@ _ERRORS = frozenset({
     "output_limit", "invalid_response", "filesystem_error", "precondition_failed",
     "invalid_patch", "interrupted", "duplicate_operation", "invalid_cursor",
     "changed_file", "invalid_encoding", "response_limit", "already_exists", "partial",
-    "source_unavailable", "host_readiness",
+    "source_unavailable", "host_readiness", "cancelled",
 })
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{8,120}$")
 
@@ -67,6 +67,8 @@ def init_file_schema(db: sqlite3.Connection) -> None:
     existing = {row["name"] for row in db.execute("PRAGMA table_info(file_operations)")}
     # Only the 2026-11-19 client-ID addition remains upgradeable; older
     # columns are defined directly in CREATE TABLE for new installations.
+    if "source_server" not in existing:
+        db.execute("ALTER TABLE file_operations ADD COLUMN source_server TEXT")
     if "client_id" not in existing:
         db.execute("ALTER TABLE file_operations ADD COLUMN client_id TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS file_operations_replay_id "
@@ -143,7 +145,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  0,0,'batch',story_id,conversation_id,
                  json_object('reason',substr(reason,1,200),'server',server,
                              'total_steps',total_steps),
-                 'batch','execute_commands',NULL,0,NULL,NULL,{batch_code},{batch_client}
+                 'batch','execute_commands',NULL,0,NULL,NULL,{batch_code},{batch_client},NULL
           FROM command_batches AS b
           WHERE status IN ('denied','rejected')
             AND NOT EXISTS (
@@ -170,7 +172,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  story_id,conversation_id,request_json,
                  'command' AS record_kind,NULL AS operation_kind,NULL AS path_summary,
                  0 AS byte_count,NULL AS error_code,NULL AS result_metadata,
-                 approval_status,client_id
+                 approval_status,client_id,NULL AS source_server
           FROM jobs
           UNION ALL
           SELECT 'file_'||id,actor,server,operation_kind,0,'',0,NULL,NULL,NULL,status,
@@ -184,7 +186,7 @@ def rebuild_history_view(db: sqlite3.Connection) -> None:
                  ended_at,NULL,NULL,NULL,elapsed_seconds,
                  COALESCE(error_code,''),0,0,'file',story_id,conversation_id,NULL,
                  'file',operation_kind,path_summary,byte_count,error_code,result_metadata,
-                 approval_status,client_id
+                 approval_status,client_id,source_server
           FROM file_operations
     """ + batch_sql + ";")
 
@@ -246,6 +248,25 @@ class FileAudit:
                  conversation_id_context.get(), now, now, now, client_id_context.get()),
             )
         return identifier
+
+    def set_source(self, identifier: str, source_server: str) -> None:
+        with self.store._connect() as db:
+            result = db.execute(
+                "UPDATE file_operations SET source_server=? WHERE id=? "
+                "AND status='awaiting_approval'", (source_server, identifier),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Transfer audit source could not be recorded")
+
+    def progress(self, identifier: str, byte_count: int, total_bytes: int) -> None:
+        if not (0 <= byte_count <= total_bytes <= 4 * 1024**3):
+            raise ValueError("Invalid transfer progress")
+        with self.store._connect() as db:
+            db.execute(
+                "UPDATE file_operations SET byte_count=?,updated_at=? "
+                "WHERE id=? AND status='running'",
+                (byte_count, time.time(), identifier),
+            )
 
     def settle_approval(self, identifier: str, code: int | None, *,
                         denied: bool = False) -> None:
@@ -355,7 +376,7 @@ class FileAudit:
             # A strict, fixed allowlist: never store signed ChatGPT URLs,
             # file IDs, full remote paths or any binary body.
             direction = transfer.get("direction")
-            if direction not in {"upload", "download"}:
+            if direction not in {"upload", "download", "relay"}:
                 raise ValueError("Invalid transfer direction")
             filtered: dict[str, Any] = {"direction": direction}
             for name in ("sha256", "chunk_sha256"):
@@ -370,6 +391,13 @@ class FileAudit:
                 filtered["eof"] = transfer["eof"]
             if transfer.get("mode") in {"create", "overwrite"}:
                 filtered["mode"] = transfer["mode"]
+            for name in ("source_server", "dest_server", "source_path", "dest_path"):
+                value = transfer.get(name)
+                if isinstance(value, str) and len(value) <= 255:
+                    filtered[name] = (path_summary(value) if name.endswith("_path") else value)
+            for name in ("source_privileged", "dest_privileged"):
+                if type(transfer.get(name)) is bool:
+                    filtered[name] = transfer[name]
             safe_metadata["transfer"] = filtered
         now = time.time()
         with self.store._connect() as db:

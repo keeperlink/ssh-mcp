@@ -32,6 +32,10 @@
     "max_concurrent": 4,
     "max_hosts": 16
   },
+  "transfer": {
+    "max_bytes": 1073741824,
+    "chunk_bytes": 262144
+  },
   "jobs": {
     "enabled": true,
     "database": "/var/lib/ssh-mcp/jobs.sqlite",

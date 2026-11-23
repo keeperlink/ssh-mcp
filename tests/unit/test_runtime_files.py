@@ -230,6 +230,45 @@ class SignedConfigurationTests(unittest.TestCase):
     def prepare(self):
         return prepare(self.config, self.secrets, self.inventory, self.known, self.target)
 
+    def test_optional_signed_host_relay_limits_and_defaults(self):
+        from app.runtime_files import _valid_settings
+
+        _valid_settings(self.settings)
+        custom = {**self.settings, "transfer": {
+            "max_bytes": 256 * 1024, "chunk_bytes": 4096,
+        }}
+        _valid_settings(custom)
+        self.write(self.config, custom)
+        env = self.prepare()
+        self.assertEqual(env["SSH_TRANSFER_MAX_BYTES"], "262144")
+        self.assertEqual(env["SSH_TRANSFER_CHUNK_BYTES"], "4096")
+        self.assertEqual(
+            {p.name for p in self.target.iterdir()},
+            {"identity", "inventory.json"},
+        )
+
+    def test_signed_relay_rejects_invalid_limits_before_private_mount(self):
+        from app.runtime_files import _valid_settings
+
+        for limits in (
+            None, False, 17, "", [], {},
+            {"max_bytes": True, "chunk_bytes": 4096},
+            {"max_bytes": 1073741824, "chunk_bytes": False},
+            {"max_bytes": 0, "chunk_bytes": 4096},
+            {"max_bytes": -1, "chunk_bytes": 4096},
+            {"max_bytes": 4 * 1024**3 + 1, "chunk_bytes": 4096},
+            {"max_bytes": 65536, "chunk_bytes": 4095},
+            {"max_bytes": 65536, "chunk_bytes": 4194305},
+            {"max_bytes": 4096, "chunk_bytes": 8192},
+            {"max_bytes": 1073741824, "chunk_bytes": 262144, "other": 1},
+            {"max_bytes": 1073741824},
+        ):
+            with self.subTest(limits=limits):
+                malformed = {**self.settings, "transfer": limits}
+                with self.assertRaisesRegex(ValueError, "Invalid signed SSH transfer"):
+                    _valid_settings(malformed)
+        self.assertEqual(list(self.target.iterdir()), [])
+
     def test_signed_settings_and_single_secret(self):
         result = self.prepare()
         self.assertEqual(result["MCP_ENVIRONMENT"], "production")
