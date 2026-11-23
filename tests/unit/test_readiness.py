@@ -105,6 +105,44 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await monitor.recheck("demo-node-a"))["degraded"])
         self.assertEqual(calls, ["identity", "safety", "identity", "safety"])
 
+    async def test_sealed_failed_safety_probe_recovers_only_after_conclusive_check(self):
+        calls: list[str] = []
+        safety = [
+            ProbeResult(False, "probe_timeout"),
+            ProbeResult(False, "root_unconfirmed", needs_corroboration=True),
+            ProbeResult(True),
+            ProbeResult(False, "connection_failed"),
+        ]
+
+        async def probe(_alias: str, kind: str) -> ProbeResult:
+            calls.append(kind)
+            return safety.pop(0) if kind == "safety" else ProbeResult(True)
+
+        monitor = ReadinessMonitor(
+            ReadinessSettings(authorized=True), {"demo-node-a": True}, probe,
+            sealed_hosts=("demo-node-a",),
+        )
+        self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.discovery("demo-node-a")["status"], "offline")
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "probe_timeout")
+        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
+        self.assertTrue(monitor.detail("demo-node-a")["degraded"])
+        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "locked")
+        self.assertFalse(monitor.detail("demo-node-a")["degraded"])
+        self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
+        self.assertTrue(monitor.detail("demo-node-a")["degraded"])
+        self.assertEqual(calls, ["identity", "safety"] * 4)
+
+    async def test_sealed_readiness_unknown_alias_rejected_at_setup(self):
+        with self.assertRaises(ValueError):
+            ReadinessMonitor(
+                ReadinessSettings(authorized=True), {"demo-node-a": True},
+                self.probe, sealed_hosts=("demo-node-b",),
+            )
+
     async def test_sealed_unsafe_passwordless_sudo_fails_closed(self):
         monitor = ReadinessMonitor(
             ReadinessSettings(authorized=True), {"demo-node-a": True},

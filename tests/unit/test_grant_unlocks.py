@@ -96,6 +96,24 @@ class ScopedUnlockTests(unittest.TestCase):
         with self.assertRaises(InvalidCredential):
             self.issue()
 
+    def test_explicit_handle_revoke_and_wrong_type_never_authorize_root(self):
+        handle = self.issue()
+        self.assertTrue(self.unlocks.valid(handle, self.scope))
+        for invalid in (None, 1, False, [], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(InvalidCredential):
+                self.unlocks.require(invalid, self.scope)
+        with self.assertRaises(InvalidCredential):
+            self.unlocks.require(handle, None)
+        self.unlocks.revoke(handle)
+        self.assertFalse(self.unlocks.valid(handle, self.scope))
+        replacement = self.issue()
+        self.assertNotEqual(handle, replacement)
+        self.assertFalse(self.unlocks.valid(handle, self.scope))
+        self.assertEqual(self.unlocks.require(replacement, self.scope), SUDO)
+        self.unlocks.close()
+        with self.assertRaises(InvalidCredential):
+            self.unlocks.require(replacement, self.scope)
+
     def test_bounds_and_nonfinite_or_expired_time_fail(self):
         for expires in (900.0, 1000.0, 59000.0, float("inf"), float("nan")):
             with self.subTest(expires=expires), self.assertRaises(InvalidCredential):
