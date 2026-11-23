@@ -30,6 +30,8 @@ def _csv_env(name: str, default: str = "") -> list[str]:
 
 MCP_LOGIN_KEY = os.getenv("MCP_LOGIN_KEY", "")
 MCP_MANAGED_SECRETS_VERSION = os.getenv("MCP_MANAGED_SECRETS_VERSION", "")
+MCP_MANAGED_SECRETS_SOURCE = os.getenv("MCP_MANAGED_SECRETS_SOURCE", "")
+MCP_MANAGED_SECRETS_DIGEST = os.getenv("MCP_MANAGED_SECRETS_DIGEST", "")
 # Stage 2 is intentionally non-deployable: root grant scoping, locked-host
 # readiness and a recoverable database cutover must be implemented before
 # an image can accept an active v2 secret. Not controllable by environment.

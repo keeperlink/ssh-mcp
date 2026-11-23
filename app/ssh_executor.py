@@ -680,14 +680,29 @@ class SSHExecutor:
         from . import runtime_files
         raw: dict[str, Any] = {}
         sealed: dict[str, dict[str, str]] = {}
-        if runtime_files.SECRETS.exists():
+        secret_source = (
+            Path(config.MCP_MANAGED_SECRETS_SOURCE)
+            if config.MCP_MANAGED_SECRETS_VERSION == "2" and
+            config.MCP_MANAGED_SECRETS_SOURCE else runtime_files.SECRETS
+        )
+        if config.MCP_MANAGED_SECRETS_VERSION == "2" and (
+            not config.MCP_MANAGED_SECRETS_SOURCE
+            or not re.fullmatch("[0-9a-f]{64}", config.MCP_MANAGED_SECRETS_DIGEST)
+        ):
+            raise SSHDenied("Protected sealed secret revision is unavailable")
+        if secret_source.exists():
             try:
                 stored = runtime_files._json(
-                    runtime_files.SECRETS, 65536, reject_duplicates=True,
+                    secret_source, 65536, reject_duplicates=True,
                 )
                 if config.MCP_MANAGED_SECRETS_VERSION == "2":
                     from .sealed_credentials import validate_v2_secrets
                     validate_v2_secrets(stored)
+                    if not secrets.compare_digest(
+                        runtime_files.managed_secrets_fingerprint(stored),
+                        config.MCP_MANAGED_SECRETS_DIGEST,
+                    ):
+                        raise ValueError("Sealed credential revision mismatch")
                     sealed = stored["sealed_sudo"]
                 else:
                     value = stored.get("sudo_passwords", {})
@@ -696,6 +711,8 @@ class SSHExecutor:
                     raw = value
             except (ValueError, OSError, UnicodeError):
                 raise SSHDenied("Protected sudo secret configuration is invalid") from None
+        elif config.MCP_MANAGED_SECRETS_VERSION == "2":
+            raise SSHDenied("Protected sealed secret file is unavailable")
         return cls(hosts, enabled=True, sudo_passwords=raw,
                    sealed_sudo=sealed,
                    readiness_settings=ReadinessSettings.from_environment())

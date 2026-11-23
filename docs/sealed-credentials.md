@@ -26,21 +26,38 @@ stage must remove this guard before any v2 production activation.
 ### Stage 3A: in-memory grant handles and sealed readiness
 
 `app.grant_unlocks.GrantUnlocks` adds a bounded, process-memory-only
-credential registry. Each high-entropy opaque handle is bound to an exact
-operator actor, OAuth client, agent-or-conversation key, signed host alias,
-root-grant issuance, operation identity and secret generation, with a
-monotonic maximum 16-hour deadline. Callers must recheck the handle at
-capacity admission and immediately before sudo password submission.
+credential registry. Each high-entropy opaque handle is bound to the exact
+operator actor, up-to-2048-character verified OAuth client ID, existing
+three-field agent-or-conversation approval key (including empty conversation
+for request-only grants), signed host alias, root issuance and secret
+generation. Request-only grants additionally bind one operation; timed grants
+can be reused by later authorized operations under the same grant issuance.
+All handles have a monotonic maximum 16-hour deadline, with event-loop
+timers that release idle expired credentials without another request.
+Callers must recheck the handle at capacity admission and immediately before
+sudo password submission.
+The password verifier and host-envelope decryption happen in the isolated
+worker via `prepare()`, producing only an uncommitted memory object.
+`commit()` runs on the service event loop, atomically rechecks a mandatory
+live authority callback (pending approval, session, actor, grant generation,
+host readiness), expiry, capacity and the registry revocation epoch before
+publishing a handle. Revoked/logged-out/cancelled work cannot publish late
+plaintext after password verification finishes.
 Revocation and operator logout clear the affected handles; credential
 rotation and service shutdown clear all handles. Immutable Python strings
 cannot be guaranteed to be zeroized after use. There are **no persistent
 unlock handles, derived keys or sudo passwords**.
 
-The signed executor can load v2 sealed host envelopes without storing their
-plaintext. Its 30-second readiness monitor performs only pinned-identity
+The signed bootstrap binds the complete validated v2 secret revision to a
+source path and SHA-256 fingerprint. The SSH executor reads that same
+protected source and rejects a missing, replaced or independently valid
+but different secret revision instead of combining unrelated verifier and
+sudo-envelope material. No plaintext secrets are exported into the
+environment. Its 30-second readiness monitor performs only pinned-identity
 SSH and noninteractive passwordless-root safety checks while sealed.
 Conclusive safe refusal displays **Locked**, not Offline/Degraded; ambiguous
-evidence displays **Safety unconfirmed** and blocks root, and confirmed
+evidence displays **Safety unconfirmed**, blocks all SSH command admission
+and cannot make operator recheck succeed until conclusive safety proof; confirmed
 unsafe passwordless-root remains latched until conclusive safe evidence.
 Operator rechecks also remain password-free while locked. The Console uses
 the same status vocabulary.

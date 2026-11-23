@@ -137,7 +137,9 @@ class ReadinessMonitor:
 
     def active(self, alias: str) -> bool:
         state = self._states[alias]
-        return self.settings.authorized and not state.unsafe and self._fresh(state.last_ssh)
+        return (self.settings.authorized and not state.unsafe
+                and self._fresh(state.last_ssh)
+                and (not state.sealed or state.safety_confirmed))
 
     def password_suspended(self, alias: str) -> bool:
         return self._states[alias].suspended
@@ -176,6 +178,8 @@ class ReadinessMonitor:
         if not self.active(alias):
             return ("probe_authorization_missing" if not self.settings.authorized
                     else "passwordless_root" if state.unsafe
+                    else "safety_unconfirmed" if state.sealed
+                    and self._fresh(state.last_ssh) and not state.safety_confirmed
                     else "ssh_readiness_stale" if state.last_ssh is not None
                     else state.ssh_reason or "pending")
         if privileged and state.sealed:
@@ -266,6 +270,8 @@ class ReadinessMonitor:
                         state.sudo_reason = "sudo_locked"
                 elif safety.needs_corroboration:
                     state.safety_confirmed = False
+                    # Retain verified pinned SSH identity for diagnostics,
+                    # but never refresh ordinary execution eligibility.
                     self._ssh_succeeded(alias)
                     state.sudo_reason = "safety_unconfirmed"
                 else:
@@ -361,8 +367,10 @@ class ReadinessMonitor:
         }
         if state.sealed:
             result.update({
-                "sudo_state": ("offline" if not self.active(alias) else
-                               "safety_unconfirmed" if not state.safety_confirmed else
+                "sudo_state": ("safety_unconfirmed"
+                               if not state.safety_confirmed
+                               and self._fresh(state.last_ssh) and not state.unsafe
+                               else "offline" if not self.active(alias) else
                                "suspended" if state.suspended else "locked"),
                 "locked": self.active(alias) and state.safety_confirmed
                 and not state.suspended,

@@ -97,12 +97,15 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             ReadinessSettings(authorized=True),
             {"demo-node-a": True}, probe, sealed_hosts=("demo-node-a",),
         )
-        self.assertTrue(await monitor.check("demo-node-a"))
-        self.assertTrue(monitor.active("demo-node-a"))
+        self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertFalse(monitor.active("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a"), "safety_unconfirmed")
         self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
         self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "safety_unconfirmed")
         self.assertTrue(monitor.detail("demo-node-a")["degraded"])
-        self.assertTrue((await monitor.recheck("demo-node-a"))["degraded"])
+        result = await monitor.recheck("demo-node-a")
+        self.assertFalse(result["recheck_ok"])
+        self.assertTrue(result["degraded"])
         self.assertEqual(calls, ["identity", "safety", "identity", "safety"])
 
     async def test_sealed_failed_safety_probe_recovers_only_after_conclusive_check(self):
@@ -125,7 +128,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await monitor.check("demo-node-a"))
         self.assertEqual(monitor.discovery("demo-node-a")["status"], "offline")
         self.assertEqual(monitor.denial("demo-node-a", privileged=True), "probe_timeout")
-        self.assertTrue(await monitor.check("demo-node-a"))
+        self.assertFalse(await monitor.check("demo-node-a"))
         self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
         self.assertTrue(monitor.detail("demo-node-a")["degraded"])
         self.assertTrue(await monitor.check("demo-node-a"))
@@ -483,8 +486,12 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
             source = Path(d) / "managed.json"
             source.write_text(json.dumps(sealed))
             source.chmod(0o600)
-            with (patch.object(runtime_files, "SECRETS", source),
-                  patch.object(config, "MCP_MANAGED_SECRETS_VERSION", "2"),
+            with (patch.object(runtime_files, "SECRETS", Path(d) / "unused-default.json"),
+                  patch.multiple(
+                      config, MCP_MANAGED_SECRETS_VERSION="2",
+                      MCP_MANAGED_SECRETS_SOURCE=str(source),
+                      MCP_MANAGED_SECRETS_DIGEST=runtime_files.managed_secrets_fingerprint(sealed),
+                  ),
                   patch("app.ssh_executor.load_inventory", return_value={self.a: self.host}),
                   patch.dict(os.environ, {
                       "SSH_EXECUTOR_ENABLED": "true",
@@ -497,9 +504,22 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(loaded._sealed_sudo[self.a], sealed["sealed_sudo"][self.a])
                 self.assertTrue(loaded.readiness._states[self.a].sealed)
                 self.assertEqual(loaded.discover_hosts("fixture", [])[self.a]["sudo_ready"], False)
+                # A different, individually valid v2 revision must never be
+                # combined with the bootstrap Console verifier/generation.
+                changed = json.loads(json.dumps(sealed))
+                changed["viewer_generation"] = "f" * 32
+                source.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(Exception, "Protected sudo secret configuration"):
+                    SSHExecutor.from_environment()
                 source.write_text(json.dumps({**sealed, "sudo_passwords": old["sudo_passwords"]}))
                 with self.assertRaisesRegex(Exception, "Protected sudo secret configuration"):
                     SSHExecutor.from_environment()
+                source.unlink()
+                with self.assertRaisesRegex(Exception, "sealed secret file is unavailable"):
+                    SSHExecutor.from_environment()
+                with patch.object(config, "MCP_MANAGED_SECRETS_DIGEST", ""):
+                    with self.assertRaisesRegex(Exception, "secret revision is unavailable"):
+                        SSHExecutor.from_environment()
 
     async def test_fixed_probes_and_transient_failure(self):
         with patch.object(self.executor, "_run", new_callable=AsyncMock) as run:
