@@ -160,7 +160,7 @@ REPO_NAME=REVIEWED_REPOSITORY_SLUG
 ```
 
 The shell and Git checks independently verify the approved SHA, pin marker,
-and all six source/fixture blobs **before** invoking runner Python.
+and all eight source/fixture blobs **before** invoking runner Python.
 The runner's `status` command reports state only; it does not validate
 its own pin. Stage and verify a new reviewed pin without changing the
 launcher while an older run is still active.

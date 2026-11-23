@@ -9,6 +9,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import os
+import time
 from urllib.parse import quote
 
 import httpx
@@ -70,9 +71,19 @@ def main() -> None:
         token = bootstrap.token
         assert token, "Sealed OAuth verifier rejected synthetic login"
         check("sealed_oauth_login_verifier")
-        status, data = bootstrap.call("list_servers", {})
-        assert not status.get("isError") and data
-        assert "fixture" in data["servers"] and data["servers"]["fixture"]["status"] == "active"
+        deadline = time.monotonic() + 30
+        while True:
+            status, data = bootstrap.call("list_servers", {})
+            assert not status.get("isError") and data
+            fixture = data["servers"].get("fixture", {})
+            if fixture.get("status") == "active":
+                break
+            assert time.monotonic() < deadline, "Sealed host readiness did not become active"
+            time.sleep(.25)
+        assert fixture["ssh_reachable"] is True
+        assert fixture["locked"] is True
+        assert fixture["sudo_state"] == "locked"
+        assert fixture["sudo_ready"] is False
         check("sealed_locked_host_remains_ssh_discoverable")
         browser, csrf = viewer_session()
         with closing(browser), ThreadPoolExecutor(max_workers=4) as pool:
@@ -151,10 +162,10 @@ def main() -> None:
             logout = browser.post("/console/logout", data={"csrf": csrf},
                                   headers={"Origin": ORIGIN})
             assert logout.status_code == 303
-            check("sealed_console_logout_revokes_root_grant")
             with closing(viewer_session()[0]) as fresh:
                 current = snapshot(fresh)["active_grants"]
                 assert not any(g["kind"] == "root" for g in current)
+                check("sealed_console_logout_revokes_root_grant")
                 assert any(g["kind"] == "host" for g in current)
             check("sealed_logout_preserves_ordinary_host_grant")
     check("sealed_v2_synthetic_lab_acceptance_summary")

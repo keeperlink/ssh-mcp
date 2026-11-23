@@ -460,6 +460,7 @@ def create_secrets(state: dict, folder: Path) -> None:
         # Client plaintext is written to client.env, never the service env.
         cmd(["docker", "run", "--rm", "--network", "none",
              "--user", f"{os.getuid()}:{os.getgid()}",
+             "--workdir", "/tmp",
              "--read-only", "--cap-drop", "ALL",
              "--security-opt", "no-new-privileges:true",
              "--pids-limit", "64", "--memory", "512m",

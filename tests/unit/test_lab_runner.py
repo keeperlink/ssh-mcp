@@ -164,6 +164,7 @@ class ValidationTests(unittest.TestCase):
             generator = commands[-1]
             self.assertEqual(generator[:4], ["docker", "run", "--rm", "--network"])
             self.assertEqual(generator[4], "none")
+            self.assertEqual(generator[generator.index("--workdir") + 1], "/tmp")
             self.assertIn("--read-only", generator)
             self.assertIn("--cap-drop", generator)
             self.assertIn("/runner/sealed_fixture.py", generator)
