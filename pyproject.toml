@@ -28,6 +28,7 @@ Issues = "https://github.com/keeperlink/ssh-mcp/issues"
 [project.scripts]
 oauth-sessions = "app.oauth_session_cli:main"
 ssh-mcp-ctl = "app.control_cli:main"
+ssh-mcp-secrets = "ssh_mcp_secrets.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -37,7 +38,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "ssh_mcp_secrets*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
@@ -58,7 +59,7 @@ warn_unused_ignores = true
 
 [tool.coverage.run]
 branch = true
-source = ["app"]
+source = ["app", "ssh_mcp_secrets"]
 
 [tool.coverage.report]
 show_missing = true

@@ -23,7 +23,8 @@ MYPY_FILES = (
     "app/history.py", "app/observability.py", "app/form_body.py", "app/runtime_files.py",
     "app/control.py", "app/control_cli.py", "app/request_trace.py", "ops/preview/preview.py",
     "app/file_audit.py", "app/file_helper.py", "app/file_transport.py",
-    "app/file_ops.py", "ops/history_db.py", "scripts/check_coverage.py",
+    "app/file_ops.py", "ops/history_db.py", "ssh_mcp_secrets/cli.py",
+    "scripts/check_coverage.py",
     "scripts/sync_requirements_dev.py", "tests/tools/validate.py",
     "tests/tools/run_unit_tests.py", "tests/tools/_offline_env.py",
 )
@@ -142,12 +143,15 @@ def installed_wheel(temp: Path, env: dict[str, str]) -> None:
     isolated_env.pop("PYTHONPATH", None)
     run("assert tests import only the installed wheel and CLI",
         [str(isolated_python), "-c",
-         "import app,sys;from pathlib import Path;"
+         "import app,ssh_mcp_secrets,sys;from pathlib import Path;"
          "venv=Path(sys.prefix).resolve();"
          "path=Path(app.__file__).resolve();"
          "assert path.is_relative_to(venv),(path,venv);"
+         "path=Path(ssh_mcp_secrets.__file__).resolve();"
+         "assert path.is_relative_to(venv),(path,venv);"
          "assert (venv/'bin'/'oauth-sessions').is_file();"
-         "assert (venv/'bin'/'ssh-mcp-ctl').is_file()"],
+         "assert (venv/'bin'/'ssh-mcp-ctl').is_file();"
+         "assert (venv/'bin'/'ssh-mcp-secrets').is_file()"],
         cwd=validation, env=isolated_env)
     coverage_checks(validation, isolated_env, "installed-wheel", isolated_python)
 
@@ -167,10 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         checks += 1
         if args.mode != "unit":
             run("compile Python source",
-                [sys.executable, "-m", "compileall", "-q", "app", "ops",
+                [sys.executable, "-m", "compileall", "-q", "app", "ssh_mcp_secrets", "ops",
                  "scripts", "tests"], env=env)
             run("Ruff", [str(Path(sys.executable).parent / "ruff"),
-                         "check", "app", "ops", "tests", "scripts"], env=env)
+                         "check", "app", "ssh_mcp_secrets", "ops", "tests", "scripts"], env=env)
             run("mypy strict", [sys.executable, "-m", "mypy", "--strict", *MYPY_FILES],
                 env=env)
             checks += 3

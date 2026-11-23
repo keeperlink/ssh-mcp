@@ -1,5 +1,8 @@
 # Sealed managed credential format (SKY-347)
 
+For the separately reviewed operator-only offline preparation and guarded
+activation procedure, see [operator sealed rotation](operator-sealed-rotation.md).
+
 The v2 cryptographic primitives and **OAuth, Console, and metrics verifier
 wiring** are implemented as separate development stages. This is **not yet
 deployable**: the privileged grant popup, per-scope in-memory sudo unlock,
