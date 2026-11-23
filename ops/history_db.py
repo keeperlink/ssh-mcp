@@ -6,6 +6,7 @@ service before restoring; backups can be taken while it runs.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import os
 import re
@@ -125,7 +126,7 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
     if re.fullmatch(r"[0-9a-f]{32}", generation) is None:
         raise ValueError("Cutover requires the verified staged Console generation")
     _input(source)
-    with _readonly(source) as check:
+    with closing(_readonly(source)) as check:
         columns = {row[1] for row in check.execute(
             "PRAGMA table_info(history_auth_state)"
         )}
@@ -136,7 +137,7 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
     # integrity checks. The create-only destination prevents accidental reuse.
     backup(source, snapshot)
     verify(snapshot)
-    with _readonly(snapshot) as saved:
+    with closing(_readonly(snapshot)) as saved:
         if {row[1] for row in saved.execute(
             "PRAGMA table_info(history_auth_state)"
         )} != columns:
@@ -148,7 +149,7 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
                 source_info.st_mtime_ns)):
         raise ValueError("Database changed after taking the recovery snapshot")
     db = sqlite3.connect(source, isolation_level=None, timeout=0)
-    committed = False
+    commit_attempted = False
     try:
         if (source.stat().st_dev, source.stat().st_ino) != (
                 source_info.st_dev, source_info.st_ino):
@@ -172,10 +173,17 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
                           "AND name='oauth_sessions'").fetchone():
                 db.execute("UPDATE oauth_sessions SET revoked_at=? "
                            "WHERE revoked_at IS NULL", (int(time.time()),))
-            db.execute("COMMIT")
-            committed = True
+            # A failed COMMIT may have completed before reporting an I/O
+            # error. Never automatically retry a possibly applied cutover.
+            commit_attempted = True
+            try:
+                db.execute("COMMIT")
+            except (OSError, sqlite3.Error) as exc:
+                raise CutoverUncertain(
+                    "SQLite cutover COMMIT outcome needs reconciliation"
+                ) from exc
         except BaseException:
-            if db.in_transaction:
+            if not commit_attempted and db.in_transaction:
                 db.execute("ROLLBACK")
             raise
         # Complete the WAL checkpoint while writers are still stopped; a
@@ -186,7 +194,7 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
         if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise CutoverUncertain("SQLite integrity check failed after cutover")
     except (OSError, sqlite3.Error) as exc:
-        if committed:
+        if commit_attempted:
             raise CutoverUncertain("SQLite cutover outcome needs operator reconciliation") from exc
         raise
     finally:

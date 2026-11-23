@@ -12,7 +12,9 @@ from app.config import _verify_sealed_database
 from app.history import HistoryStore, ViewerAuth
 from app.jobs import JobStore
 from app.sealed_credentials import create_verifier
-from ops.history_db import backup, checkpoint_for_restore, cutover, restore, verify
+from ops.history_db import (
+    CutoverUncertain, backup, checkpoint_for_restore, cutover, restore, verify,
+)
 
 
 PASSWORD = "synthetic-console-cutover-password"
@@ -119,6 +121,71 @@ class SealedCutoverTests(unittest.TestCase):
                         service_stopped=True)
         self.assertEqual(before, self.snapshot())
         self.assertFalse(self.backup.exists())
+
+    def test_cutover_closes_read_only_schema_probes(self):
+        from ops import history_db
+
+        real_readonly = history_db._readonly
+        opened = []
+
+        class TrackedConnection:
+            def __init__(self, connection):
+                self.connection = connection
+                self.closed = False
+
+            def execute(self, *args):
+                return self.connection.execute(*args)
+
+            def close(self):
+                self.closed = True
+                self.connection.close()
+
+            def __getattr__(self, key):
+                return getattr(self.connection, key)
+
+        def monitored(path):
+            handle = TrackedConnection(real_readonly(path))
+            opened.append(handle)
+            return handle
+
+        with patch.object(history_db, "_readonly", side_effect=monitored):
+            cutover(self.db, self.backup, GENERATION, service_stopped=True)
+        self.assertGreaterEqual(len(opened), 3)
+        self.assertTrue(all(conn.closed for conn in opened))
+
+    def test_commit_io_error_is_uncertain_not_safe_to_retry(self):
+        from ops import history_db
+
+        real_connect = history_db.sqlite3.connect
+
+        class InterruptedCommit:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def execute(self, sql, *args):
+                if sql == "COMMIT":
+                    raise sqlite3.OperationalError("synthetic COMMIT I/O interruption")
+                return self.connection.execute(sql, *args)
+
+            def close(self):
+                self.connection.close()
+
+            def __getattr__(self, key):
+                return getattr(self.connection, key)
+
+        def connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            if args and args[0] == self.db and kwargs.get("isolation_level") is None:
+                return InterruptedCommit(connection)
+            return connection
+
+        with patch.object(history_db.sqlite3, "connect", side_effect=connect):
+            with self.assertRaisesRegex(CutoverUncertain, "COMMIT outcome"):
+                cutover(self.db, self.backup, GENERATION, service_stopped=True)
+        verify(self.backup)
+        self.assertEqual(self.columns(), LEGACY_COLUMNS)
+        with self.assertRaises((ValueError, FileExistsError)):
+            cutover(self.db, self.backup, GENERATION, service_stopped=True)
 
     def test_refuse_repeated_cutover_and_protect_prior_backup(self):
         cutover(self.db, self.backup, GENERATION, service_stopped=True)
