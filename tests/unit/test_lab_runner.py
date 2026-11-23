@@ -15,7 +15,9 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from app.client_registry import parse_clients, sources_for
 from tests.lab import runner
+from tests.lab.client import CLIENT_ID
 
 
 SHA = "a" * 40
@@ -64,6 +66,16 @@ class ValidationTests(unittest.TestCase):
                 self.assertFalse((folder / "secrets" / "fixture-sudo-password").exists())
                 self.assertFalse((folder / "secrets" / "protected").exists())
                 content = (folder / "mcp.env").read_text()
+                environment = dict(line.split("=", 1) for line in content.splitlines())
+                clients = parse_clients(json.loads(environment["MCP_CLIENTS"]))
+                self.assertEqual(
+                    sources_for(CLIENT_ID, clients),
+                    [{"type": "header", "name": "X-OpenAI-Session"}],
+                )
+                self.assertEqual(
+                    sources_for("https://unregistered.example.test/oauth/client.json", clients),
+                    [],
+                )
                 self.assertEqual("HISTORY_VIEWER_ENABLED=true" in content,
                                  mode == "restricted")
                 secrets = runner.read_secrets(folder)
