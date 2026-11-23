@@ -3,6 +3,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-server python3 ca-certificates sudo \
  && rm -rf /var/lib/apt/lists/* \
+ && rm -f /etc/ssh/ssh_host_* \
  && useradd --create-home --uid 1000 --shell /bin/sh tester \
  && mkdir -p /run/sshd /home/tester/.ssh \
  && chown -R tester:tester /home/tester/.ssh \

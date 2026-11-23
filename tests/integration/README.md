@@ -4,6 +4,7 @@ These feature-oriented entrypoints execute **outside** offline unit discovery. U
 
 | Entrypoint | Unique end-to-end scope |
 | --- | --- |
+| transfer_file_acceptance.py | Two isolated synthetic SSH hosts, binary integrity, atomic copy/overwrite, fail-closed authorization, async cancellation, metadata-only audit and opt-in root endpoints |
 | command_execution.py | Real SSH argv, strict Bash, working directories, exits and authorization |
 | command_batches.py | Durable ordered steps, known failures, limits, recovery and audit |
 | patch_conflicts.py | Patch diagnostics, original line positions and secret redaction |

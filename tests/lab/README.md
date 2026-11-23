@@ -264,6 +264,50 @@ This performs setup, the standard OAuth/MCP/SSH smoke checks, and
 ordinary cleanup (including on test failure). It does not verify
 public HTTPS, browser UI behavior or production SSH authorization.
 
+## Two-host transfer-file acceptance (SKY-358)
+
+The default fixture remains **single host**. To validate the merged
+`transfer_file` feature, use a separately reviewed, merged and immutable
+lab-runner revision supporting `setup --dual-host`:
+
+~~~sh
+ssh-mcp-test setup --story SKY-355 --commit FULL_REVIEWED_COMMIT --dual-host
+ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/transfer_file_acceptance.py
+ssh-mcp-test results --run RUN_ID
+ssh-mcp-test cleanup --run RUN_ID
+~~~
+
+Dual-host mode runs **two distinct** disposable SSH containers with separate
+host-key pins, `fixture` and `fixture-dest` inventory aliases, and
+no exposed ports, real SSH hosts, production secrets, or
+modifications to existing containers. Both endpoints are authenticated
+independently; file bytes stay inside the isolated test network.
+The test covers binary checksums, atomic create/overwrite, failed
+preconditions, per-host authorization and conservative async cancellation.
+
+For root-owned source/destination acceptance, set up a **separate** dual-host
+run with `--privileged-access always-granted`. Disposable root credentials
+are separately generated for each fixture, never passed in argv, environment,
+logs or source control:
+
+~~~sh
+ssh-mcp-test setup --story SKY-355 --commit FULL_REVIEWED_COMMIT --dual-host --privileged-access always-granted
+ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/transfer_file_acceptance.py --privileged
+ssh-mcp-test results --run RUN_ID
+ssh-mcp-test cleanup --run RUN_ID
+~~~
+
+For `--credentials sealed-v2` use the existing sealed-v2 grant/unlock
+integration tests as separately authorized. The transfer script's privileged
+mode uses **disposable legacy** sudo credentials, not a bypass of v2 unlocks.
+
+**Prerequisite:** Verify the actual LAB sudoers grants the exact
+`SKY-355` run-validated generated-secret cleanup path before setup, along
+with immutable runner pins, source origin/push guard, Docker isolation and
+the listener positive control. **Never reuse SKY-347's cleanup grant or
+start a run that cannot safely remove generated secrets.** Host-policy changes
+and runner-pin activation need separate operator authorization.
+
 ## Restricted-host and privileged fixture tests
 
 The `fixture` alias is a nonroot synthetic SSH host. It is the **only**
