@@ -144,16 +144,15 @@ def _verify_metadata(client_id: str, redirect_uri: str, document: dict[str, Any]
         raise ValueError("CIMD does not support authorization code responses")
     if not isinstance(grant_types, list) or "authorization_code" not in grant_types:
         raise ValueError("CIMD does not support the authorization_code grant")
-    # RFC 7591 uses the singular key; accept the legacy array variant too.
-    # Reject malformed or inconsistent declarations, never Python substring
-    # matches on strings or TypeError from untrusted JSON values.
+    # The singular legacy field is a preference, not a requirement. Newer
+    # clients advertise multiple methods; select "none" from the intersection
+    # with our public-client token endpoint, even if private_key_jwt is
+    # preferred. A singular-only declaration still must permit "none".
     method = document.get("token_endpoint_auth_method", "none")
-    methods = document.get("token_endpoint_auth_methods_supported", ["none"])
-    if not isinstance(method, str) or method != "none":
-        raise ValueError("CIMD requires unsupported client authentication")
-    if (not isinstance(methods, list)
-            or not all(isinstance(item, str) for item in methods)
-            or method not in methods):
+    methods = document.get("token_endpoint_auth_methods_supported", [method])
+    if (not isinstance(method, str) or not isinstance(methods, list)
+            or not methods or not all(isinstance(item, str) for item in methods)
+            or method not in methods or "none" not in methods):
         raise ValueError("CIMD requires unsupported client authentication")
 
 

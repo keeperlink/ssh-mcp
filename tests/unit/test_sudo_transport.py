@@ -181,6 +181,41 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
             )
         return result, calls, processes
 
+    async def test_sealed_sudo_rs_safety_refusal_is_conclusive(self):
+        from app.readiness import ReadinessSettings
+
+        cases = (
+            (b"sudo: interactive authentication is required\n", 1, True),
+            (b"sudo: interactive authentication is required\n", 2, False),
+            (b"sudo: unexpected refusal\n", 1, False),
+        )
+        for diagnostic, exit_code, safe in cases:
+            with self.subTest(exit_code=exit_code, diagnostic=diagnostic):
+                executor = SSHExecutor(
+                    {"test": self.host}, enabled=True,
+                    sealed_sudo={"test": {"synthetic": "sealed"}},
+                    readiness_settings=ReadinessSettings(authorized=True),
+                )
+                calls = []
+
+                async def spawn(*args, **kwargs):
+                    remote = _remote_sudo(args[-1])
+                    if remote == ["/usr/bin/id", "-un"]:
+                        calls.append("identity")
+                        return SyntheticProcess(b"gateway\n", b"", 0)
+                    calls.append("safety")
+                    self.assertEqual(remote[1], "-n")
+                    self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+                    return SyntheticProcess(b"", diagnostic, exit_code)
+
+                with patch("app.ssh_executor._spawn_ssh_command", side_effect=spawn):
+                    self.assertEqual(await executor.readiness.check("test"), safe)
+                self.assertEqual(calls, ["identity", "safety"])
+                self.assertEqual(executor.readiness.active("test"), safe)
+                self.assertEqual(executor.readiness.discovery("test")["sudo_state"],
+                                 "locked" if safe else
+                                 "safety_unconfirmed" if exit_code == 1 else "offline")
+
     async def test_readiness_checks_real_wrappers_and_passwordless_safety(self):
         from app.readiness import ReadinessSettings
 
@@ -289,7 +324,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                         return SyntheticProcess(b"gateway\n", b"", 0)
                     calls.append(remote[1])
                     if remote[1] == "-n":
-                        proc = SyntheticProcess(b"", b"sudo: interactive authentication is required",
+                        proc = SyntheticProcess(b"", b"sudo: unrecognized noninteractive refusal",
                                                 127 if mode == "missing" else 2 if mode == "unsupported" else 1)
                         if mode == "incomplete":
                             proc.channel_complete = False
@@ -362,7 +397,7 @@ class SudoTransportTests(unittest.IsolatedAsyncioTestCase):
                         return SyntheticProcess(b"gateway\n", b"", 0)
                     calls.append(remote[1])
                     if remote[1] == "-n":
-                        return SyntheticProcess(b"", b"sudo: interactive authentication is required", 1)
+                        return SyntheticProcess(b"", b"sudo: unrecognized noninteractive refusal", 1)
                     proc = SyntheticProcess(b"", b"", 1)
                     proc.stdout = asyncio.StreamReader()
                     proc.stderr = asyncio.StreamReader()
