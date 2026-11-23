@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import shlex
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -47,8 +48,15 @@ class LocalChannel:
 
 
 async def local_command(_host: object, command: str, *, allow_stdin: bool) -> LocalChannel:
+    argv = shlex.split(command)
+    # The production SSH command targets Ubuntu's /usr/bin/python3. The
+    # synthetic local channel must instead run inside the selected Python
+    # 3.14 validator environment (including /usr/local/bin in OCI images).
+    # Never let this fixture execute a real sudo command.
+    assert argv[0] == "/usr/bin/python3", "Test SSH channel must not invoke sudo"
+    argv[0] = sys.executable
     process = await asyncio.create_subprocess_exec(
-        *shlex.split(command),
+        *argv,
         stdin=asyncio.subprocess.PIPE if allow_stdin else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
@@ -126,6 +134,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "operator", req, precreated_id="relay1", roots=(None, None),
             )
         return result, audit
+
+    async def test_synthetic_ssh_channel_uses_current_python(self) -> None:
+        channel = await local_command(
+            None, "/usr/bin/python3 -u -c 'import sys; print(sys.executable)'",
+            allow_stdin=False,
+        )
+        result = (await channel.stdout.read()).decode().strip()
+        self.assertEqual(result, sys.executable)
+        self.assertEqual(await channel.wait(), 0)
 
     async def test_end_to_end_integrity_and_no_content_in_result(self) -> None:
         result, audit = await self.run_transfer(self.request())
