@@ -8,6 +8,7 @@ its opaque handle through the actual admitted execution, never durable audit.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import secrets
 import threading
@@ -210,6 +211,15 @@ class GrantUnlocks:
             self._epoch += 1
             self._remove(handle)
 
+    def finish(self, handle: str) -> None:
+        """Release a completed single-request credential, without a global revoke.
+
+        Ordinary completion must not invalidate a different approval's
+        concurrently prepared credential by bumping the revocation epoch.
+        """
+        with self._lock:
+            self._remove(handle)
+
     def revoke_scope(self, key: GrantKey) -> None:
         with self._lock:
             self._epoch += 1
@@ -236,3 +246,74 @@ class GrantUnlocks:
         with self._lock:
             self.clear()
             self._closed = True
+
+
+@dataclass(slots=True)
+class RootOperationState:
+    """Only the one originating MCP request may transfer task ownership."""
+
+    delegated: bool = False
+    finished: bool = False
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RootAccess:
+    """Opaque live capability propagated to a single approved tool task.
+
+    The capability contains only an opaque handle, verified scope and
+    non-secret live-authority callback. It is never added to job/SQLite
+    records, tool arguments or subprocess environments.
+    """
+
+    registry: GrantUnlocks = field(repr=False)
+    handle: str = field(repr=False)
+    scope: UnlockScope
+    authorized: Callable[[], bool] = field(repr=False, compare=False)
+    on_finished: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    operation: RootOperationState = field(
+        default_factory=RootOperationState, repr=False, compare=False,
+    )
+
+    def require(self, *, host: str, actor: str) -> str:
+        if (host != self.scope.host or actor != self.scope.actor
+                or self.authorized() is not True):
+            raise InvalidCredential("Root unlock scope no longer authorized")
+        return self.registry.require(self.handle, self.scope)
+
+    def valid(self, *, host: str, actor: str) -> bool:
+        try:
+            self.require(host=host, actor=actor)
+        except InvalidCredential:
+            return False
+        return True
+
+    def delegate(self) -> None:
+        """Only a successfully scheduled async job/batch owns later release."""
+        if self.scope.kind == "request":
+            self.operation.delegated = True
+
+    def finish(self) -> None:
+        """Idempotently release a one-request unlock after command/batch exit."""
+        if self.scope.kind != "request" or self.operation.finished:
+            return
+        self.operation.finished = True
+        self.registry.finish(self.handle)
+        if self.on_finished is not None:
+            self.on_finished()
+
+
+def finish_once_root(*, unless_delegated: bool = False) -> None:
+    """Best-effort terminal release, including pre-scheduling MCP failures."""
+    access = root_access_context.get()
+    if access is not None and (not unless_delegated or not access.operation.delegated):
+        access.finish()
+
+
+# Each MCP request gets its own explicit root admission. Background command
+# and batch tasks created during that request inherit this immutable capability.
+# An unrelated request starts with None, including after previous tools finish.
+root_access_context: ContextVar[RootAccess | None] = ContextVar(
+    "ssh_mcp_root_access", default=None,
+)

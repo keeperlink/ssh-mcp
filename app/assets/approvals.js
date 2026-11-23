@@ -185,6 +185,7 @@
       state.active = state.pending.keys().next().value || null;
     const request = state.pending.get(state.active);
     if (!request) {
+      $("approval-root-password").value = "";
       layer.hidden = true;
       if (previousId && previousFocus?.isConnected) previousFocus.focus();
       previousFocus = null;
@@ -206,7 +207,10 @@
       $("approval-tool").textContent = request.tool || "Operation";
       $("approval-reason").textContent = request.reason || "Not specified";
       const root = request.requires_root === true;
+      const unlock = request.requires_unlock === true;
       layer.classList.toggle("is-root", root);
+      $("approval-root-password-group").hidden = !unlock;
+      $("approval-root-password").value = "";
       $("approval-title").textContent = root
         ? "Run as root — operator approval" : "Restricted host access";
       const permission = root
@@ -238,7 +242,7 @@
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
       $("approval-feedback").hidden = true;
       layer.hidden = false;
-      $("approval-grant").focus();
+      (unlock ? $("approval-root-password") : $("approval-grant")).focus();
     }
     // The same pending approval may have a new approved name without a new
     // approval ID or revision. Refresh the label on every authoritative snapshot.
@@ -443,11 +447,18 @@
       return;
     state.busy = true;
     updateClock();
+    // Never retain the operator's Console password in the visible input
+    // while a network/proxy/SSH response is outstanding, including failures.
+    const body = new URLSearchParams({ ...fields, csrf: csrf() });
+    if (!revoke) {
+      $("approval-root-password").value = "";
+      if ("console_password" in fields) fields.console_password = "";
+    }
     try {
       const response = await fetch(path, {
         method: "POST", credentials: "same-origin", cache: "no-store",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ ...fields, csrf: csrf() }),
+        body,
       });
       if (response.status === 401) {
         location.assign("/console/login");
@@ -467,6 +478,22 @@
           throw new Error("Grant state unavailable; refresh required");
         applySnapshot(snapshot);
       } else if (!response.ok) {
+        // Reverse proxies can return an HTML 403/429; never assume JSON.
+        let result = null;
+        if (response.headers.get("content-type")?.includes("application/json")) {
+          try { result = await response.json(); } catch { /* HTTP error still applies */ }
+        }
+        if ([400, 403, 409, 429, 503].includes(response.status)
+            && typeof result?.error === "string"
+            && result.error.length <= 180) {
+          const feedback = $("approval-feedback");
+          feedback.textContent = result.error;
+          feedback.hidden = false;
+          if (!$("approval-root-password-group").hidden) {
+            $("approval-root-password").focus();
+          }
+          return;
+        }
         if (response.status === 404) {
           state.pending.delete(id);
           closeNotice(id);
@@ -474,6 +501,7 @@
           throw new Error("Operation failed (HTTP " + response.status + ")");
         }
       } else {
+        $("approval-root-password").value = "";
         state.pending.delete(id);
         state.localPending.set(id, state.revision);
         closeNotice(id);
@@ -485,6 +513,7 @@
       feedback.textContent = error.message || "Could not contact server";
       feedback.hidden = false;
     } finally {
+      if (!revoke) $("approval-root-password").value = "";
       state.busy = false;
       tick();
     }
@@ -560,7 +589,9 @@
   $("approval-grant").addEventListener("click", () => {
     if (state.active) submit(
       "/console/api/approvals/" + encodeURIComponent(state.active) + "/grant",
-      { duration: layer.querySelector('input[name="approval-duration"]:checked')?.value || "once" },
+      { duration: layer.querySelector('input[name="approval-duration"]:checked')?.value || "once",
+        ...(state.pending.get(state.active)?.requires_unlock === true
+          ? { console_password: $("approval-root-password").value } : {}) },
       state.active
     );
   });

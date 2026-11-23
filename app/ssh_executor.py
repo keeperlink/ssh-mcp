@@ -21,6 +21,8 @@ from .contracts import ExecuteCommandRequest
 from . import config
 from .ssh_channel import ChannelConnectionError, SSHChannelProcess, open_command
 from .readiness import ProbeKind, ProbeResult, ReadinessMonitor, ReadinessSettings
+from .grant_unlocks import root_access_context
+from .sealed_credentials import InvalidCredential
 
 ResultStatus = Literal["succeeded", "command_error", "transport_error", "timed_out", "output_limit"]
 OutputCallback = Callable[[str, bytes], Awaitable[None]]
@@ -874,23 +876,42 @@ class SSHExecutor:
         host = self.authorized_host(principal, request.server)
         if host.privileged_access == "none":
             raise SSHDenied("Privileged execution is disabled for host")
+        sealed = host.alias in self._sealed_sudo
+        root_access = root_access_context.get() if sealed else None
         password = self._sudo_passwords.get(host.alias)
-        if password is None:
+        if sealed and root_access is None:
+            raise SSHDenied("Privileged unlock unavailable or expired")
+        if not sealed and password is None:
             raise SSHDenied("Privileged credentials unavailable for host")
         async with self._global, self._semaphores[host.alias]:
-            self.require_ready(host.alias, privileged=True)
+            # Sealed hosts are deliberately Locked when no sudo password
+            # probe is active. Root admission is provided by the exact
+            # previously approved memory-only handle, not sudo_ready.
+            self.require_ready(host.alias, privileged=not sealed)
+            if sealed and self.readiness is not None and self.readiness.password_suspended(host.alias):
+                raise SSHDenied("Privileged sudo authentication suspended")
+            if root_access is not None:
+                try:
+                    password = root_access.require(host=host.alias, actor=principal)
+                except InvalidCredential:
+                    raise SSHDenied("Privileged unlock expired or revoked") from None
             if on_admitted is not None and not on_admitted():
                 raise asyncio.CancelledError
             monitor = self.readiness
             generation = monitor.password_generation(host.alias) if monitor is not None else None
 
             def password_permitted() -> bool:
-                assert monitor is not None
-                self.require_ready(host.alias, privileged=True)
-                if monitor.password_generation(host.alias) != generation:
-                    raise ReadinessDenied(
-                        "Host readiness unavailable: sudo_credential_generation_changed"
-                    )
+                self.require_ready(host.alias, privileged=not sealed)
+                if monitor is not None and (
+                    monitor.password_generation(host.alias) != generation
+                    or monitor.password_suspended(host.alias)
+                ):
+                    raise ReadinessDenied("Host readiness unavailable: sudo_credential_generation_changed")
+                if root_access is not None:
+                    try:
+                        root_access.require(host=host.alias, actor=principal)
+                    except InvalidCredential:
+                        raise ReadinessDenied("Host readiness unavailable: privileged_unlock_revoked") from None
                 return True
 
             # timeout_seconds measures admitted execution, never time in queue.
@@ -900,6 +921,48 @@ class SSHExecutor:
             if result.password_rejected and self.readiness is not None:
                 self.readiness.suspend(host.alias)
             return result
+
+    async def verify_unlocked_sudo(
+        self, principal: str, server: str, password: str, *,
+        permitted: Callable[[], bool],
+    ) -> bool:
+        """Fresh, bounded root-only proof before any sealed grant issuance.
+
+        Uses the fixed diagnostic command, not caller argv. Requires a real
+        sudo prompt and a conclusive root marker. Rechecks pending approval
+        and authenticated Console session at the exact password write.
+        """
+        host = self.authorized_host(principal, server)
+        if host.alias not in self._sealed_sudo:
+            return False
+        monitor = self.readiness
+        if monitor is None or not monitor.active(server) or monitor.password_suspended(server):
+            return False
+        request = ExecuteCommandRequest(
+            server=server, argv=["/usr/bin/id", "-u"],
+            reason="Fixed sealed credential grant proof",
+            timeout_seconds=min(monitor.settings.timeout_seconds, config.SSH_MAX_TIMEOUT_SECONDS),
+        )
+        async with self._global, self._semaphores[server]:
+            if not permitted() or not monitor.active(server):
+                return False
+            generation = monitor.password_generation(server)
+
+            def still_permitted() -> bool:
+                return (permitted() and monitor.active(server)
+                        and not monitor.password_suspended(server)
+                        and monitor.password_generation(server) == generation)
+
+            result = await self._run(
+                host, request, time.monotonic(), None,
+                sudo_password=password, probe=True, challenge_password=True,
+                password_permitted=still_permitted,
+            )
+        if result.password_rejected:
+            monitor.suspend(server)
+        return (result.status == "succeeded" and result.exit_code == 0
+                and result.stdout.strip() == "0" and result.root_started is True
+                and still_permitted())
 
     async def preflight_cwd(
         self, principal: str, request: ExecuteCommandRequest,
@@ -967,7 +1030,9 @@ class SSHExecutor:
             return SSHResult(host.alias, "timed_out", None, "", "",
                              time.monotonic() - start, effective_cwd=effective_cwd)
         if not probe:
-            self.require_ready(host.alias, privileged=request.privileged)
+            self.require_ready(host.alias, privileged=(
+                request.privileged and host.alias not in self._sealed_sudo
+            ))
         ssh_args = _ssh_argv(host, request, allow_stdin=sudo_password is not None,
                              remote_argv=command)
         if marker is not None:
@@ -1108,6 +1173,10 @@ class SSHExecutor:
                 send_challenge_password(process.stdin, sudo_password) if challenge_password
                 else _send_sudo_password(process.stdin, sudo_password, permit_password_write, sent)
             ))
+            # The short-lived sender task owns the remaining reference.
+            # Do not retain the immutable credential in this longer-lived
+            # remote command coroutine after the sender is scheduled.
+            sudo_password = None
         try:
             completed = await asyncio.wait_for(
                 asyncio.gather(*tasks),

@@ -75,14 +75,57 @@ the same status vocabulary without labeling recently reachable hosts Offline
 or raising stale-SSH warnings merely because safety confirmation is missing.
 The external active/offline/retired eligibility contract is unchanged.
 
-**Stage 3A does not yet wire** these handles to the privileged approval
-password field, the shared Console-login throttle, fresh live sudo proof,
-root grant issuance/revocation, or command/queued-job/batch password
-submission. Its locked root entrypoint remains intentionally denied;
-`SEALED_RUNTIME_READY=False` is unchanged. Do not treat this preparatory
-stage as authorization to activate or deploy v2. The next stage must
-integrate these boundaries and validate the actual deployed sudo
-implementations in an independently approved LAB environment.
+### Stage 3B: interactive root approval and command handoff
+
+Stage 3B wires these handles to the existing privileged approval flow.
+The root-only modal prompts for the Operator Console password on **each new
+root-grant interval**, including the signed
+`privileged_access: always-granted` policy. Ordinary SSH grants retain
+their previous behavior without a password prompt; v1 remains unchanged.
+Incorrect passwords leave the request and selected duration pending and
+show **Incorrect Console password.**. The prompt shares the Console login
+per-IP five-failure/five-minute throttle and displays **Too many incorrect
+password attempts. Try again later.** when exhausted. No root grant, decrypt
+or sudo probe occurs on wrong or throttled input.
+
+After a checked Console session and password verification on the bounded
+auth executor, the password derives its separate Argon2id sudo-wrap key
+and opens only the selected host's signed envelope into an uncommitted,
+single-use memory object. A fixed fresh sudo probe uses a nonce-bound
+prompt and the root-only `id -u` marker. The original pending grant,
+Console session and sealed-host safety are checked before the credential
+write and again at atomic grant issuance, along with approval deadline,
+the originating MCP request's live disconnect state, client/actor scope
+and revocation generation. Every authenticated Console logout invalidates
+even in-flight prepared credentials, whether or not any root grant exists.
+
+The opaque capability follows one request's task context into queued jobs
+and sequential batches without being stored in their audit records.
+Execution rechecks the live capability **after capacity admission** and
+immediately before each actual sudo password submission. An expired or
+revoked grant cannot be revived by a later issuance; a started command can
+finish normally but later batch steps are rejected. Explicit authenticated
+Console logout revokes all root unlocks without removing ordinary host
+grants. Passive cookie expiry does not shorten timed grants. Immutable
+Python strings cannot be guaranteed to be physically zeroized.
+
+A one-request credential's safety expiry covers the validated operation
+timeout plus a bounded 60-second margin (never longer than 16 hours), not
+a fixed five-minute lease. The process releases its plaintext memory
+reference immediately after the single command, accepted asynchronous
+job, or **whole** batch finishes, including failure/cancellation. A
+successfully queued job or shielded batch owns that release; otherwise
+the originating MCP tool request releases the credential before returning.
+Timed root grants continue to expire/revoke only by their approved scope.
+The Console clears its root-password input on every submission and error.
+
+**Activation guard still in force:** hardcoded
+`SEALED_RUNTIME_READY=False` is unchanged. No v2 runtime activation,
+signing, production cutover or credential rotation is authorized by this
+source change. Actual sudo implementations must independently pass LAB
+conclusive safety and fresh root-proof tests. DB recovery/cutover, offline
+rekey and mandatory rotation of old plaintext credentials remain separate
+gates before declaring SKY-347 complete.
 
 **Temporary compatibility boundary:** the old managed v1 schema remains
 accepted solely to preserve existing offline fixtures and current deployed

@@ -70,6 +70,7 @@ async def require_host_access(
     steps: Callable[[], list[dict[str, str | bool]]] | None = None,
     disconnected: Callable[[], Awaitable[bool]] | None = None,
     privileged: bool = False, client_id: str | None = None,
+    operation_timeout_seconds: int = 300,
     on_approved: Callable[[ApprovalCode], None] | None = None,
 ) -> ApprovalCode:
     """One entry gate for every host-reaching MCP method.
@@ -81,17 +82,20 @@ async def require_host_access(
     if privileged and host.privileged_access == "none":
         raise ApprovalRejected(ApprovalCode.DENIED_CONFIG,
                                "Privileged host access is disabled")
-    if privileged and server not in executor._sudo_passwords:
+    sealed_root = privileged and server in getattr(executor, "_sealed_sudo", {})
+    if privileged and not sealed_root and server not in executor._sudo_passwords:
         raise SSHDenied("Privileged credentials are unavailable")
     host_required = host.access == "restricted"
-    root_required = privileged and host.privileged_access == "restricted"
+    root_required = privileged and (
+        host.privileged_access == "restricted" or sealed_root
+    )
     if host_required or root_required:
         if not session_id:
             raise SSHDenied("Restricted host requires authenticated OAuth session")
         if approvals is None:
             raise SSHDenied("Restricted host requires operator approval")
         async def before_prompt() -> None:
-            await executor.check_readiness_live(server, privileged=privileged)
+            await executor.check_readiness_live(server, privileged=privileged and not sealed_root)
 
         # A verified OAuth client without a chat identifier gets an agent-wide
         # grant, reusable across that operator's OAuth sessions. The actor is
@@ -107,11 +111,13 @@ async def require_host_access(
             steps=steps,
             disconnected=disconnected,
             host_required=host_required, root_required=root_required,
+            actor=actor,
+            operation_timeout_seconds=operation_timeout_seconds,
             before_prompt=before_prompt,
         )
     else:
         code = ApprovalCode.APPROVED_CONFIG
     if on_approved is not None:
         on_approved(code)
-    executor.require_ready(server, privileged=privileged)
+    executor.require_ready(server, privileged=privileged and not sealed_root)
     return code

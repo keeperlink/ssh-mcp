@@ -20,6 +20,7 @@ from . import config
 from .client_identity import client_id_context
 from .conversation_access import conversation_id_context
 from .approval_status import approval_status_context, decode
+from .grant_unlocks import finish_once_root, root_access_context
 from .contracts import ExecuteCommandsRequest
 from .jobs import JobManager, JobStore
 from .file_audit import rebuild_history_view
@@ -497,6 +498,9 @@ class BatchManager:
         task = asyncio.create_task(self._run(
             actor, batch_id, request, admitted_root=admitted_root,
         ))
+        access = root_access_context.get()
+        if request.privileged and access is not None:
+            access.delegate()
         self._tasks[batch_id] = task
         task.add_done_callback(lambda _: self._tasks.pop(batch_id, None))
         try:
@@ -510,6 +514,15 @@ class BatchManager:
     async def _run(self, actor: str, batch_id: str,
                    request: ExecuteCommandsRequest, *,
                    admitted_root: bool = False) -> None:
+        try:
+            await self._run_inner(actor, batch_id, request, admitted_root=admitted_root)
+        finally:
+            if request.privileged:
+                finish_once_root()
+
+    async def _run_inner(self, actor: str, batch_id: str,
+                         request: ExecuteCommandsRequest, *,
+                         admitted_root: bool = False) -> None:
         if not self.store.begin(batch_id):
             return
         started = time.monotonic()
@@ -594,6 +607,11 @@ class BatchManager:
                             on_created=lambda id: self.store.record_step(batch_id, index, id),
                             on_started=lambda id: self.store.admitted_step(batch_id, index, id),
                             max_output_bytes=remaining_output,
+                            **({"retain_once_unlock": True}
+                               if request.privileged
+                               and (root_access_context.get() is not None
+                                    and root_access_context.get().scope.kind == "request")
+                               else {}),
                             **({"admitted_root": True} if admitted_root else {}),
                         )
                 except TimeoutError:

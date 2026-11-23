@@ -82,6 +82,16 @@ class ApprovalDialogMarkupTests(unittest.TestCase):
         self.assertIn('id="grant-chips"', header)
         self.assertIn('type="button" class="approval-grant">Grant</button>', page)
 
+    def test_root_password_is_cleared_on_all_submit_and_error_paths(self):
+        page = _history_page("synthetic-csrf")
+        script = (ASSETS / "approvals.js").read_text()
+        self.assertIn('id="approval-root-password" type="password"', page)
+        self.assertIn('const body = new URLSearchParams({ ...fields, csrf: csrf() });', script)
+        self.assertIn('if ("console_password" in fields) fields.console_password = "";', script)
+        self.assertIn('if (!revoke) $("approval-root-password").value = "";', script)
+        self.assertIn('if (response.headers.get("content-type")?.includes("application/json"))', script)
+        self.assertIn('try { result = await response.json(); } catch', script)
+
 
 class StoryIdViewerConfigTests(unittest.TestCase):
     def test_table_attributes_follow_config_without_changing_detail_values(self):
