@@ -83,6 +83,19 @@ def _sync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def _database_revision(path: Path) -> tuple[tuple[int, ...] | None, ...]:
+    """Track the main SQLite file and WAL without following journal symlinks."""
+    def revision(file: Path) -> tuple[int, ...] | None:
+        try:
+            details = file.lstat()
+        except FileNotFoundError:
+            return None
+        return (details.st_dev, details.st_ino, details.st_size,
+                details.st_mtime_ns, details.st_ctime_ns)
+
+    return (revision(path), revision(Path(str(path) + "-wal")))
+
+
 def backup(source: Path, destination: Path) -> None:
     """SQLite online backup handles WAL without exposing an inconsistent raw copy."""
     _input(source)
@@ -132,7 +145,7 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
         )}
         if columns != {"id", "salt", "verifier", "generation"}:
             raise ValueError("Cutover requires a legacy Console authentication table")
-    source_info = source.stat()
+    source_revision = _database_revision(source)
     # Never change the source until a new protected SQLite backup has passed
     # integrity checks. The create-only destination prevents accidental reuse.
     backup(source, snapshot)
@@ -142,21 +155,16 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
             "PRAGMA table_info(history_auth_state)"
         )} != columns:
             raise ValueError("Backup does not preserve legacy Console schema")
-    # Fail closed if the source file was swapped or edited after snapshotting.
-    if ((source.stat().st_dev, source.stat().st_ino, source.stat().st_size,
-         source.stat().st_mtime_ns)
-            != (source_info.st_dev, source_info.st_ino, source_info.st_size,
-                source_info.st_mtime_ns)):
-        raise ValueError("Database changed after taking the recovery snapshot")
     db = sqlite3.connect(source, isolation_level=None, timeout=0)
     commit_attempted = False
     try:
-        if (source.stat().st_dev, source.stat().st_ino) != (
-                source_info.st_dev, source_info.st_ino):
-            raise ValueError("Database changed during cutover")
         db.execute("PRAGMA secure_delete=ON")
         db.execute("BEGIN EXCLUSIVE")
         try:
+            # Inspect both SQLite files *under* the write lock; WAL-mode
+            # commits do not change the main database file's mtime.
+            if _database_revision(source) != source_revision:
+                raise ValueError("Database or WAL changed after recovery snapshot")
             if {row[1] for row in db.execute(
                     "PRAGMA table_info(history_auth_state)"
             )} != columns:
@@ -191,6 +199,12 @@ def cutover(source: Path, snapshot: Path, generation: str, *,
         busy, _, _ = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if busy:
             raise CutoverUncertain("SQLite checkpoint was busy after cutover")
+        # secure_delete only covers discarded SQLite pages; repack to remove
+        # schema/page slack that may contain the retired verifier material.
+        db.execute("VACUUM")
+        busy, _, _ = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if busy:
+            raise CutoverUncertain("SQLite checkpoint was busy after VACUUM")
         if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise CutoverUncertain("SQLite integrity check failed after cutover")
     except (OSError, sqlite3.Error) as exc:
@@ -206,6 +220,18 @@ def checkpoint_for_restore(source: Path, *, service_stopped: bool) -> None:
     if not service_stopped:
         raise ValueError("Stop all database writers before WAL checkpoint")
     _input(source)
+    # Never open a possibly redirected SQLite journal or replay an orphan
+    # rollback journal while attempting an offline recovery.
+    for suffix in ("-wal", "-shm", "-journal"):
+        journal = Path(str(source) + suffix)
+        if journal.is_symlink():
+            raise ValueError("Unsafe SQLite journal symlink; manual recovery required")
+        if suffix == "-journal":
+            try:
+                journal.lstat()
+            except FileNotFoundError:
+                continue
+            raise ValueError("SQLite rollback journal requires manual recovery")
     db = sqlite3.connect(source, isolation_level=None, timeout=0)
     try:
         busy, _, _ = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -215,9 +241,12 @@ def checkpoint_for_restore(source: Path, *, service_stopped: bool) -> None:
             raise ValueError("SQLite could not close WAL journal")
     finally:
         db.close()
-    for suffix in ("-wal", "-shm"):
-        if Path(str(source) + suffix).exists():
-            raise ValueError("SQLite WAL/SHM remains; do not restore yet")
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            Path(str(source) + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        raise ValueError("SQLite journal remains; do not restore yet")
 
 
 def restore(source: Path, destination: Path, *, service_stopped: bool) -> Path | None:
@@ -228,12 +257,14 @@ def restore(source: Path, destination: Path, *, service_stopped: bool) -> Path |
     _private_directory(destination.parent)
     if destination.is_symlink():
         raise ValueError("Destination may not be a symlink")
-    for suffix in ("-wal", "-shm"):
+    for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(str(destination) + suffix)
         try:
             sidecar.lstat()  # exists() misses dangling symlinks.
         except FileNotFoundError:
             continue
+        if suffix == "-journal":
+            raise ValueError("Existing SQLite journal; stop the service and reconcile first")
         raise ValueError("Existing SQLite WAL/SHM; stop the service and checkpoint first")
     previous: Path | None = None
     if destination.exists():
@@ -362,11 +393,27 @@ def main() -> None:
             raise SystemExit(1) from None
         print(json.dumps(data, sort_keys=True))
     elif args.command == "cutover":
-        cutover(args.source, args.destination, args.generation,
-                service_stopped=args.confirm_stopped)
+        try:
+            cutover(args.source, args.destination, args.generation,
+                    service_stopped=args.confirm_stopped)
+        except CutoverUncertain:
+            print("SQLite cutover outcome UNCERTAIN: inspect source schema and "
+                  "protected recovery snapshot; do not retry blindly",
+                  file=sys.stderr)
+            raise SystemExit(2) from None
+        except (OSError, ValueError, sqlite3.Error):
+            print("SQLite cutover rejected or failed before confirmed completion; "
+                  "inspect recovery snapshot and database before retrying",
+                  file=sys.stderr)
+            raise SystemExit(1) from None
         print("Sealed Console database cutover completed; protected snapshot retained")
     elif args.command == "checkpoint":
-        checkpoint_for_restore(args.source, service_stopped=args.confirm_stopped)
+        try:
+            checkpoint_for_restore(args.source, service_stopped=args.confirm_stopped)
+        except (OSError, ValueError, sqlite3.Error):
+            print("SQLite checkpoint failed; inspect and keep the service stopped",
+                  file=sys.stderr)
+            raise SystemExit(1) from None
         print("Stopped-service SQLite WAL checkpoint completed for safe restore")
     else:
         previous = restore(args.source, args.destination, service_stopped=args.confirm_stopped)

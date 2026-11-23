@@ -47,9 +47,13 @@ authorization to rotate live credentials, sign or deploy any service.
 4. Under a database-exclusive transaction, the tool removes the legacy
    PBKDF2 Console state, clears old Console sessions, writes a generation-only
    state row and revokes existing OAuth session rows. It then checkpoints
-   WAL and verifies database integrity. If anything fails after COMMIT,
-   the outcome may be **uncertain**. Inspect the active schema and recovery
-   snapshot; **do not retry blindly**.
+   and truncates WAL, runs `VACUUM` to remove residual legacy verifier
+   bytes from the active file, checkpoints WAL again, and verifies database
+   integrity. A missing or changed post-snapshot WAL is rejected under
+   an exclusive database lock. If anything fails after COMMIT, the outcome
+   may be **uncertain**: the CLI exits with status `2` and an explicit
+   reconciliation warning (versus status `1` for a rejected operation).
+   Inspect the active schema and recovery snapshot; **do not retry blindly**.
 5. Verify the new schema is `(id,generation)` and the expected generation,
    the retained snapshot passes `python -m ops.history_db verify SNAPSHOT_DB`,
    and all other audit tables survive. Then, with the same stopped-service

@@ -102,11 +102,17 @@ def _verify_sealed_database() -> None:
     if not path.is_absolute() or path.is_symlink():
         raise RuntimeError("Sealed audit database path must be absolute and not a symlink")
     if not path.exists():
-        if any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm")):
+        if any((sidecar.exists() or sidecar.is_symlink())
+               for suffix in ("-wal", "-shm", "-journal")
+               for sidecar in (Path(str(path) + suffix),)):
             raise RuntimeError("Orphan SQLite audit journal requires recovery")
         return  # Fresh database: no legacy credential state to migrate.
     if not path.is_file():
         raise RuntimeError("Sealed audit database must be a regular file")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.is_symlink() or (suffix == "-journal" and sidecar.exists()):
+            raise RuntimeError("SQLite journal requires offline recovery")
     try:
         uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=0)) as db:

@@ -1,9 +1,11 @@
 """Synthetic v1 audit-to-sealed Console cutover and rollback acceptance."""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, redirect_stderr
 from pathlib import Path
+import io
 import sqlite3
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -59,7 +61,24 @@ class SealedCutoverTests(unittest.TestCase):
         self.assertTrue(self.viewer.valid(self.cookie))
 
     def test_explicit_cutover_preserves_backup_and_revokes_old_console_sessions(self):
+        with closing(sqlite3.connect(self.db)) as original:
+            retired = original.execute(
+                "SELECT salt,verifier FROM history_auth_state WHERE id=1"
+            ).fetchone()
+        self.assertIsNotNone(retired)
+        old_verifiers = tuple(
+            item if isinstance(item, bytes) else item.encode() for item in retired
+        )
+        self.assertTrue(all(len(item) >= 16 for item in old_verifiers))
         cutover(self.db, self.backup, GENERATION, service_stopped=True)
+        # A transaction-only DROP may retain the old salt/verifier in
+        # free pages or the WAL. VACUUM and the final checkpoint must not.
+        for fragment in old_verifiers:
+            self.assertIn(fragment, self.backup.read_bytes())
+            self.assertNotIn(fragment, self.db.read_bytes())
+            wal = Path(str(self.db) + "-wal")
+            if wal.exists():
+                self.assertNotIn(fragment, wal.read_bytes())
         with patch.dict("os.environ", {"SSH_JOBS_DB": str(self.db)}):
             _verify_sealed_database()
         verify(self.backup)
@@ -121,6 +140,73 @@ class SealedCutoverTests(unittest.TestCase):
                         service_stopped=True)
         self.assertEqual(before, self.snapshot())
         self.assertFalse(self.backup.exists())
+
+    def test_wal_only_write_after_snapshot_is_rejected_under_exclusive_lock(self):
+        from ops import history_db
+
+        baseline = self.db.stat()
+        real_backup = history_db.backup
+        held = []
+
+        def concurrent_writer(source, destination):
+            real_backup(source, destination)
+            writer = sqlite3.connect(self.db)
+            held.append(writer)
+            self.assertEqual(writer.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            writer.execute("CREATE TABLE post_snapshot_commit (value INTEGER)")
+            writer.commit()
+            # In WAL mode the late commit does not need to touch jobs.sqlite;
+            # the -wal changes while the main file may remain byte-identical.
+            current = self.db.stat()
+            self.assertEqual((current.st_size, current.st_mtime_ns),
+                             (baseline.st_size, baseline.st_mtime_ns))
+
+        try:
+            with patch.object(history_db, "backup", side_effect=concurrent_writer):
+                with self.assertRaisesRegex(ValueError, "Database or WAL changed"):
+                    cutover(self.db, self.backup, GENERATION, service_stopped=True)
+        finally:
+            for writer in held:
+                writer.close()
+        verify(self.backup)
+        self.assertEqual(self.columns(), LEGACY_COLUMNS)
+        with closing(sqlite3.connect(self.db)) as active:
+            self.assertIsNotNone(active.execute(
+                "SELECT name FROM sqlite_master WHERE name='post_snapshot_commit'"
+            ).fetchone())
+        with closing(sqlite3.connect(self.backup)) as recovery:
+            self.assertIsNone(recovery.execute(
+                "SELECT name FROM sqlite_master WHERE name='post_snapshot_commit'"
+            ).fetchone())
+
+    def test_cli_exit_codes_distinguish_uncertain_commit_from_rejected_cutover(self):
+        from ops import history_db
+
+        argv = ["history-db", "cutover", str(self.db), str(self.backup),
+                "--generation", GENERATION, "--confirm-stopped"]
+        for error, expected, message in (
+            (CutoverUncertain("synthetic uncertain commit"), 2, "UNCERTAIN"),
+            (ValueError("synthetic invalid source"), 1, "rejected"),
+        ):
+            with self.subTest(error=error):
+                output = io.StringIO()
+                with patch.object(sys, "argv", argv):
+                    with patch.object(history_db, "cutover", side_effect=error):
+                        with redirect_stderr(output):
+                            with self.assertRaises(SystemExit) as result:
+                                history_db.main()
+                self.assertEqual(result.exception.code, expected)
+                self.assertIn(message, output.getvalue())
+        with patch.object(sys, "argv", [
+            "history-db", "checkpoint", str(self.db), "--confirm-stopped",
+        ]):
+            with patch.object(history_db, "checkpoint_for_restore",
+                              side_effect=ValueError("synthetic active reader")):
+                with redirect_stderr(io.StringIO()) as output:
+                    with self.assertRaises(SystemExit) as result:
+                        history_db.main()
+        self.assertEqual(result.exception.code, 1)
+        self.assertIn("checkpoint failed", output.getvalue())
 
     def test_cutover_closes_read_only_schema_probes(self):
         from ops import history_db
@@ -216,9 +302,36 @@ class SealedCutoverTests(unittest.TestCase):
         phantom = self.db.parent / "missing.sqlite"
         with patch.dict("os.environ", {"SSH_JOBS_DB": str(phantom)}):
             _verify_sealed_database()
-            (self.db.parent / "missing.sqlite-wal").write_bytes(b"synthetic")
-            with self.assertRaisesRegex(RuntimeError, "Orphan SQLite"):
+            for suffix in ("-wal", "-shm", "-journal"):
+                for dangling in (False, True):
+                    with self.subTest(suffix=suffix, dangling=dangling):
+                        journal = Path(str(phantom) + suffix)
+                        if dangling:
+                            journal.symlink_to(self.db.parent / "absent-target")
+                        else:
+                            journal.write_bytes(b"synthetic")
+                        with self.assertRaisesRegex(RuntimeError, "Orphan SQLite"):
+                            _verify_sealed_database()
+                        journal.unlink()
+        existing_journal = Path(str(self.db) + "-journal")
+        existing_journal.symlink_to(self.db.parent / "absent-target")
+        with patch.dict("os.environ", {"SSH_JOBS_DB": str(self.db)}):
+            with self.assertRaisesRegex(RuntimeError, "journal requires offline recovery"):
                 _verify_sealed_database()
+        with self.assertRaisesRegex(ValueError, "Unsafe SQLite journal"):
+            checkpoint_for_restore(self.db, service_stopped=True)
+        existing_journal.unlink()
+        backup(self.db, self.backup)
+        existing_journal.write_bytes(b"synthetic rollback marker")
+        with self.assertRaisesRegex(ValueError, "rollback journal requires manual recovery"):
+            checkpoint_for_restore(self.db, service_stopped=True)
+        existing_journal.unlink()
+        recovered = self.db.parent / "journal-recovery-target.sqlite"
+        recovery_journal = Path(str(recovered) + "-journal")
+        recovery_journal.write_bytes(b"synthetic rollback marker")
+        with self.assertRaisesRegex(ValueError, "Existing SQLite journal"):
+            restore(self.backup, recovered, service_stopped=True)
+        recovery_journal.unlink()
         with patch.dict("os.environ", {"SSH_JOBS_DB": "relative.sqlite"}):
             with self.assertRaisesRegex(RuntimeError, "absolute"):
                 _verify_sealed_database()
