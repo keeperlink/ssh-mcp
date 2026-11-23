@@ -353,9 +353,38 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--confirm-recovery", action="store_true")
             sub.add_argument("--confirm-consumers-ready", action="store_true")
             sub.add_argument("--confirm-db-ready", action="store_true")
+    batch = actions.add_parser("batch-handoff")
+    batch.add_argument("--jenkins-file", type=Path, required=True)
+    batch.add_argument("--inventory", type=Path, required=True)
+    batch.add_argument("--vm-map", type=Path, required=True)
+    batch.add_argument("--workdir", type=Path, required=True)
+    batch.add_argument("--deployment", choices=("lab", "production"), required=True)
+    batch.add_argument("--issuer", required=True)
+    batch.add_argument("--expected-source-sha256", required=True)
+    batch.add_argument("--expected-inventory-sha256", required=True)
+    batch.add_argument("--jenkins-container", required=True)
+    batch.add_argument("--jenkins-container-file",
+                       default="/run/jenkins/secrets/deployment/skymap-ssh-mcp-secrets")
     args = parser.parse_args(argv)
     try:
-        if args.command == "plan":
+        if args.command == "batch-handoff":
+            if not (sys.stdin.isatty() and sys.stderr.isatty()):
+                raise RotationError("Trusted interactive terminal required for credential entry")
+            from ssh_mcp_secrets.batch import batch_handoff
+            batch_result = batch_handoff(
+                jenkins_file=args.jenkins_file, inventory=args.inventory,
+                vm_map=args.vm_map, workdir=args.workdir,
+                deployment=args.deployment, issuer=args.issuer,
+                expected_source=args.expected_source_sha256,
+                expected_inventory=args.expected_inventory_sha256,
+                container=args.jenkins_container,
+                container_file=args.jenkins_container_file,
+            )
+            print("BATCH_HANDOFF=COMMITTED aliases={aliases} vms={vm_count} "
+                  "staged_sha256={staged_sha256} hashes_sha256={hashes_sha256} "
+                  "proxmox_sha256={proxmox_sha256} hashes_path={hashes_path} "
+                  "proxmox_path={proxmox_path} hash_prefix={hash_prefix}".format(**batch_result))
+        elif args.command == "plan":
             print(plan(source=args.source, inventory=args.inventory,
                        deployment=args.deployment, issuer=args.issuer,
                        operation=args.operation, host=args.host))
