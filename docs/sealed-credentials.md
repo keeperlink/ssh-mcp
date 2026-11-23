@@ -3,12 +3,12 @@
 For the separately reviewed operator-only offline preparation and guarded
 activation procedure, see [operator sealed rotation](operator-sealed-rotation.md).
 
-The v2 cryptographic primitives and **OAuth, Console, and metrics verifier
-wiring** are implemented as separate development stages. This is **not yet
-deployable**: the privileged grant popup, per-scope in-memory sudo unlock,
-locked readiness checks, operator provisioning and LAB acceptance are still
-required. Do not put v2 secrets into a running SSH-MCP deployment or sign an
-image for rollout until the remaining SKY-347 gates are met.
+The v2 verifier, privileged approval and in-memory unlock support are
+implemented. The application image can accept sealed v2 input only after a
+separately approved offline history database snapshot and cutover for a
+legacy service. A merge is **not** a deployment or signing authorization.
+Read [the sealed database cutover procedure](sealed-db-cutover.md) before
+preparing a signed image or attempting any live upgrade.
 
 The signed managed reader accepts a v2 secret revision and passes only
 one-way verifiers and a Console session-generation marker to authentication
@@ -20,11 +20,12 @@ previous cookies. Password checks run in two dedicated, admission-controlled
 workers, outside Starlette's shared pool. OAuth per-IP throttling counts
 in-flight verification alongside recent failures.
 
-**Activation guard:** `app.config.SEALED_RUNTIME_READY` remains hardcoded
-`False` in Stage 2. Even a valid v2 mount cannot start a service or
-change the audit database, and this cannot be overridden by environment.
-The later reviewed root-unlock/readiness and explicit database-recovery
-stage must remove this guard before any v2 production activation.
+**Database cutover guard:** `ViewerAuth` refuses an existing legacy
+Console password verifier table in sealed mode, without deleting its rows.
+The independent stopped-service `ops.history_db cutover` operation must
+first take and verify an owner-only recovery snapshot and convert only the
+authentication table transactionally. Fresh databases can initialize v2
+directly. There is no environment variable that bypasses this check.
 
 ### Stage 3A: in-memory grant handles and sealed readiness
 
@@ -122,10 +123,10 @@ the originating MCP tool request releases the credential before returning.
 Timed root grants continue to expire/revoke only by their approved scope.
 The Console clears its root-password input on every submission and error.
 
-**Production activation guard still in force:** hardcoded
-`SEALED_RUNTIME_READY=False` is unchanged. No v2 runtime activation,
-signing, production cutover or credential rotation is authorized by this
-source change. Actual sudo implementations must independently pass LAB
+**Independent rollout approval remains mandatory:** signed release/image
+publication, database backup and cutover, credential rotation and host
+deployments are separate operations. Actual sudo implementations must
+independently pass LAB
 conclusive safety and fresh root-proof tests. DB recovery/cutover, offline
 rekey and mandatory rotation of old plaintext credentials remain separate
 gates before declaring SKY-347 complete.

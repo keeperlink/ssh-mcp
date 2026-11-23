@@ -118,10 +118,12 @@ class SignedConfigurationTests(unittest.TestCase):
             HISTORY_VIEWER_GENERATION=converted["viewer_generation"],
             MCP_METRICS_VERIFIER=converted["metrics_verifier"],
         ), patch.dict(os.environ, {"HISTORY_VIEWER_PASSWORD": "", "MCP_METRICS_TOKEN": ""})):
-            with self.assertRaisesRegex(RuntimeError, "requires completed"):
-                config.validate_mcp_config()
+            self.assertTrue(config.SEALED_RUNTIME_READY)
+            config.validate_mcp_config()
+            with patch.object(config, "SEALED_RUNTIME_READY", False):
+                with self.assertRaisesRegex(RuntimeError, "activation disabled"):
+                    config.validate_mcp_config()
             with patch.object(config, "SEALED_RUNTIME_READY", True):
-                config.validate_mcp_config()
                 with patch.object(config, "MCP_LOGIN_KEY", original["oauth_login_key"]):
                     with self.assertRaisesRegex(RuntimeError, "must not load plaintext"):
                         config.validate_mcp_config()

@@ -3,8 +3,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 USER root
-# Deliberately change just the hardcoded activation guard in this derivative
-# image. Fail closed if the reviewed source no longer has the expected guard.
-RUN python -c 'import sysconfig; from pathlib import Path; p=Path(sysconfig.get_paths()["purelib"])/"app"/"config.py"; s=p.read_text(); marker="SEALED_RUNTIME_READY = False"; assert s.count(marker)==1, "unexpected sealed activation guard"; p.write_text(s.replace(marker,"SEALED_RUNTIME_READY = True",1))'
+# Assert the reviewed image natively supports the sealed runtime. This test
+# layer never patches installed application code and cannot be published as a
+# production/signed image.
+RUN python -c 'import sysconfig; from pathlib import Path; p=Path(sysconfig.get_paths()["purelib"])/"app"/"config.py"; s=p.read_text(); assert s.count("SEALED_RUNTIME_READY = True")==1, "candidate image lacks reviewed sealed activation"'
 LABEL org.sshmcp.lab-sealed-activation="synthetic-only"
 USER 10001:10001

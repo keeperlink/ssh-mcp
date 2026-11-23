@@ -73,7 +73,7 @@ alias. Migration accepts only legacy v1 source; other modes require v2.
    downstream consumer handoff; stopped application and stopped database
    writers. For v1 migration, complete the approved database cutover and
    rollback snapshot procedure in
-   [sealed credentials](sealed-credentials.md) **before** activation.
+   [sealed database cutover](sealed-db-cutover.md) **before** activation.
    The tool does not independently verify stopped service or downstream
    readiness: these flags are explicit operator attestations.
 4. Only after the separately approved handoff, run:

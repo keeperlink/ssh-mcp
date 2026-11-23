@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -105,6 +106,110 @@ def backup(source: Path, destination: Path) -> None:
         _sync_directory(destination.parent)
     finally:
         _cleanup_temporary(temp)
+
+
+class CutoverUncertain(RuntimeError):
+    """The SQLite transaction may have committed; inspect before retry."""
+
+
+def cutover(source: Path, snapshot: Path, generation: str, *,
+            service_stopped: bool) -> None:
+    """Backup and explicitly replace legacy Console state before sealed startup.
+
+    All changes occur after a complete verified SQLite snapshot exists. The
+    protected snapshot is retained for an explicitly approved v1 rollback,
+    not silently deleted or substituted for a matching sealed revision.
+    """
+    if not service_stopped:
+        raise ValueError("Stop all service/database writers before Console cutover")
+    if re.fullmatch(r"[0-9a-f]{32}", generation) is None:
+        raise ValueError("Cutover requires the verified staged Console generation")
+    _input(source)
+    with _readonly(source) as check:
+        columns = {row[1] for row in check.execute(
+            "PRAGMA table_info(history_auth_state)"
+        )}
+        if columns != {"id", "salt", "verifier", "generation"}:
+            raise ValueError("Cutover requires a legacy Console authentication table")
+    source_info = source.stat()
+    # Never change the source until a new protected SQLite backup has passed
+    # integrity checks. The create-only destination prevents accidental reuse.
+    backup(source, snapshot)
+    verify(snapshot)
+    with _readonly(snapshot) as saved:
+        if {row[1] for row in saved.execute(
+            "PRAGMA table_info(history_auth_state)"
+        )} != columns:
+            raise ValueError("Backup does not preserve legacy Console schema")
+    # Fail closed if the source file was swapped or edited after snapshotting.
+    if ((source.stat().st_dev, source.stat().st_ino, source.stat().st_size,
+         source.stat().st_mtime_ns)
+            != (source_info.st_dev, source_info.st_ino, source_info.st_size,
+                source_info.st_mtime_ns)):
+        raise ValueError("Database changed after taking the recovery snapshot")
+    db = sqlite3.connect(source, isolation_level=None, timeout=0)
+    committed = False
+    try:
+        if (source.stat().st_dev, source.stat().st_ino) != (
+                source_info.st_dev, source_info.st_ino):
+            raise ValueError("Database changed during cutover")
+        db.execute("PRAGMA secure_delete=ON")
+        db.execute("BEGIN EXCLUSIVE")
+        try:
+            if {row[1] for row in db.execute(
+                    "PRAGMA table_info(history_auth_state)"
+            )} != columns:
+                raise ValueError("Console schema changed during cutover")
+            db.execute("DELETE FROM history_sessions")
+            db.execute("DROP TABLE history_auth_state")
+            db.execute("""CREATE TABLE history_auth_state (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                generation TEXT NOT NULL
+            )""")
+            db.execute("INSERT INTO history_auth_state(id,generation) VALUES(1,?)",
+                       (generation,))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='oauth_sessions'").fetchone():
+                db.execute("UPDATE oauth_sessions SET revoked_at=? "
+                           "WHERE revoked_at IS NULL", (int(time.time()),))
+            db.execute("COMMIT")
+            committed = True
+        except BaseException:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
+        # Complete the WAL checkpoint while writers are still stopped; a
+        # post-commit I/O failure means the operator must reconcile, not retry.
+        busy, _, _ = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if busy:
+            raise CutoverUncertain("SQLite checkpoint was busy after cutover")
+        if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+            raise CutoverUncertain("SQLite integrity check failed after cutover")
+    except (OSError, sqlite3.Error) as exc:
+        if committed:
+            raise CutoverUncertain("SQLite cutover outcome needs operator reconciliation") from exc
+        raise
+    finally:
+        db.close()
+
+
+def checkpoint_for_restore(source: Path, *, service_stopped: bool) -> None:
+    """Safely retire SQLite WAL files before an explicit offline DB restore."""
+    if not service_stopped:
+        raise ValueError("Stop all database writers before WAL checkpoint")
+    _input(source)
+    db = sqlite3.connect(source, isolation_level=None, timeout=0)
+    try:
+        busy, _, _ = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if busy:
+            raise ValueError("SQLite WAL still has active readers")
+        if db.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+            raise ValueError("SQLite could not close WAL journal")
+    finally:
+        db.close()
+    for suffix in ("-wal", "-shm"):
+        if Path(str(source) + suffix).exists():
+            raise ValueError("SQLite WAL/SHM remains; do not restore yet")
 
 
 def restore(source: Path, destination: Path, *, service_stopped: bool) -> Path | None:
@@ -223,13 +328,16 @@ def main() -> None:
         description="Private audited history backup, restore and output measurement"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    for operation in ("backup", "verify", "restore", "compression-benchmark"):
+    for operation in ("backup", "verify", "restore", "cutover", "checkpoint",
+                      "compression-benchmark"):
         item = sub.add_parser(operation)
         item.add_argument("source", type=Path)
-        if operation not in ("verify", "compression-benchmark"):
+        if operation not in ("verify", "compression-benchmark", "checkpoint"):
             item.add_argument("destination", type=Path)
-        if operation == "restore":
+        if operation in ("restore", "cutover", "checkpoint"):
             item.add_argument("--confirm-stopped", action="store_true")
+        if operation == "cutover":
+            item.add_argument("--generation", required=True)
     args = parser.parse_args()
     if args.command == "backup":
         backup(args.source, args.destination)
@@ -245,6 +353,13 @@ def main() -> None:
                   file=sys.stderr)
             raise SystemExit(1) from None
         print(json.dumps(data, sort_keys=True))
+    elif args.command == "cutover":
+        cutover(args.source, args.destination, args.generation,
+                service_stopped=args.confirm_stopped)
+        print("Sealed Console database cutover completed; protected snapshot retained")
+    elif args.command == "checkpoint":
+        checkpoint_for_restore(args.source, service_stopped=args.confirm_stopped)
+        print("Stopped-service SQLite WAL checkpoint completed for safe restore")
     else:
         previous = restore(args.source, args.destination, service_stopped=args.confirm_stopped)
         print("Private SQLite restored and verified")
