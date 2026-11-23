@@ -39,14 +39,15 @@ their independently verified values):
 
 ```sh
 ssh-mcp-secrets batch-handoff \
-  --jenkins-file /path/to/jenkins/secrets/deployment/skymap-ssh-mcp-secrets \
+  --jenkins-file /path/to/jenkins/secrets/deployment/ssh-mcp-secrets \
   --inventory /path/to/approved/production/inventory.json \
   --vm-map /private/operator/rotation/vm-map.json \
   --workdir /private/operator/rotation \
   --deployment production --issuer https://approved-issuer.example \
   --expected-source-sha256 EXPECTED_64_HEX_SHA256 \
   --expected-inventory-sha256 EXPECTED_64_HEX_SHA256 \
-  --jenkins-container APPROVED_CONTROLLER_CONTAINER
+  --jenkins-container APPROVED_CONTROLLER_CONTAINER \
+  --jenkins-container-file /run/jenkins/secrets/deployment/ssh-mcp-secrets
 ```
 
 The tool requires a real TTY; it prompts privately once for old/new
@@ -58,7 +59,7 @@ It validates file ownership, hashes, source fingerprint and host bindings
 before atomically replacing the production Jenkins file. It verifies the
 new bytes inside the Jenkins controller mount. Output includes only
 file paths, alias counts and SHA-256 fingerprints, never passwords or
-crypt verifiers. The `skymap-test` scoped credential is untouched.
+crypt verifiers. Other environment-scoped credentials remain untouched.
 A missing/failed controller readback is **not PASS**; inspect current
 source digest after an uncertain post-commit failure and never rerun
 blindly. The protected staged source and exports remain for reconciliation.

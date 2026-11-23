@@ -8,7 +8,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import stat
@@ -31,8 +31,9 @@ def _json(value: dict[str, Any]) -> bytes:
 
 def _trusted_jenkins(path: Path) -> bytes:
     # Jenkins consumes a host file via the existing read-only controller mount.
-    if not path.is_absolute() or path.name != "skymap-ssh-mcp-secrets":
-        raise cli.RotationError("Expected the approved production secretFile leaf")
+    if (not path.is_absolute() or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", path.name) is None
+            or path.name in {".", ".."}):
+        raise cli.RotationError("Invalid deployment secretFile leaf")
     if path.parent.name != "deployment" or path.parent.is_symlink():
         raise cli.RotationError("Untrusted deployment secret directory")
     parent = path.parent.stat()
@@ -49,10 +50,13 @@ def _trusted_jenkins(path: Path) -> bytes:
 
 def _hash_sudo(password: str) -> str:
     # OpenSSL generates an independently random salt; password travels via stdin.
-    proc = subprocess.run(
-        ["openssl", "passwd", "-6", "-stdin"],
-        input=(password + "\n").encode(), capture_output=True, timeout=20, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["openssl", "passwd", "-6", "-stdin"],
+            input=(password + "\n").encode(), capture_output=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise cli.RotationError("Linux shadow hash generation failed") from None
     if proc.returncode != 0:
         raise cli.RotationError("Linux shadow hash generation failed")
     try:
@@ -126,11 +130,20 @@ def _generate(old: dict[str, Any], *, hosts: dict[str, str],
     return new, passwords
 
 
-def _postcheck_container(name: str, file: str, expected: str) -> None:
+def _validate_container(name: str, file: str, expected_leaf: str) -> None:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name):
-        raise cli.RotationError("Jenkins container readback is mandatory")
-    if not file.startswith("/run/jenkins/secrets/deployment/") or file.endswith("/"):
+        raise cli.RotationError("Invalid Jenkins controller container")
+    if (type(file) is not str or not file.startswith("/")
+            or any(component in (".", "..", "") for component in file[1:].split("/"))):
         raise cli.RotationError("Invalid mounted Jenkins secret path")
+    mounted = PurePosixPath(file)
+    if (mounted.parent != PurePosixPath("/run/jenkins/secrets/deployment")
+            or mounted.name != expected_leaf):
+        raise cli.RotationError("Jenkins mount path does not match approved secretFile")
+
+
+def _postcheck_container(name: str, file: str, expected: str) -> None:
+    _validate_container(name, file, PurePosixPath(file).name)
     proc = subprocess.run(
         ["docker", "exec", name, "sha256sum", file],
         capture_output=True, timeout=20, check=False,
@@ -152,12 +165,13 @@ def batch_handoff(*, jenkins_file: Path, inventory: Path, vm_map: Path,
         raise cli.RotationError("Operator must be root")
     if _SHA.fullmatch(expected_source) is None or _SHA.fullmatch(expected_inventory) is None:
         raise cli.RotationError("Expected source and inventory checksums required")
+    _validate_container(container, container_file, jenkins_file.name)
     cli._private_dir(workdir)
     cli._binding(deployment, issuer)
     approved_inventory = cli._read_file(inventory, private=False, maximum=1048576)
     if cli._digest(approved_inventory) != expected_inventory:
         raise cli.RotationError("Approved inventory changed")
-    hosts = cli._hosts(inventory)
+    hosts = cli._parse_hosts(approved_inventory)
     vms = _vm_map(vm_map, hosts)
     original = _trusted_jenkins(jenkins_file)
     if cli._digest(original) != expected_source:
@@ -206,7 +220,7 @@ def batch_handoff(*, jenkins_file: Path, inventory: Path, vm_map: Path,
         }),
     }
     for alias, entry in hash_entries.items():
-        contents[workdir / (prefix + "." + alias + ".json")] = _json({
+        contents[workdir / (prefix + ".host." + alias + ".json")] = _json({
             **metadata, "type": "host-hash-only", "entry": entry,
         })
     # Preserve private stage/manifest for explicit recovery; never overwrite or
@@ -220,37 +234,39 @@ def batch_handoff(*, jenkins_file: Path, inventory: Path, vm_map: Path,
         for path, raw in contents.items():
             if cli._digest(cli._read_file(path, private=True)) != cli._digest(raw):
                 raise cli.RotationError("Incomplete hash export or stage")
-        # Commit on the Jenkins filesystem, preserving root:1000 / 0640.
+        # Use a private temporary inode until the fully fsynced revision is
+        # ready. Any pre-commit error removes it; any post-commit failure is
+        # explicitly uncertain and must not be retried blindly.
         destination_temp = jenkins_file.parent / (".ssh-mcp-batch-" + stamp)
-        fd = os.open(destination_temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                     os.O_NOFOLLOW | os.O_CLOEXEC, 0o640)
-        try:
-            os.fchown(fd, 0, 1000)
-            os.fchmod(fd, 0o640)
-            with os.fdopen(fd, "wb", closefd=False) as stream:
-                stream.write(stage)
-                stream.flush()
-                os.fsync(fd)
-        finally:
-            os.close(fd)
         committed = False
         try:
+            fd = os.open(destination_temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(stage)
+                stream.flush()
+                os.fsync(stream.fileno())
+                os.fchown(stream.fileno(), 0, 1000)
+                os.fchmod(stream.fileno(), 0o640)
+                os.fsync(stream.fileno())
             if cli._digest(_trusted_jenkins(jenkins_file)) != expected_source:
                 raise cli.RotationError("Jenkins source changed before commit")
             os.replace(destination_temp, jenkins_file)
             committed = True
             cli._sync(jenkins_file.parent)
-        except OSError:
+            if cli._digest(_trusted_jenkins(jenkins_file)) != stage_sha:
+                raise cli.ActivationUncertain("Jenkins credential replacement uncertain")
+            _postcheck_container(container, container_file, stage_sha)
+        except (OSError, cli.RotationError, subprocess.TimeoutExpired):
             if committed:
-                raise cli.ActivationUncertain("Jenkins handoff may be committed; compare source digest") from None
+                raise cli.ActivationUncertain(
+                    "Jenkins handoff may be committed; compare source digest"
+                ) from None
             raise
         finally:
             destination_temp.unlink(missing_ok=True)
-        if cli._digest(_trusted_jenkins(jenkins_file)) != stage_sha:
-            raise cli.ActivationUncertain("Jenkins credential replacement uncertain")
-        _postcheck_container(container, container_file, stage_sha)
     except Exception:
-        # Prepared files remain available to reconcile an uncertain handoff.
+        # Prepared files are retained for manual reconciliation.
         raise
     return {
         "staged_sha256": stage_sha,

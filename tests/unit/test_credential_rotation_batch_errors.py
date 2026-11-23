@@ -5,6 +5,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import hashlib
 import io
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -43,7 +44,7 @@ class RotationErrorPaths(unittest.TestCase):
         return p, hashlib.sha256(p.read_bytes()).hexdigest()
 
     def test_batch_handoff_rejects_nonroot_and_invalid_hashes(self) -> None:
-        fake = self.root / "deployment" / "skymap-ssh-mcp-secrets"
+        fake = self.root / "deployment" / "ssh-mcp-secrets"
         inventory, digest = self.write("inventory.json", {
             "version": 1, "hosts": [{"alias": "demo-node-a", "username": "gateway"}],
         })
@@ -54,7 +55,7 @@ class RotationErrorPaths(unittest.TestCase):
                     workdir=self.root, deployment="lab", issuer="https://example.invalid",
                     expected_source="a" * 64, expected_inventory=digest,
                     container="controller",
-                    container_file="/run/jenkins/secrets/deployment/skymap-ssh-mcp-secrets")
+                    container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
         with patch.object(batch.os, "geteuid", return_value=1001), \
              self.assertRaises(cli.RotationError):
             batch.batch_handoff(**args)
@@ -91,6 +92,44 @@ class RotationErrorPaths(unittest.TestCase):
                  self.assertRaises(cli.RotationError):
                 batch._hash_sudo("synthetic-password")
 
+    def test_hash_generation_timeouts_are_safe_rotation_rejections(self) -> None:
+        for error in (OSError("synthetic openssl missing"),
+                      subprocess.TimeoutExpired(["openssl"], 2)):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(batch.subprocess, "run", side_effect=error), \
+                 self.assertRaises(cli.RotationError):
+                batch._hash_sudo("synthetic-password")
+
+    def test_container_validation_rejects_traversal_and_wrong_leaf(self) -> None:
+        paths = (
+            "/run/jenkins/secrets/deployment/../ssh-mcp-secrets",
+            "/run/jenkins/secrets/deployment/./ssh-mcp-secrets",
+            "/run/jenkins/secrets/deployment//ssh-mcp-secrets",
+            "/run/jenkins/secrets/deployment/subfolder/ssh-mcp-secrets",
+            "/run/jenkins/secrets/deployment/other-secret",
+        )
+        for path in paths:
+            with self.subTest(path=path), self.assertRaises(cli.RotationError):
+                batch._validate_container("controller", path, "ssh-mcp-secrets")
+        batch._validate_container(
+            "controller", "/run/jenkins/secrets/deployment/ssh-mcp-secrets", "ssh-mcp-secrets"
+        )
+
+    def test_invalid_container_preflight_before_prompt_or_files(self) -> None:
+        fake = self.root / "deployment" / "ssh-mcp-secrets"
+        args = dict(jenkins_file=fake, inventory=self.root / "inventory.json",
+                    vm_map=self.root / "map.json", workdir=self.root,
+                    deployment="lab", issuer="https://example.invalid",
+                    expected_source="a" * 64, expected_inventory="b" * 64,
+                    container="controller", container_file=(
+                        "/run/jenkins/secrets/deployment/../ssh-mcp-secrets"
+                    ))
+        with patch.object(batch.os, "geteuid", return_value=0), \
+             patch.object(batch.getpass, "getpass", side_effect=AssertionError("prompted")), \
+             patch.object(batch.cli, "_private_dir", side_effect=AssertionError("opened files")), \
+             self.assertRaises(cli.RotationError):
+            batch.batch_handoff(**args)
+
     def test_container_postcheck_checks_binding_and_digest(self) -> None:
         for name, path in (("", "/run/jenkins/secrets/deployment/secret"),
                            ("invalid/name", "/run/jenkins/secrets/deployment/secret"),
@@ -117,7 +156,7 @@ class RotationErrorPaths(unittest.TestCase):
             batch._trusted_jenkins(file)
         d = self.root / "deployment"
         d.mkdir()
-        file = d / "skymap-ssh-mcp-secrets"
+        file = d / "ssh-mcp-secrets"
         file.write_text("synthetic")
         file.chmod(0o600)
         with self.assertRaises(cli.RotationError):
@@ -246,13 +285,14 @@ class RotationErrorPaths(unittest.TestCase):
 
     def test_cli_arg_parsing_rejects_no_tty_and_reports_batch(self) -> None:
         args = ["batch-handoff",
-                "--jenkins-file", "/tmp/deployment/skymap-ssh-mcp-secrets",
+                "--jenkins-file", "/tmp/deployment/ssh-mcp-secrets",
                 "--inventory", "/tmp/inventory.json",
                 "--vm-map", "/tmp/vm-map.json", "--workdir", "/tmp/work",
                 "--deployment", "lab", "--issuer", "https://example.invalid",
                 "--expected-source-sha256", "a" * 64,
                 "--expected-inventory-sha256", "b" * 64,
-                "--jenkins-container", "test-controller"]
+                "--jenkins-container", "test-controller",
+                "--jenkins-container-file", "/run/jenkins/secrets/deployment/ssh-mcp-secrets"]
         with patch.object(cli.sys.stdin, "isatty", return_value=False), \
              redirect_stderr(io.StringIO()) as err:
             self.assertEqual(cli.main(args), 1)

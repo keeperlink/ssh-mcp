@@ -187,29 +187,48 @@ class BatchRotationTests(unittest.TestCase):
             if payload is not None:
                 self.assertIn(b"gateway:$6$", payload)
 
-    def _mock_batch_handoff(self, *, check_readback: bool = True) -> tuple[dict[str, object], Path]:
+    def _mock_batch_handoff(
+        self, *, check_readback: bool = True,
+        postcheck_error: Exception | None = None,
+        readback_error: Exception | None = None,
+        destination_error: Exception | None = None,
+        aliases: tuple[str, ...] = ("demo-node-a", "demo-node-b"),
+    ) -> tuple[dict[str, object], Path]:
         directory = self.root / "deployment"
         directory.mkdir()
         (self.root / "output").mkdir()
-        source = directory / "skymap-ssh-mcp-secrets"
-        source.write_text(json.dumps(self.source, sort_keys=True) + "\n")
+        source = directory / "ssh-mcp-secrets"
+        hosts = {alias: "gateway" for alias in aliases}
+        secret = from_legacy(
+            {**LEGACY, "sudo_passwords": {a: "synthetic-old-sudo-" + a for a in aliases}},
+            console_password=CONSOLE, hosts=hosts, **BIND,
+        )
+        source.write_text(json.dumps(secret, sort_keys=True) + "\n")
         source.chmod(0o640)
         inventory, inv_sha = self._file("inventory.json", {
             "version": 1,
-            "hosts": [{"alias": a, "username": "gateway"} for a in HOSTS],
+            "hosts": [{"alias": a, "username": "gateway"} for a in aliases],
         })
-        vm_map, _ = self._file("vm-map.json", {"version": 1,
-                                              "vmids": {"demo-node-a": 100, "demo-node-b": 200}})
+        vm_map, _ = self._file("vm-map.json", {
+            "version": 1, "vmids": {a: 100 + i for i, a in enumerate(aliases)},
+        })
         original = hashlib.sha256(source.read_bytes()).hexdigest()
         workdir = self.root / "output"
         prompts = [OAUTH, NEW_OAUTH, NEW_OAUTH, CONSOLE, NEW_CONSOLE, NEW_CONSOLE]
         def readback(_name: str, _file: str, expected: str) -> None:
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), expected)
+            if postcheck_error is not None:
+                raise postcheck_error
             if not check_readback:
                 raise cli.ActivationUncertain("Synthetic readback failure")
+        def trusted(path: Path) -> bytes:
+            content = path.read_bytes()
+            if readback_error is not None and hashlib.sha256(content).hexdigest() != original:
+                raise readback_error
+            return content
         with patch.object(batch.os, "geteuid", return_value=0), \
-             patch.object(batch.os, "fchown"), \
-             patch.object(batch, "_trusted_jenkins", side_effect=lambda x: x.read_bytes()), \
+             patch.object(batch.os, "fchown", side_effect=destination_error), \
+             patch.object(batch, "_trusted_jenkins", side_effect=trusted), \
              patch.object(batch.cli, "_private_dir"), \
              patch.object(batch.cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
              patch.object(batch.getpass, "getpass", side_effect=prompts), \
@@ -222,7 +241,7 @@ class BatchRotationTests(unittest.TestCase):
                                         expected_source=original,
                                         expected_inventory=inv_sha,
                                         container="synthetic-controller",
-                                        container_file="/run/jenkins/secrets/deployment/skymap-ssh-mcp-secrets")
+                                        container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
                 return {}, source
             result = batch.batch_handoff(jenkins_file=source, inventory=inventory,
                                          vm_map=vm_map, workdir=workdir,
@@ -230,7 +249,7 @@ class BatchRotationTests(unittest.TestCase):
                                          expected_source=original,
                                          expected_inventory=inv_sha,
                                          container="synthetic-controller",
-                                         container_file="/run/jenkins/secrets/deployment/skymap-ssh-mcp-secrets")
+                                         container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
         return result, source
 
     def test_one_session_handoff_generates_sealed_and_hash_exports(self) -> None:
@@ -258,6 +277,60 @@ class BatchRotationTests(unittest.TestCase):
         saved = json.loads(jenkins.read_text())
         self.assertTrue(verify_password(NEW_CONSOLE, saved["viewer_verifier"], "console-login"))
         self.assertTrue(any((self.root / "output").iterdir()))
+
+    def test_reserved_aliases_do_not_replace_batch_exports(self) -> None:
+        aliases = ("proxmox", "plan", "sealed", "hashes")
+        result, _ = self._mock_batch_handoff(aliases=aliases)
+        workdir = self.root / "output"
+        self.assertEqual(len(list(workdir.iterdir())), 4 + len(aliases))
+        data = json.loads(Path(str(result["proxmox_path"])).read_text())
+        self.assertEqual(data["type"], "proxmox-hash-only")
+        for alias in aliases:
+            file = workdir / (Path(str(result["hash_prefix"])).name + ".host." + alias + ".json")
+            self.assertEqual(json.loads(file.read_text())["type"], "host-hash-only")
+
+    def test_postcommit_errors_always_report_uncertain(self) -> None:
+        import subprocess
+        for error_kind, error in (
+            ("docker-io", OSError("synthetic docker unavailable")),
+            ("docker-timeout", subprocess.TimeoutExpired(["docker"], 2)),
+            ("postcheck-validation", cli.RotationError("synthetic validation failure")),
+            ("source-readback", OSError("synthetic source readback failure")),
+        ):
+            with self.subTest(error_kind=error_kind):
+                # Distinct directories to avoid carrying an altered source
+                # between independent synthetic postcommit failures.
+                self.tmp.cleanup()
+                self.tmp = tempfile.TemporaryDirectory(prefix="synthetic-postcommit-")
+                self.addCleanup(self.tmp.cleanup)
+                self.root = Path(self.tmp.name)
+                self.root.chmod(0o700)
+                with self.assertRaises(cli.ActivationUncertain):
+                    if error_kind == "source-readback":
+                        self._mock_batch_handoff(readback_error=error)
+                    else:
+                        self._mock_batch_handoff(postcheck_error=error)
+                self.assertTrue(verify_password(
+                    NEW_OAUTH,
+                    json.loads((self.root / "deployment" / "ssh-mcp-secrets").read_text())[
+                        "oauth_login_verifier"],
+                    "oauth-login",
+                ))
+
+    def test_precommit_jenkins_temp_file_removed_on_write_failure(self) -> None:
+        with self.assertRaises(OSError):
+            self._mock_batch_handoff(destination_error=OSError("synthetic chown failure"))
+        deployment = self.root / "deployment"
+        self.assertEqual([p.name for p in deployment.iterdir()], ["ssh-mcp-secrets"])
+        self.assertTrue(verify_password(
+            OAUTH, json.loads((deployment / "ssh-mcp-secrets").read_text())["oauth_login_verifier"],
+            "oauth-login",
+        ))
+
+    def test_batch_uses_checked_inventory_bytes_not_second_file_read(self) -> None:
+        with patch.object(batch.cli, "_hosts", side_effect=AssertionError("unsafe inventory reread")):
+            result, _ = self._mock_batch_handoff()
+        self.assertEqual(result["aliases"], 2)
 
     def test_proxmox_identity_preflight_blocks_writes(self) -> None:
         fields = {"version": 1, "type": "proxmox-hash-only",

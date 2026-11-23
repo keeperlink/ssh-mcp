@@ -105,7 +105,12 @@ def _source(path: Path) -> tuple[dict[str, Any], str]:
 
 def _hosts(path: Path) -> dict[str, str]:
     # Caller independently verifies the inventory's signed provenance.
-    data = _decode(_read_file(path, private=False, maximum=1048576))
+    return _parse_hosts(_read_file(path, private=False, maximum=1048576))
+
+
+def _parse_hosts(raw: bytes) -> dict[str, str]:
+    # Parse precisely the bytes whose SHA-256 was checked by the caller.
+    data = _decode(raw)
     hosts = data.get("hosts")
     if data.get("version") != 1 or type(hosts) is not list or not 1 <= len(hosts) <= 200:
         raise RotationError("Invalid approved host inventory")
@@ -363,8 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     batch.add_argument("--expected-source-sha256", required=True)
     batch.add_argument("--expected-inventory-sha256", required=True)
     batch.add_argument("--jenkins-container", required=True)
-    batch.add_argument("--jenkins-container-file",
-                       default="/run/jenkins/secrets/deployment/skymap-ssh-mcp-secrets")
+    batch.add_argument("--jenkins-container-file", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "batch-handoff":
