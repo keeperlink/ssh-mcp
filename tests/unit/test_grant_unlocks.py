@@ -175,17 +175,25 @@ class ScopedUnlockTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.unlocks._entries)
 
     async def test_live_check_required_after_kdf_and_before_commit(self):
-        prepared = self.unlocks.prepare(
-            self.scope, console_password=PASSWORD,
-            console_verifier=self.verifier, sealed_sudo=self.envelope,
-            deployment=BIND["deployment"], issuer=BIND["issuer"],
-            username=BIND["username"],
-        )
+        def prepare():
+            return self.unlocks.prepare(
+                self.scope, console_password=PASSWORD,
+                console_verifier=self.verifier, sealed_sudo=self.envelope,
+                deployment=BIND["deployment"], issuer=BIND["issuer"],
+                username=BIND["username"],
+            )
+        prepared = prepare()
         with self.assertRaisesRegex(InvalidCredential, "no longer authorized"):
             self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: False)
+        self.assertIsNone(prepared.password)
+        with self.assertRaisesRegex(InvalidCredential, "consumed"):
+            self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: True)
+        prepared = prepare()
         with self.assertRaisesRegex(InvalidCredential, "no longer authorized"):
             self.unlocks.commit(prepared, expires=1300.0,
                                 still_authorized=lambda: 1 / 0)
+        self.assertIsNone(prepared.password)
+        prepared = prepare()
         def revoked_during_check() -> bool:
             self.unlocks.revoke_actor("operator")
             return True
@@ -193,17 +201,14 @@ class ScopedUnlockTests(unittest.IsolatedAsyncioTestCase):
             self.unlocks.commit(
                 prepared, expires=1300.0, still_authorized=revoked_during_check,
             )
-        prepared = self.unlocks.prepare(
-            self.scope, console_password=PASSWORD,
-            console_verifier=self.verifier, sealed_sudo=self.envelope,
-            deployment=BIND["deployment"], issuer=BIND["issuer"],
-            username=BIND["username"],
-        )
+        self.assertIsNone(prepared.password)
+        prepared = prepare()
         self.assertFalse(self.unlocks._entries)
         self.assertTrue(self.unlocks.require(
             self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: True),
             self.scope,
         ))
+        self.assertIsNone(prepared.password)
 
     async def test_idle_expiry_releases_password_without_further_registry_calls(self):
         registry = GrantUnlocks()
@@ -217,10 +222,49 @@ class ScopedUnlockTests(unittest.IsolatedAsyncioTestCase):
             prepared, expires=time.monotonic() + 0.04,
             still_authorized=lambda: True,
         )
+        self.assertIsNone(prepared.password)
+        with self.assertRaisesRegex(InvalidCredential, "consumed"):
+            registry.commit(
+                prepared, expires=time.monotonic() + 0.04,
+                still_authorized=lambda: True,
+            )
         self.assertIn(handle, registry._entries)
         await asyncio.sleep(0.10)
         self.assertNotIn(handle, registry._entries)
+        with self.assertRaisesRegex(InvalidCredential, "consumed"):
+            registry.commit(
+                prepared, expires=time.monotonic() + 0.04,
+                still_authorized=lambda: True,
+            )
         registry.close()
+
+    async def test_prepared_unlock_is_not_transferable_to_another_registry(self):
+        prepared = self.unlocks.prepare(
+            self.scope, console_password=PASSWORD,
+            console_verifier=self.verifier, sealed_sudo=self.envelope,
+            deployment=BIND["deployment"], issuer=BIND["issuer"],
+            username=BIND["username"],
+        )
+        second = GrantUnlocks(clock=lambda: self.now[0])
+        with self.assertRaisesRegex(InvalidCredential, "invalid"):
+            second.commit(prepared, expires=1300.0, still_authorized=lambda: True)
+        self.assertIsNotNone(prepared.password)
+        self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: True)
+        self.assertIsNone(prepared.password)
+        with self.assertRaisesRegex(InvalidCredential, "consumed"):
+            self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: True)
+
+    async def test_cancelled_preparation_discards_plaintext_reference(self):
+        prepared = self.unlocks.prepare(
+            self.scope, console_password=PASSWORD,
+            console_verifier=self.verifier, sealed_sudo=self.envelope,
+            deployment=BIND["deployment"], issuer=BIND["issuer"],
+            username=BIND["username"],
+        )
+        prepared.discard()
+        self.assertIsNone(prepared.password)
+        with self.assertRaisesRegex(InvalidCredential, "consumed"):
+            self.unlocks.commit(prepared, expires=1300.0, still_authorized=lambda: True)
 
     async def test_real_approval_key_lengths_and_timed_grant_operation_scope(self):
         key = ("agent:operator", "https://example.com/" + "a" * 2010, "demo-node-a")

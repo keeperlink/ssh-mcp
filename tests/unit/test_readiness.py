@@ -102,6 +102,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.denial("demo-node-a"), "safety_unconfirmed")
         self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
         self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "safety_unconfirmed")
+        self.assertTrue(monitor.discovery("demo-node-a")["ssh_reachable"])
+        self.assertEqual(monitor.discovery("demo-node-a")["status"], "offline")
+        self.assertTrue(monitor.detail("demo-node-a")["last_success"])
         self.assertTrue(monitor.detail("demo-node-a")["degraded"])
         result = await monitor.recheck("demo-node-a")
         self.assertFalse(result["recheck_ok"])
@@ -114,6 +117,7 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             ProbeResult(False, "probe_timeout"),
             ProbeResult(False, "root_unconfirmed", needs_corroboration=True),
             ProbeResult(True),
+            ProbeResult(False, "root_unconfirmed", needs_corroboration=True),
             ProbeResult(False, "connection_failed"),
         ]
 
@@ -134,10 +138,27 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await monitor.check("demo-node-a"))
         self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "locked")
         self.assertFalse(monitor.detail("demo-node-a")["degraded"])
-        self.assertFalse(await monitor.check("demo-node-a"))
+        with self.assertLogs("app.readiness", level="WARNING") as warnings:
+            self.assertFalse(await monitor.check("demo-node-a"))
         self.assertEqual(monitor.denial("demo-node-a", privileged=True), "safety_unconfirmed")
+        self.assertTrue(monitor.discovery("demo-node-a")["ssh_reachable"])
+        self.assertEqual(monitor.discovery("demo-node-a")["status"], "offline")
+        self.assertTrue(any("host_readiness_safety_unconfirmed" in log for log in warnings.output))
+        self.assertFalse(any("host_readiness_stale" in log for log in warnings.output))
         self.assertTrue(monitor.detail("demo-node-a")["degraded"])
-        self.assertEqual(calls, ["identity", "safety"] * 4)
+        self.assertFalse(await monitor.check("demo-node-a"))
+        # The previous pinned identity remains fresh even after an
+        # inconclusive subsequent probe; it is not execution permission.
+        self.assertTrue(monitor.discovery("demo-node-a")["ssh_reachable"])
+        self.assertEqual(monitor.discovery("demo-node-a")["status"], "offline")
+        self.assertEqual(calls, ["identity", "safety"] * 5)
+
+    async def test_console_marks_reachable_safety_uncertainty_not_offline(self):
+        from importlib.resources import files
+        source = files("app").joinpath("assets", "console.js").read_text("utf-8")
+        self.assertIn('host.ssh_reachable && host.sudo_state === "safety_unconfirmed"', source)
+        self.assertIn('"Reachable · safety unconfirmed"', source)
+        self.assertIn('? "readiness-warning"', source)
 
     async def test_sealed_readiness_unknown_alias_rejected_at_setup(self):
         with self.assertRaises(ValueError):

@@ -69,13 +69,18 @@ class _Unlock:
     timer: asyncio.TimerHandle = field(repr=False)
 
 
-@dataclass(frozen=True, slots=True, repr=False)
+@dataclass(slots=True, repr=False, eq=False)
 class PreparedUnlock:
-    """Uncommitted secret; a worker must not publish it to the grant table."""
+    """One-use, uncommitted secret; never a reusable credential proof."""
 
     scope: UnlockScope
     epoch: int
-    password: str = field(repr=False)
+    owner: object = field(repr=False)
+    password: str | None = field(repr=False)
+
+    def discard(self) -> None:
+        """Release the plaintext reference if a pending approval is cancelled."""
+        self.password = None
 
 
 class GrantUnlocks:
@@ -91,6 +96,7 @@ class GrantUnlocks:
         self._closed = False
         self._epoch = 0
         self._lock = threading.RLock()
+        self._owner = object()
 
     def _remove(self, handle: str) -> None:
         entry = self._entries.pop(handle, None)
@@ -121,7 +127,9 @@ class GrantUnlocks:
             console_password, sealed_sudo, deployment=deployment,
             issuer=issuer, alias=scope.host, username=username,
         )
-        return PreparedUnlock(scope=scope, epoch=epoch, password=password)
+        return PreparedUnlock(
+            scope=scope, epoch=epoch, owner=self._owner, password=password,
+        )
 
     def commit(
         self, prepared: PreparedUnlock, *, expires: float,
@@ -135,10 +143,17 @@ class GrantUnlocks:
         """
         loop = asyncio.get_running_loop()
         with self._lock:
+            if (type(prepared) is not PreparedUnlock
+                    or prepared.owner is not self._owner
+                    or prepared.password is None):
+                raise InvalidCredential("Prepared root unlock already consumed or invalid")
+            # Consume even when authorization fails: rejected attempts must
+            # not retain plaintext or be replayed after a future reapproval.
+            password = prepared.password
+            prepared.discard()
             self._expire()
             now = self._clock()
-            if (type(prepared) is not PreparedUnlock or self._closed
-                    or prepared.epoch != self._epoch
+            if (self._closed or prepared.epoch != self._epoch
                     or not now < expires or expires - now > 57600
                     or len(self._entries) >= self._maximum):
                 raise InvalidCredential("Root unlock unavailable")
@@ -155,7 +170,7 @@ class GrantUnlocks:
             handle = secrets.token_urlsafe(32)
             timer = loop.call_later(expires - now, self._expire_handle, handle)
             self._entries[handle] = _Unlock(
-                prepared.scope, expires, prepared.password, timer,
+                prepared.scope, expires, password, timer,
             )
             return handle
 

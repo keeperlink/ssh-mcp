@@ -188,7 +188,10 @@
       const row = table.insertRow();
       const values = [
         alias,
-        host.status !== "active" ? "Offline" : host.ssh_reason ? "Recent failure · still eligible" : "Active",
+        host.ssh_reachable && host.sudo_state === "safety_unconfirmed"
+          ? "Reachable · safety unconfirmed"
+          : host.status !== "active" ? "Offline"
+          : host.ssh_reason ? "Recent failure · still eligible" : "Active",
         !host.sudo_configured ? "N/A"
           : host.sudo_state === "locked" ? "Locked"
           : host.sudo_state === "safety_unconfirmed" ? "Safety unconfirmed"
@@ -207,7 +210,9 @@
           row.cells[column].title = formatWhen(timestamp);
         }
       }
-      row.cells[1].className = host.status !== "active" ? "readiness-bad"
+      row.cells[1].className = host.ssh_reachable && host.sudo_state === "safety_unconfirmed"
+        ? "readiness-warning"
+        : host.status !== "active" ? "readiness-bad"
         : host.ssh_reason ? "readiness-warning" : "readiness-good";
       row.cells[2].className = !host.sudo_configured ? "readiness-neutral"
         : host.sudo_state === "locked" ? "readiness-neutral"

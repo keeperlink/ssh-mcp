@@ -141,6 +141,12 @@ class ReadinessMonitor:
                 and self._fresh(state.last_ssh)
                 and (not state.sealed or state.safety_confirmed))
 
+    def ssh_reachable(self, alias: str) -> bool:
+        """Recent pinned SSH identity, distinct from execution eligibility."""
+        state = self._states[alias]
+        return (self.settings.authorized and not state.unsafe
+                and self._fresh(state.last_ssh))
+
     def password_suspended(self, alias: str) -> bool:
         return self._states[alias].suspended
 
@@ -162,7 +168,11 @@ class ReadinessMonitor:
         state = self._states[alias]
         active, sudo = self.active(alias), self.sudo_ready(alias)
         if state.previous_active and not active and not state.unsafe:
-            LOG.warning("host_readiness_stale host=%s last_success=%s", alias, state.last_ssh_success)
+            if state.sealed and self.ssh_reachable(alias) and not state.safety_confirmed:
+                LOG.warning("host_readiness_safety_unconfirmed host=%s", alias)
+            else:
+                LOG.warning("host_readiness_stale host=%s last_success=%s",
+                            alias, state.last_ssh_success)
         if active and not state.previous_active:
             LOG.info("host_readiness_active host=%s", alias)
         if state.previous_sudo_ready and not sudo:
@@ -367,9 +377,11 @@ class ReadinessMonitor:
         }
         if state.sealed:
             result.update({
+                # Keep the external active/offline/retired eligibility
+                # contract; expose actual SSH reachability independently.
+                "ssh_reachable": self.ssh_reachable(alias),
                 "sudo_state": ("safety_unconfirmed"
-                               if not state.safety_confirmed
-                               and self._fresh(state.last_ssh) and not state.unsafe
+                               if not state.safety_confirmed and self.ssh_reachable(alias)
                                else "offline" if not self.active(alias) else
                                "suspended" if state.suspended else "locked"),
                 "locked": self.active(alias) and state.safety_confirmed
