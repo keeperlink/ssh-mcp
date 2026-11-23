@@ -284,7 +284,10 @@ def _supplied_password_rejected(diagnostic: bytes) -> bool:
 
 def _no_password_failure_kind(diagnostic: bytes) -> str:
     message = diagnostic.decode("utf-8", errors="replace").lower()
-    if "a password is required" in message:
+    # sudo-rs (Ubuntu 26.04) uses a different noninteractive refusal from
+    # classic sudo. The caller also requires exit 1 and no root-start proof.
+    if ("a password is required" in message
+            or "interactive authentication is required" in message):
         return "sudo_password_required"
     if any(word in message for word in (
         "not in the sudoers", "not allowed to execute", "may not run sudo",

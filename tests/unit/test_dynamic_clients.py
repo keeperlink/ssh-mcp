@@ -165,6 +165,18 @@ class DynamicOAuthTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _verify_metadata(a, CLIENTS[a][1], {**correct, **changes})
 
+    def test_chatgpt_cimd_multimethod_preference_uses_public_pkce(self):
+        client_id = next(iter(CLIENTS))
+        doc = {**metadata(client_id),
+               "token_endpoint_auth_method": "private_key_jwt",
+               "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"]}
+        _verify_metadata(client_id, CLIENTS[client_id][1], doc)
+        with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                   return_value=doc):
+            tokens = self.grant(client_id)
+        self.assertTrue(tokens["access_token"])
+        self.assertTrue(tokens["refresh_token"])
+
     def test_client_audit_rows_do_not_cross_history_queries(self):
         from app.jobs import JobStore
         from app.contracts import ExecuteCommandRequest
@@ -252,6 +264,10 @@ class DynamicOAuthTests(unittest.TestCase):
             {"token_endpoint_auth_methods_supported": 5},
             {"token_endpoint_auth_methods_supported": [None]},
             {"token_endpoint_auth_methods_supported": ["client_secret_basic"]},
+            {"token_endpoint_auth_method": "private_key_jwt",
+             "token_endpoint_auth_methods_supported": ["private_key_jwt"]},
+            {"token_endpoint_auth_method": "private_key_jwt",
+             "token_endpoint_auth_methods_supported": ["none"]},
             {"token_endpoint_auth_method": None},
             {"token_endpoint_auth_method": ["none"]},
             {"token_endpoint_auth_method": 7},
