@@ -1,4 +1,4 @@
-# Offline sealed credential preparation and recovery (SKY-347)
+# Offline sealed credential preparation and recovery
 
 This guide covers **offline preparation only**. The operator tool does not
 restart SSH-MCP, change remote sudo passwords, update OAuth or metrics clients,
@@ -12,10 +12,11 @@ inventory, deployment environment and OAuth issuer must have been checked
 independently against the approved deployed configuration. The utility reads
 the inventory but **does not validate its digital signature**.
 
-## SKY-360 one-session batch rotation (optional)
+## One-session full-fleet enrollment (optional)
 
-The reviewed `ssh-mcp-secrets batch-handoff` command combines private
-preparation and a guarded **production Jenkins secretFile** handoff. Run
+The reviewed full-fleet batch-handoff is an optional **initial enrollment**
+and collective-rotation operation, not routine maintenance of one credential.
+It combines private preparation and a guarded Jenkins secretFile handoff. Run
 only in an operator-controlled root terminal, never through SSH-MCP,
 a Jenkins pipeline, a logged remote command or CI. The existing service
 keeps using its currently loaded credentials until explicitly redeployed.
@@ -218,6 +219,9 @@ An interrupted rekey must not leave a partially activated secret: a complete
 staged file and manifest are required for activation. The tool never alters
 remote credentials by itself. Production rotation, signed-image rollback,
 database restoration and acceptance of all old-credential revocations remain
-separate, mandatory SKY-347 gates. **Never restore an old plaintext image or
-credential bundle after sealed cutover**. Retain compatible signed image
-digests and the current sealed revision in the operator-approved rollback plan.
+separately authorized actions. Never restore a legacy plaintext secret
+or legacy-v1 image over rotated sealed-v2 credentials. Keep a signed
+v2-compatible recovery image with the current matching sealed secret.
+Previously completed one-time database migration and v1 rollback
+exercises do not block routine maintenance of a healthy v2 service.
+Document explicitly waived acceptance tests as skipped, not PASS.

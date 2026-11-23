@@ -1,4 +1,4 @@
-"""Offline SKY-347 sealed credential staging; never connects to SSH or a service.
+"""Offline sealed credential staging; never connects to SSH or a service.
 
 The operator supplies credentials through a real terminal. Stage, verify and
 activate are independent steps; this program does not deploy, change host sudo,

@@ -87,15 +87,16 @@ signed top-level `clients` registry provides display labels and optional
 conversation selectors; neither legacy `viewer.client_labels` nor global
 conversation-header configuration is supported.
 
-The one-time SKY-344 conversion on the managed test and production databases
-is complete. The previous migration utility is not shipped. Fresh
-installations use the current schema. Deployments carrying audit history
+The prior client-attribution migration is no longer run at startup;
+its one-time migration utility is not shipped. Fresh installations
+use the current schema. Deployments carrying audit history
 from an older actor format require a separately reviewed offline database
 conversion with all writers stopped, an integrity-checked SQLite snapshot and
 a coordinated application/configuration cutover. Do not guess an OAuth
 identity from a former actor name.
 
-Rollback across the actor-schema cutover requires restoring the **matching**
-pre-conversion database snapshot together with the compatible signed image
-and configuration. Do not run a previous image against a database containing
-client-specific actors.
+Restoring historical actor formats requires an independently matched
+database snapshot and compatible signed image/configuration, not a simple
+image downgrade. **Current v2 deployments use sealed-compatible recovery**
+as documented in [SQLite state and recovery](sealed-db-cutover.md).
+Never run an older image against incompatible client-scoped audit rows.

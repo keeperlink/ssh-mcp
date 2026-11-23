@@ -1,4 +1,4 @@
-"""Negative-path coverage for offline SKY-360 operator tooling, synthetic only."""
+"""Negative-path coverage for offline batch operator tooling, synthetic only."""
 from __future__ import annotations
 
 from contextlib import redirect_stdout, redirect_stderr
