@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.host_relay import (
-    HostRelayService, RelayFailure, _receipt, _ready, _sudo_challenge_line,
-    _sudo_prompt,
+    HostRelayService, RelayFailure, _argv, _receipt, _ready,
+    _sudo_challenge_line, _sudo_prompt,
 )
 from app.relay_scripts import SOURCE, RECEIVER
 from app.ssh_executor import SSHDenied
@@ -128,6 +128,19 @@ class FramingTests(unittest.IsolatedAsyncioTestCase):
                 readiness=ready, alias="demo-node-a"), 1)
         self.assertEqual(ready.calls, ["demo-node-a"])
 
+    async def test_sudo_retry_without_readiness_monitor_fails_closed(self) -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(_sudo_prompt("DEST-no-monitor").encode())
+        reader.feed_eof()
+        with self.assertRaises(RelayFailure) as raised:
+            await _ready(reader, "DEST-no-monitor",
+                         sudo_prompt=_sudo_prompt("DEST-no-monitor"))
+        self.assertEqual(raised.exception.code, "permission_denied")
+
+    def test_privileged_script_requires_unique_nonce_parameter(self) -> None:
+        with self.assertRaisesRegex(ValueError, "marker missing"):
+            _argv("pass", [], True)
+
     async def test_nonprivileged_readiness_unchanged(self) -> None:
         reader = asyncio.StreamReader()
         reader.feed_data(b"\x1eSRC-abc\x1e\n")
@@ -186,6 +199,47 @@ class SudoSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writes, [])
 
 
+    async def test_oversized_sudo_prechallenge_diagnostics_fail_closed(self) -> None:
+        class E(Executor):
+            _sudo_passwords = {"demo-node-b": "fake"}
+        svc = HostRelayService(E(), Audit())  # type: ignore[arg-type]
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"UNTRUSTED-" * 512)
+        reader.feed_eof()
+        sent = []
+        stdin = SimpleNamespace(write=lambda data: sent.append(data),
+            drain=lambda: asyncio.sleep(0), close=lambda: None)
+        with self.assertRaisesRegex(SSHDenied, "challenge invalid"):
+            await svc._sudo(SimpleNamespace(stdin=stdin, stderr=reader),
+                            "operator", "demo-node-b", None, marker="DEST-nope")
+        self.assertFalse(sent)
+
+    async def test_suspended_after_sudo_challenge_never_sends_credential(self) -> None:
+        class Readiness:
+            attempts = 0
+            def password_suspended(self, _alias):
+                self.attempts += 1
+                return self.attempts >= 2
+        class E(Executor):
+            _sealed_sudo = {"demo-node-b": "sealed"}
+            readiness = Readiness()
+        class Root:
+            def require(self, *, host, actor):
+                return "never-sent"
+        svc = HostRelayService(E(), Audit())  # type: ignore[arg-type]
+        reader = asyncio.StreamReader()
+        reader.feed_data(_sudo_prompt("DEST-after").encode())
+        sent = []
+        stdin = SimpleNamespace(write=lambda data: sent.append(data),
+            drain=lambda: asyncio.sleep(0), close=lambda: None)
+        with self.assertRaisesRegex(SSHDenied, "suspended"):
+            await svc._sudo(SimpleNamespace(stdin=stdin, stderr=reader),
+                            "operator", "demo-node-b", Root(),
+                            marker="DEST-after")  # type: ignore[arg-type]
+        self.assertEqual(svc.executor.readiness.attempts, 2)
+        self.assertFalse(sent)
+
+
 class ShutdownAndProgressTests(unittest.IsolatedAsyncioTestCase):
     """Reuse the synthetic host fixture without rerunning its own tests."""
     setUp = fixtures.ServiceTests.setUp
@@ -232,6 +286,33 @@ class ShutdownAndProgressTests(unittest.IsolatedAsyncioTestCase):
         await service.shutdown()
         self.assertEqual(audit.status, "unknown")
         self.assertEqual(root.finish_count, 1)
+
+    async def test_suspended_sealed_host_denied_before_transport(self) -> None:
+        class Readiness:
+            def password_suspended(self, alias):
+                return alias == "demo-node-b"
+        class E(Executor):
+            _sealed_sudo = {"demo-node-b": "sealed"}
+            readiness = Readiness()
+            def authorized_host(self, actor, alias):
+                host = super().authorized_host(actor, alias)
+                host.privileged_access = "restricted"
+                return host
+        class Root:
+            def delegate(self):
+                pass
+            def finish(self):
+                pass
+        audit = Audit()
+        svc = HostRelayService(E(), audit)  # type: ignore[arg-type]
+        with patch("app.host_relay.open_command") as opener:
+            result = await svc.transfer("operator",
+                self.request(dest_privileged=True),
+                precreated_id="relay1",
+                roots=(None, Root()))  # type: ignore[arg-type]
+            opener.assert_not_called()
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["error"]["code"], "transport_error")
 
     async def test_large_transfer_throttles_sqlite_progress(self) -> None:
         from app import config
