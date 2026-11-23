@@ -52,8 +52,11 @@ The signed bootstrap binds the complete validated v2 secret revision to a
 source path and SHA-256 fingerprint. The SSH executor reads that same
 protected source and rejects a missing, replaced or independently valid
 but different secret revision instead of combining unrelated verifier and
-sudo-envelope material. OAuth and Console passwords, the metrics bearer token,
-and host sudo passwords are not exported into environment variables. The
+sudo-envelope material. After full revision validation, sealed entries for
+host aliases retired from the signed inventory are ignored; the in-memory
+executor only retains envelopes for current authorized hosts. OAuth and
+Console passwords, the metrics bearer token, and host sudo passwords are
+not exported into environment variables. The
 recoverable JWT signing key remains supplied as `MCP_TOKEN_SIGNING_SECRET`.
 Its 30-second readiness monitor performs only pinned-identity
 SSH and noninteractive passwordless-root safety checks while sealed.
@@ -62,6 +65,11 @@ evidence displays **Safety unconfirmed** and distinct recent SSH reachability,
 blocks all SSH command admission
 and cannot make operator recheck succeed until conclusive safety proof; confirmed
 unsafe passwordless-root remains latched until conclusive safe evidence.
+Transient safety transport/timeout failures do not erase a previously
+conclusive safe result: ordinary SSH remains eligible until the existing
+readiness stale deadline, with the actual failure reason and warning shown.
+The failed live probe and explicit recheck still report failure. Confirmed
+unsafe or ambiguous safety evidence remains immediately fail-closed.
 Operator rechecks also remain password-free while locked. The Console uses
 the same status vocabulary without labeling recently reachable hosts Offline
 or raising stale-SSH warnings merely because safety confirmation is missing.

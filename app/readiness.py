@@ -285,7 +285,10 @@ class ReadinessMonitor:
                     self._ssh_succeeded(alias)
                     state.sudo_reason = "safety_unconfirmed"
                 else:
-                    state.safety_confirmed = False
+                    # A transient probe failure is not evidence that the
+                    # last conclusive safe result stopped being true. Retain
+                    # ordinary SSH eligibility until its normal stale limit
+                    # and report this probe's actual failure, not ambiguity.
                     self._ssh_failed(alias, safety)
                     return False
                 self._transitions(alias)

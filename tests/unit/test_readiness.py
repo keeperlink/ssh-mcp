@@ -111,6 +111,57 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["degraded"])
         self.assertEqual(calls, ["identity", "safety", "identity", "safety"])
 
+    async def test_sealed_transient_safety_failure_retains_recent_locked_state(self):
+        now = [1000.0]
+        responses = [
+            ProbeResult(True),
+            ProbeResult(False, "probe_timeout"),
+            ProbeResult(False, "connection_failed"),
+        ]
+        calls: list[str] = []
+
+        async def probe(_alias: str, kind: str) -> ProbeResult:
+            calls.append(kind)
+            return responses.pop(0) if kind == "safety" else ProbeResult(True)
+
+        monitor = ReadinessMonitor(
+            ReadinessSettings(authorized=True, stale_seconds=300),
+            {"demo-node-a": True}, probe, clock=lambda: now[0],
+            sealed_hosts=("demo-node-a",),
+        )
+        self.assertTrue(await monitor.check("demo-node-a"))
+        original_last_ssh = monitor._states["demo-node-a"].last_ssh
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "locked")
+
+        now[0] += 30
+        with self.assertLogs("app.readiness", level="WARNING") as warnings:
+            self.assertFalse(await monitor.check("demo-node-a"))
+        self.assertTrue(monitor.active("demo-node-a"))
+        self.assertEqual(monitor._states["demo-node-a"].last_ssh, original_last_ssh)
+        self.assertEqual(monitor.denial("demo-node-a"), None)
+        self.assertEqual(monitor.denial("demo-node-a", privileged=True), "sudo_locked")
+        self.assertEqual(monitor.discovery("demo-node-a")["status"], "active")
+        self.assertEqual(monitor.discovery("demo-node-a")["sudo_state"], "locked")
+        self.assertTrue(monitor.discovery("demo-node-a")["ssh_reachable"])
+        self.assertEqual(monitor.detail("demo-node-a")["ssh_reason"], "probe_timeout")
+        self.assertTrue(monitor.detail("demo-node-a")["degraded"])
+        self.assertTrue(any("host_readiness_failed" in line and "probe_timeout" in line
+                            for line in warnings.output))
+        self.assertFalse(any("host_readiness_safety_unconfirmed" in line
+                             or "host_readiness_stale" in line
+                             for line in warnings.output))
+
+        result = await monitor.recheck("demo-node-a")
+        self.assertFalse(result["recheck_ok"])
+        self.assertEqual(monitor.detail("demo-node-a")["ssh_reason"], "connection_failed")
+        self.assertTrue(monitor.active("demo-node-a"))
+        self.assertNotIn("sudo", calls)
+        self.assertNotIn("sudo_challenge", calls)
+
+        now[0] += 271
+        self.assertFalse(monitor.active("demo-node-a"))
+        self.assertEqual(monitor.denial("demo-node-a"), "ssh_readiness_stale")
+
     async def test_sealed_failed_safety_probe_recovers_only_after_conclusive_check(self):
         calls: list[str] = []
         safety = [
@@ -485,7 +536,7 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
             SSHExecutor({self.a: self.host}, enabled=True,
                         sealed_sudo={"demo-node-b": {"algorithm": "aes-256-gcm"}})
 
-    async def test_managed_v2_environment_loads_only_encrypted_sudo_envelopes(self):
+    async def test_managed_v2_environment_loads_only_current_host_envelopes(self):
         from app import config, runtime_files
         from app.sealed_credentials import from_legacy
         old = {
@@ -497,11 +548,16 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
             "ssh_private_key": ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
                                 "synthetic-not-real-key\n"
                                 "-----END OPENSSH PRIVATE KEY-----"),
-            "sudo_passwords": {self.a: "synthetic-sudo-not-real"},
+            "sudo_passwords": {
+                self.a: "synthetic-sudo-not-real",
+                "demo-node-b": "retired-synthetic-sudo-not-real",
+            },
         }
         sealed = from_legacy(
             old, console_password=old["viewer_password"], deployment="lab",
-            issuer="https://testing.example.org", hosts={self.a: self.host.username},
+            issuer="https://testing.example.org", hosts={
+                self.a: self.host.username, "demo-node-b": "gateway",
+            },
         )
         with tempfile.TemporaryDirectory() as d:
             source = Path(d) / "managed.json"
@@ -522,9 +578,21 @@ class TransportReadinessTests(unittest.IsolatedAsyncioTestCase):
                   })):
                 loaded = SSHExecutor.from_environment()
                 self.assertFalse(loaded._sudo_passwords)
+                self.assertEqual(set(sealed["sealed_sudo"]), {self.a, "demo-node-b"})
+                self.assertEqual(set(loaded._sealed_sudo), {self.a})
                 self.assertEqual(loaded._sealed_sudo[self.a], sealed["sealed_sudo"][self.a])
                 self.assertTrue(loaded.readiness._states[self.a].sealed)
                 self.assertEqual(loaded.discover_hosts("fixture", [])[self.a]["sudo_ready"], False)
+                self.assertNotIn("demo-node-b", loaded.discover_hosts("fixture", []))
+                # Even stale envelopes are part of the validated snapshot:
+                # changing one after bootstrap must fail the digest check.
+                altered_stale = json.loads(json.dumps(sealed))
+                altered_stale["sealed_sudo"]["demo-node-b"]["ciphertext"] = (
+                    altered_stale["sealed_sudo"]["demo-node-b"]["ciphertext"][:-2] + "AA"
+                )
+                source.write_text(json.dumps(altered_stale))
+                with self.assertRaisesRegex(Exception, "Protected sudo secret configuration"):
+                    SSHExecutor.from_environment()
                 # A different, individually valid v2 revision must never be
                 # combined with the bootstrap Console verifier/generation.
                 changed = json.loads(json.dumps(sealed))

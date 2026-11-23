@@ -703,7 +703,14 @@ class SSHExecutor:
                         config.MCP_MANAGED_SECRETS_DIGEST,
                     ):
                         raise ValueError("Sealed credential revision mismatch")
-                    sealed = stored["sealed_sudo"]
+                    # Signed inventory changes can retire a host before its
+                    # sealed entry is deleted. Validate the whole protected
+                    # revision, then retain only currently authorized hosts.
+                    sealed = {
+                        alias: envelope
+                        for alias, envelope in stored["sealed_sudo"].items()
+                        if alias in hosts
+                    }
                 else:
                     value = stored.get("sudo_passwords", {})
                     if type(value) is not dict:
