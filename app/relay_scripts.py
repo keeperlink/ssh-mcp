@@ -153,7 +153,12 @@ try:
         sys.exit(76)
     preimage()
     if mode == "create":
-        os.link(stage, path, follow_symlinks=False)
+        try:
+            os.link(stage, path, follow_symlinks=False)
+        except FileExistsError:
+            # A concurrent writer may have published after our initial
+            # create-only check. Do not overwrite it; send a specific code.
+            sys.exit(73)
         os.unlink(stage)
     else:
         os.replace(stage, path)
