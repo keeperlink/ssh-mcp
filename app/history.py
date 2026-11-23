@@ -18,6 +18,7 @@ import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Mapping, Protocol, cast
@@ -37,6 +38,8 @@ from .readiness import ReadinessMonitor
 from .ssh_executor import SSHExecutor
 from .sealed_credentials import validate_verifier, verify_password
 from .auth_workers import run_auth
+from .grant_unlocks import UnlockScope, PreparedUnlock
+from .sealed_credentials import InvalidCredential
 
 if TYPE_CHECKING:
     from .jobs import JobManager
@@ -764,6 +767,26 @@ class ViewerAuth:
             )
         return session if inserted.rowcount == 1 else None
 
+    def verify_root_prompt(self, ip: str, password: str) -> str:
+        """Share the Console login failure budget with root-grant prompts.
+
+        Called via the bounded dedicated authentication executor. The same
+        lock reserves a verification slot across login and prompt requests,
+        including simultaneous requests from the same IP. No decryption or
+        approval occurs on rejected/throttled input.
+        """
+        if self.verifier is None:
+            return "unavailable"
+        with self._login_lock:
+            if not self.allowed(ip):
+                return "throttled"
+            accepted = verify_password(password, self.verifier, "console-login")
+            if not accepted:
+                self.failed[ip].append(time.time())
+                return "incorrect"
+            self.failed.pop(ip, None)
+            return "ok"
+
     @staticmethod
     def _digest(session: str) -> str:
         return hashlib.sha256(session.encode("utf-8")).hexdigest()
@@ -1067,6 +1090,10 @@ def _history_page(csrf: str) -> str:
         '</div><p id="approval-duration-warning" class="approval-duration-warning" hidden>'
         'Timed grants require an authenticated OAuth client or conversation ID.'
         ' Only one request can be authorized.</p></fieldset>'
+        '<label id="approval-root-password-group" class="approval-root-password" hidden>'
+        'Operator Console password'
+        '<input id="approval-root-password" type="password" autocomplete="off"'
+        ' maxlength="256" spellcheck="false" aria-required="true"></label>'
         '<button id="approval-deny" type="button" class="approval-deny">Deny</button>'
         '<button id="approval-grant" type="button" class="approval-grant">Grant</button>'
         '</div><p id="approval-feedback" class="approval-feedback" role="alert" hidden></p>'
@@ -1180,7 +1207,14 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         if not _same_origin(request) or not _csrf_ok(request, data):
             return _json({"error": "Request forbidden"}, 403)
         async with decision_lock:
+            # A bare CSRF cookie can be issued on the unauthenticated login
+            # page. Only a valid, explicit Console logout may revoke root
+            # grants belonging to the operator.
+            authenticated = await run_in_threadpool(signed_in, request, touch=False)
             await run_in_threadpool(auth.logout, request.cookies.get(SESSION_COOKIE))
+            if (authenticated and config.MCP_MANAGED_SECRETS_VERSION == "2"
+                    and approvals is not None):
+                approvals.revoke_all_root()
         response = RedirectResponse("/console/login", status_code=303, headers=_headers())
         response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
         return response
@@ -1334,11 +1368,98 @@ def create_history_router(jobs: JobStore, *, approved_hosts: list[str] | None = 
         assert data is not None
         if data.get("duration", "once") not in DURATIONS:
             return _json({"error": "Invalid grant duration"}, 400)
+        duration = data.get("duration", "once")
+        pending = approvals.root_request(approval_id) if (
+            approvals is not None and config.MCP_MANAGED_SECRETS_VERSION == "2"
+        ) else None
+        if pending is not None:
+            assert approvals is not None
+            if duration != "once" and not pending.key[1]:
+                return _json({"error": "Timed grants require a verified conversation or client"}, 400)
+            if job_manager is None or auth.verifier is None or not auth.generation:
+                return _json({"error": "Sudo unlock unavailable"}, 503)
+            executor = job_manager.executor
+            readiness = executor.readiness
+            envelope = executor._sealed_sudo.get(pending.key[2])
+            host = executor._hosts.get(pending.key[2])
+            if envelope is None or host is None or readiness is None:
+                return _json({"error": "Protected host credential unavailable"}, 409)
+            ip = request.client.host if request.client else "unknown"
+            outcome = await run_auth(auth.verify_root_prompt, ip,
+                                     data.get("console_password", ""))
+            if outcome == "throttled":
+                return _json({"error": "Too many incorrect password attempts. Try again later."}, 429)
+            if outcome == "incorrect":
+                return _json({"error": "Incorrect Console password."}, 403)
+            if outcome != "ok":
+                return _json({"error": "Sudo unlock unavailable"}, 503)
+            if not await run_in_threadpool(signed_in, request, touch=False):
+                return _json({"error": "Unauthorized"}, 401)
+            if approvals.root_request(approval_id) is not pending:
+                return _json({"error": "Approval unavailable or expired"}, 404)
+            scope = UnlockScope(
+                pending.key, actor=pending.actor,
+                client_id=pending.client_id or "", issuance=pending.id,
+                operation_id=pending.id if duration == "once" else "",
+                generation=auth.generation,
+                kind="request" if duration == "once" else "timed",
+            )
+            # A cancellation after the worker starts must still discard the
+            # plaintext it eventually produces, rather than retaining an
+            # unobserved completed Future with a decrypted credential.
+            worker = asyncio.create_task(run_auth(partial(
+                approvals.root_unlocks.prepare,
+                scope, console_password=data["console_password"],
+                console_verifier=auth.verifier,
+                sealed_sudo=envelope, deployment=config.MCP_ENVIRONMENT,
+                issuer=config.MCP_ISSUER, username=host.username,
+            )))
+            try:
+                prepared: PreparedUnlock = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                def discard_late(future: asyncio.Task[PreparedUnlock]) -> None:
+                    if not future.cancelled() and future.exception() is None:
+                        future.result().discard()
+                worker.add_done_callback(discard_late)
+                raise
+            except InvalidCredential:
+                return _json({"error": "Protected host credential unavailable"}, 409)
+            try:
+                def still_authorized() -> bool:
+                    return (approvals.root_request(approval_id) is pending
+                            and signed_in(request, touch=False)
+                            and not readiness.password_suspended(pending.key[2])
+                            and readiness.active(pending.key[2]))
+
+                if not still_authorized():
+                    return _json({"error": "Approval unavailable or expired"}, 404)
+                try:
+                    await executor.check_readiness_live(pending.key[2], privileged=False)
+                except (ValueError, RuntimeError):
+                    return _json({"error": "Host safety verification failed"}, 409)
+                if not still_authorized() or not await executor.verify_unlocked_sudo(
+                    pending.actor, pending.key[2], prepared.password or "",
+                    permitted=still_authorized,
+                ):
+                    return _json({"error": "Host sudo verification failed"}, 409)
+                async with decision_lock:
+                    if not approvals.decide_unlocked(
+                        approval_id, duration=duration, prepared=prepared,
+                        still_authorized=still_authorized,
+                    ):
+                        return _json({"error": "Approval unavailable or expired"}, 404)
+                return _json({"ok": True})
+            finally:
+                prepared.discard()
         async with decision_lock:
             if not await run_in_threadpool(signed_in, request):
                 return _json({"error": "Unauthorized"}, 401)
-            if approvals is None or not await approvals.decide_live(
-                approval_id, grant=True, duration=data.get("duration", "once"),
+            if (approvals is None or
+                    (config.MCP_MANAGED_SECRETS_VERSION == "2"
+                     and approvals.root_request(approval_id) is not None) or
+                    not await approvals.decide_live(
+                        approval_id, grant=True, duration=duration,
+                    )
             ):
                 return _json({"error": "Approval unavailable or expired"}, 404)
         return _json({"ok": True})

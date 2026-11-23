@@ -16,6 +16,10 @@ from . import config
 from .client_identity import agent_disambiguator, agent_label
 from .ssh_executor import SSHDenied
 from .approval_status import ApprovalCode, ApprovalRejected
+from .grant_unlocks import (
+    GrantUnlocks, PreparedUnlock, RootAccess, root_access_context,
+)
+from .sealed_credentials import InvalidCredential
 
 GrantKey = tuple[str, str, str]  # OAuth sid + conversation OR agent:actor + client_id, signed alias
 
@@ -51,6 +55,7 @@ class PendingApproval:
     grant_host: bool = True
     grant_root: bool = False
     client_id: str | None = None
+    actor: str = ""
     # The generation and deadline observed when admission began. Explicit
     # revocations are distinguishable from natural grant expiry.
     host_revoke_generation: int = 0
@@ -73,6 +78,7 @@ class PendingApproval:
             "expires_at": time.time() + max(0, self.deadline - time.monotonic()),
             "requires_host": self.grant_host,
             "requires_root": self.grant_root,
+            "requires_unlock": self.grant_root and config.MCP_MANAGED_SECRETS_VERSION == "2",
             # Root approval can extend an already-active prerequisite host
             # grant to the root expiry even when no new host approval is due.
             "host_grant_extension_possible": (
@@ -92,6 +98,9 @@ class ApprovalManager:
         self.pending: dict[str, PendingApproval] = {}
         self.grants: dict[GrantKey, float] = {}
         self.root_grants: dict[GrantKey, float] = {}
+        self.root_unlocks = GrantUnlocks()
+        self._timed_root_access: dict[GrantKey, RootAccess] = {}
+        self._once_root_access: dict[str, RootAccess] = {}
         # Presentation only; never used to authorize access.
         self._grant_clients: dict[GrantKey, str] = {}
         # Bounded nonsecret generation counters to distinguish an explicit
@@ -135,13 +144,19 @@ class ApprovalManager:
             if expiry <= now:
                 self.grants.pop(key, None)
                 root_removed = self.root_grants.pop(key, None) is not None
+                if root_removed:
+                    self._drop_root(key)
                 self._invalidate_dependents(key, host=True, root=root_removed, expired=True)
                 self._signal()
         for key, expiry in tuple(self.root_grants.items()):
             if expiry <= now:
                 self.root_grants.pop(key, None)
+                self._drop_root(key)
                 self._invalidate_dependents(key, root=True, expired=True)
                 self._signal()
+        for request_id, access in tuple(self._once_root_access.items()):
+            if not self.root_unlocks.valid(access.handle, access.scope):
+                self._once_root_access.pop(request_id, None)
         for key in tuple(self._grant_clients):
             if key not in self.grants and key not in self.root_grants:
                 del self._grant_clients[key]
@@ -219,7 +234,116 @@ class ApprovalManager:
                     root_required: bool) -> bool:
         now = time.monotonic()
         return (bool(key[1]) and (not host_required or self.grants.get(key, 0) > now)
-                and (not root_required or self.root_grants.get(key, 0) > now))
+                and (not root_required or (
+                    self.root_grants.get(key, 0) > now
+                    and (config.MCP_MANAGED_SECRETS_VERSION != "2"
+                         or self._root_access_ready(key))
+                )))
+
+    def _root_access_ready(self, key: GrantKey) -> bool:
+        access = self._timed_root_access.get(key)
+        return access is not None and self.root_unlocks.valid(access.handle, access.scope)
+
+    def _drop_root(self, key: GrantKey) -> None:
+        access = self._timed_root_access.pop(key, None)
+        if access is not None:
+            self.root_unlocks.revoke(access.handle)
+        self.root_unlocks.revoke_scope(key)
+
+    def root_request(self, request_id: str) -> PendingApproval | None:
+        """Return only a still-waiting privileged grant for Console approval."""
+        self._expire()
+        request = self.pending.get(request_id)
+        if (self.closed or request is None or not request.grant_root
+                or request.future.done() or request.deadline <= time.monotonic()
+                or request.waiter is not None
+                and (request.waiter.done() or request.waiter.cancelling())):
+            return None
+        return request
+
+    def decide_unlocked(
+        self, request_id: str, *, duration: str, prepared: PreparedUnlock,
+        still_authorized: Callable[[], bool],
+    ) -> bool:
+        """Commit a fresh proved root secret and the matching grant together.
+
+        Runs synchronously in the Console event loop under the decision lock,
+        *after* the slow password verifier, decrypt and live sudo proof.
+        No await can interleave logout/revoke with issuance.
+        """
+        request = self.root_request(request_id)
+        if (request is None or duration not in DURATIONS
+                or prepared.scope.key != request.key
+                or prepared.scope.actor != request.actor
+                or prepared.scope.client_id != (request.client_id or "")
+                or prepared.scope.issuance != request.id
+                or prepared.scope.kind != ("request" if duration == "once" else "timed")
+                or prepared.scope.operation_id != (request.id if duration == "once" else "")):
+            prepared.discard()
+            return False
+        now = time.monotonic()
+        seconds = DURATIONS[duration] or 300
+        expires = now + seconds
+        try:
+            handle = self.root_unlocks.commit(
+                prepared, expires=expires,
+                still_authorized=lambda: (
+                    self.root_request(request_id) is request
+                    and still_authorized()
+                ),
+            )
+        except InvalidCredential:
+            return False
+        key = request.key
+        if duration == "once":
+            root_generation = self._revoke_generations.get((key, "root"), 0)
+            host_generation = self._revoke_generations.get((key, "host"), 0)
+            existing_host_required = request.host_required and not request.grant_host
+            access = RootAccess(
+                self.root_unlocks, handle, prepared.scope,
+                lambda: (not self.closed and
+                         self._once_root_access.get(request_id) is access
+                         and self._revoke_generations.get((key, "root"), 0) == root_generation
+                         and self._revoke_generations.get((key, "host"), 0) == host_generation
+                         and (not existing_host_required or
+                              self.grants.get(key, 0) > time.monotonic())),
+            )
+            self._once_root_access[request_id] = access
+        else:
+            generation = self._revoke_generations.get((key, "root"), 0)
+            old_access = self._timed_root_access.get(key)
+            if old_access is not None:
+                # A rotated/invalidated credential must not remain readable
+                # merely because another grant for the same scope is issued.
+                self.root_unlocks.revoke(old_access.handle)
+            access = RootAccess(
+                self.root_unlocks, handle, prepared.scope,
+                lambda: (not self.closed and
+                         self._timed_root_access.get(key) is access
+                         and self._revoke_generations.get((key, "root"), 0) == generation
+                         and self.root_grants.get(key, 0) > time.monotonic()),
+            )
+            self._timed_root_access[key] = access
+        if not self.decide(request_id, grant=True, duration=duration):
+            if duration == "once":
+                self._once_root_access.pop(request_id, None)
+            else:
+                self._timed_root_access.pop(key, None)
+            self.root_unlocks.revoke(handle)
+            return False
+        return True
+
+    def revoke_all_root(self) -> None:
+        """Explicit Console logout removes root unlocks, but not SSH grants."""
+        for key in tuple(self.root_grants):
+            self.root_grants.pop(key, None)
+            self._note_revoke(key, "root")
+            self._drop_root(key)
+            self._invalidate_dependents(key, root=True)
+        for request_id, access in tuple(self._once_root_access.items()):
+            self.root_unlocks.revoke(access.handle)
+            self._once_root_access.pop(request_id, None)
+        self._signal()
 
     def _note_revoke(self, key: GrantKey, kind: str) -> None:
         marker = (key, kind)
@@ -258,6 +382,7 @@ class ApprovalManager:
                       host_required: bool = True,
                       root_required: bool = False,
                       client_id: str | None = None,
+                      actor: str = "",
                       before_prompt: Callable[[], Awaitable[None]] | None = None) -> ApprovalCode:
         if self.closed:
             raise SSHDenied("Approval manager has stopped")
@@ -280,6 +405,12 @@ class ApprovalManager:
                 raise cause
             if not self._authorized(key, host_required, root_required):
                 raise SSHDenied("Operator grant revoked or expired")
+            if root_required and config.MCP_MANAGED_SECRETS_VERSION == "2":
+                access = self._timed_root_access.get(key)
+                if (access is None or access.scope.actor != actor
+                        or access.scope.client_id != (client_id or "")):
+                    raise SSHDenied("Root unlock actor mismatch")
+                root_access_context.set(access)
             return ApprovalCode.APPROVED_TIMED
         if len(self.pending) >= MAX_PENDING:
             raise SSHDenied("Approval queue is full")
@@ -295,7 +426,7 @@ class ApprovalManager:
                 return await self.require(
                     key, tool=tool, reason=reason, summary=summary, steps=steps,
                     disconnected=disconnected, host_required=host_required,
-                    root_required=root_required, client_id=client_id,
+                    root_required=root_required, client_id=client_id, actor=actor,
                 )
             if len(self.pending) >= MAX_PENDING:
                 raise SSHDenied("Approval queue is full")
@@ -314,8 +445,13 @@ class ApprovalManager:
             steps=preview_steps,
             host_required=host_required, root_required=root_required,
             grant_host=host_required and (not key[1] or self.grants.get(key, 0) <= time.monotonic()),
-            grant_root=root_required and (not key[1] or self.root_grants.get(key, 0) <= time.monotonic()),
+            grant_root=root_required and (
+                not key[1] or self.root_grants.get(key, 0) <= time.monotonic()
+                or config.MCP_MANAGED_SECRETS_VERSION == "2"
+                and not self._root_access_ready(key)
+            ),
             client_id=client_id,
+            actor=actor,
             host_revoke_generation=self._revoke_generations.get((key, "host"), 0),
             root_revoke_generation=self._revoke_generations.get((key, "root"), 0),
             host_expiry_at=self.grants.get(key, 0),
@@ -408,6 +544,14 @@ class ApprovalManager:
         if ((check_host and self.grants.get(key, 0) <= time.monotonic())
                 or (check_root and self.root_grants.get(key, 0) <= time.monotonic())):
             raise SSHDenied("A prerequisite operator grant is unavailable")
+        if root_required and config.MCP_MANAGED_SECRETS_VERSION == "2":
+            access = (self._once_root_access.get(request.id)
+                      if decision == "once" else self._timed_root_access.get(key))
+            if (access is None or access.scope.actor != actor
+                    or access.scope.client_id != (client_id or "")
+                    or not access.valid(host=key[2], actor=actor)):
+                raise SSHDenied("Approved root unlock is no longer valid")
+            root_access_context.set(access)
         return (ApprovalCode.APPROVED_EXPLICIT if decision == "once"
                 else ApprovalCode.APPROVED_TIMED)
 
@@ -505,6 +649,8 @@ class ApprovalManager:
             if self.grant_id(key) == grant_id:
                 del self.grants[key]
                 root_removed = self.root_grants.pop(key, None) is not None
+                if root_removed:
+                    self._drop_root(key)
                 self._note_revoke(key, "host")
                 if root_removed:
                     self._note_revoke(key, "root")
@@ -516,6 +662,7 @@ class ApprovalManager:
         for key in tuple(self.root_grants):
             if self.grant_id(key, "root") == grant_id:
                 del self.root_grants[key]
+                self._drop_root(key)
                 self._note_revoke(key, "root")
                 self._invalidate_dependents(key, root=True)
                 if key not in self.grants:
@@ -530,5 +677,8 @@ class ApprovalManager:
             self._finish(request_id, "")
         self.grants.clear()
         self.root_grants.clear()
+        self._timed_root_access.clear()
+        self._once_root_access.clear()
+        self.root_unlocks.close()
         self._grant_clients.clear()
         self._signal()

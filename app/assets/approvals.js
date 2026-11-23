@@ -185,6 +185,7 @@
       state.active = state.pending.keys().next().value || null;
     const request = state.pending.get(state.active);
     if (!request) {
+      $("approval-root-password").value = "";
       layer.hidden = true;
       if (previousId && previousFocus?.isConnected) previousFocus.focus();
       previousFocus = null;
@@ -206,7 +207,10 @@
       $("approval-tool").textContent = request.tool || "Operation";
       $("approval-reason").textContent = request.reason || "Not specified";
       const root = request.requires_root === true;
+      const unlock = request.requires_unlock === true;
       layer.classList.toggle("is-root", root);
+      $("approval-root-password-group").hidden = !unlock;
+      $("approval-root-password").value = "";
       $("approval-title").textContent = root
         ? "Run as root — operator approval" : "Restricted host access";
       const permission = root
@@ -238,7 +242,7 @@
       layer.querySelector('input[name="approval-duration"][value="once"]').checked = true;
       $("approval-feedback").hidden = true;
       layer.hidden = false;
-      $("approval-grant").focus();
+      (unlock ? $("approval-root-password") : $("approval-grant")).focus();
     }
     // The same pending approval may have a new approved name without a new
     // approval ID or revision. Refresh the label on every authoritative snapshot.
@@ -467,6 +471,18 @@
           throw new Error("Grant state unavailable; refresh required");
         applySnapshot(snapshot);
       } else if (!response.ok) {
+        if (response.status === 403 || response.status === 429) {
+          const result = await response.json();
+          if (result.error === "Incorrect Console password."
+              || result.error === "Too many incorrect password attempts. Try again later.") {
+            $("approval-root-password").value = "";
+            const feedback = $("approval-feedback");
+            feedback.textContent = result.error;
+            feedback.hidden = false;
+            $("approval-root-password").focus();
+            return;
+          }
+        }
         if (response.status === 404) {
           state.pending.delete(id);
           closeNotice(id);
@@ -474,6 +490,7 @@
           throw new Error("Operation failed (HTTP " + response.status + ")");
         }
       } else {
+        $("approval-root-password").value = "";
         state.pending.delete(id);
         state.localPending.set(id, state.revision);
         closeNotice(id);
@@ -560,7 +577,9 @@
   $("approval-grant").addEventListener("click", () => {
     if (state.active) submit(
       "/console/api/approvals/" + encodeURIComponent(state.active) + "/grant",
-      { duration: layer.querySelector('input[name="approval-duration"]:checked')?.value || "once" },
+      { duration: layer.querySelector('input[name="approval-duration"]:checked')?.value || "once",
+        ...(state.pending.get(state.active)?.requires_unlock === true
+          ? { console_password: $("approval-root-password").value } : {}) },
       state.active
     );
   });

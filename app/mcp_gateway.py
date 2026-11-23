@@ -43,6 +43,7 @@ from .contracts import (
     ExecuteCommandsRequest, GetBatchRequest, ListBatchesRequest, CancelBatchRequest,
 )
 from .batch import BatchManager
+from .grant_unlocks import root_access_context
 from .jobs import JobManager, JobStore
 from .file_transfer import BinaryTransferService
 from .binary_probe import BinaryProbeError, BinaryProbeRequest, probe_exchange
@@ -856,9 +857,11 @@ def create_mcp_server(*, job_registry: dict | None = None,
         context_token = conversation_id_context.set(conversation_id)
         approval_token = approval_status_context.set(None)
         client_token = client_id_context.set(verified_client_id)
+        root_token = root_access_context.set(None)
         try:
             return await dispatch_tool(_ctx, params)
         finally:
+            root_access_context.reset(root_token)
             client_id_context.reset(client_token)
             approval_status_context.reset(approval_token)
             conversation_id_context.reset(context_token)

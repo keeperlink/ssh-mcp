@@ -8,6 +8,7 @@ its opaque handle through the actual admitted execution, never durable audit.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 import secrets
 import threading
@@ -236,3 +237,39 @@ class GrantUnlocks:
         with self._lock:
             self.clear()
             self._closed = True
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class RootAccess:
+    """Opaque live capability propagated to a single approved tool task.
+
+    The capability contains only an opaque handle, verified scope and
+    non-secret live-authority callback. It is never added to job/SQLite
+    records, tool arguments or subprocess environments.
+    """
+
+    registry: GrantUnlocks = field(repr=False)
+    handle: str = field(repr=False)
+    scope: UnlockScope
+    authorized: Callable[[], bool] = field(repr=False, compare=False)
+
+    def require(self, *, host: str, actor: str) -> str:
+        if (host != self.scope.host or actor != self.scope.actor
+                or self.authorized() is not True):
+            raise InvalidCredential("Root unlock scope no longer authorized")
+        return self.registry.require(self.handle, self.scope)
+
+    def valid(self, *, host: str, actor: str) -> bool:
+        try:
+            self.require(host=host, actor=actor)
+        except InvalidCredential:
+            return False
+        return True
+
+
+# Each MCP request gets its own explicit root admission. Background command
+# and batch tasks created during that request inherit this immutable capability.
+# An unrelated request starts with None, including after previous tools finish.
+root_access_context: ContextVar[RootAccess | None] = ContextVar(
+    "ssh_mcp_root_access", default=None,
+)
