@@ -69,6 +69,19 @@ class OperatorRotationTests(unittest.TestCase):
         self.assertEqual(candidate.with_name(candidate.name + ".plan").stat().st_mode & 0o777, 0o600)
         return candidate
 
+    def test_prepared_and_activated_credentials_are_pretty_printed(self):
+        candidate = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        staged_text = candidate.read_text()
+        metadata, sealed = cli._prepared(self.source, candidate)
+        self.assertEqual(staged_text, json.dumps(sealed, sort_keys=True, indent=2) + "\n")
+        self.assertGreater(len(staged_text.splitlines()), 8)
+        self.assertEqual(json.loads(staged_text), sealed)
+        self.assertEqual(cli.activate(source=self.source, staged=candidate, stopped=True,
+                                      recovery=True, consumers=True, migration_ready=False),
+                         metadata["stage_sha256"])
+        self.assertEqual(self.source.read_text(), staged_text)
+        self.assertEqual(cli._source(self.source)[0], sealed)
+
     def test_read_only_plan_does_not_make_lock(self):
         before = self.source.read_bytes()
         report = cli.plan(**self.params("sudo", "demo-node-a"))
