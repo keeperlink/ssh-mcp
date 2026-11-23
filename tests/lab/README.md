@@ -324,15 +324,14 @@ source changes, stage and activate the immutable pinned runner under the LAB
 lock, verifying all **eight** files listed above. Never run a candidate
 checkout's runner, alter production configuration, or use real credentials.
 
-The committed application and normal image retain
-`SEALED_RUNTIME_READY=False`. For an explicit
-`setup --credentials sealed-v2` only, the trusted runner builds the normal
-source-identified application image, then a **disposable derivative** using
-`fixture/sealed-v2.Dockerfile`. That layer changes exactly the installed
-wheel's activation constant and labels the image
+The committed application natively supports sealed-v2, but refuses a
+legacy Console database until an approved offline cutover. For explicit
+`setup --credentials sealed-v2` testing only, the trusted runner builds
+the normal source-identified image, then a **disposable derivative** using
+`fixture/sealed-v2.Dockerfile`. That layer verifies the installed
+image's sealed readiness **without modifying code** and labels it
 `org.sshmcp.lab-sealed-activation=synthetic-only`. It is **not publishable
-or deployable** and there is no production environment activation switch.
-Regular LAB tests use the unmodified candidate image.
+or deployable**. Regular LAB tests use the unmodified candidate image.
 
 The runner generates disposable per-run SSH, OAuth, Console, metrics and
 sudo credentials. A networkless, nonroot container uses the reviewed

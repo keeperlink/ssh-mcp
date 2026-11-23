@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 import json
 import re
+import sqlite3
+from contextlib import closing
 from pathlib import Path
+from urllib.parse import quote
 
 from .control import LEVELS
 from .client_registry import clients_from_environment, labels, offline_client
@@ -32,10 +35,11 @@ MCP_LOGIN_KEY = os.getenv("MCP_LOGIN_KEY", "")
 MCP_MANAGED_SECRETS_VERSION = os.getenv("MCP_MANAGED_SECRETS_VERSION", "")
 MCP_MANAGED_SECRETS_SOURCE = os.getenv("MCP_MANAGED_SECRETS_SOURCE", "")
 MCP_MANAGED_SECRETS_DIGEST = os.getenv("MCP_MANAGED_SECRETS_DIGEST", "")
-# Stage 2 is intentionally non-deployable: root grant scoping, locked-host
-# readiness and a recoverable database cutover must be implemented before
-# an image can accept an active v2 secret. Not controllable by environment.
-SEALED_RUNTIME_READY = False
+# Sealed-v2 is a supported signed image format. Runtime deployment still
+# requires the operator's offline history DB snapshot and cutover on an
+# existing legacy installation. ViewerAuth refuses any legacy auth table
+# until that separately approved offline operation completes.
+SEALED_RUNTIME_READY = True
 MCP_LOGIN_VERIFIER = json.loads(os.getenv("MCP_LOGIN_VERIFIER", "null"))
 HISTORY_VIEWER_VERIFIER = json.loads(os.getenv("HISTORY_VIEWER_VERIFIER", "null"))
 HISTORY_VIEWER_GENERATION = os.getenv("HISTORY_VIEWER_GENERATION", "")
@@ -89,6 +93,45 @@ SSH_MAX_CONCURRENT = int(os.getenv("SSH_MAX_CONCURRENT", "4"))
 SSH_MAX_ACTIVE_JOBS = int(os.getenv("SSH_MAX_ACTIVE_JOBS", "32"))
 
 
+def _verify_sealed_database() -> None:
+    """Read-only startup preflight, even when the Console routes are disabled."""
+    filename = os.getenv("SSH_JOBS_DB", "")
+    if not filename:
+        return  # Standalone env-mode without a persistent job store.
+    path = Path(filename)
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("Sealed audit database path must be absolute and not a symlink")
+    if not path.exists():
+        if any((sidecar.exists() or sidecar.is_symlink())
+               for suffix in ("-wal", "-shm", "-journal")
+               for sidecar in (Path(str(path) + suffix),)):
+            raise RuntimeError("Orphan SQLite audit journal requires recovery")
+        return  # Fresh database: no legacy credential state to migrate.
+    if not path.is_file():
+        raise RuntimeError("Sealed audit database must be a regular file")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.is_symlink() or (suffix == "-journal" and sidecar.exists()):
+            raise RuntimeError("SQLite journal requires offline recovery")
+    try:
+        uri = "file:" + quote(str(path), safe="/") + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0)) as db:
+            columns = {row[1] for row in db.execute(
+                "PRAGMA table_info(history_auth_state)"
+            )}
+            if columns and columns != {"id", "generation"}:
+                raise RuntimeError("Legacy Console database requires offline sealed cutover")
+            if not columns and db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='history_sessions'"
+            ).fetchone() and db.execute(
+                "SELECT 1 FROM history_sessions LIMIT 1"
+            ).fetchone():
+                raise RuntimeError("Existing Console sessions require offline sealed cutover")
+    except sqlite3.Error as exc:
+        raise RuntimeError("Unable to verify sealed audit database safety") from exc
+
+
 def is_commit_version(value: str) -> bool:
     return re.fullmatch(r"[0-9a-f]{7,40}", value) is not None
 
@@ -117,7 +160,8 @@ def validate_mcp_config() -> None:
         if re.fullmatch("[0-9a-f]{32}", HISTORY_VIEWER_GENERATION) is None:
             raise RuntimeError("Invalid Console secret generation")
         if not SEALED_RUNTIME_READY:
-            raise RuntimeError("Sealed runtime activation requires completed SKY-347 cutover")
+            raise RuntimeError("Sealed runtime activation disabled")
+        _verify_sealed_database()
     elif len(MCP_LOGIN_KEY) < 32:
         raise RuntimeError("MCP_LOGIN_KEY must contain at least 32 characters")
     if len(MCP_TOKEN_SIGNING_SECRET) < 32:

@@ -682,16 +682,19 @@ class ViewerAuth:
                 generation TEXT NOT NULL
             )""")
             if verifier is not None:
-                # No secondary PBKDF2 verifier in the durable audit store.
-                # This migration is gated at service startup until the
-                # explicitly approved DB backup, cutover and recovery plan.
-                # Secure deletion covers freed SQLite pages, not historical
-                # backups or journal/WAL data; those require offline cleanup.
-                db.execute("PRAGMA secure_delete=ON")
+                # Never erase the v1 PBKDF2 verifier or existing sessions
+                # merely because a sealed image was started. An explicitly
+                # stopped-service, backup-verified operator cutover must
+                # replace the legacy table first. Fresh DBs can start v2.
                 columns = {row[1] for row in db.execute("PRAGMA table_info(history_auth_state)")}
                 if columns and columns != {"id", "generation"}:
-                    db.execute("DROP TABLE history_auth_state")
-                    db.execute("DELETE FROM history_sessions")
+                    raise RuntimeError(
+                        "Legacy Console database requires offline sealed cutover"
+                    )
+                if not columns and db.execute(
+                    "SELECT 1 FROM history_sessions LIMIT 1"
+                ).fetchone():
+                    raise RuntimeError("Existing Console sessions require offline sealed cutover")
                 db.execute("""CREATE TABLE IF NOT EXISTS history_auth_state (
                     id INTEGER PRIMARY KEY CHECK(id=1),
                     generation TEXT NOT NULL

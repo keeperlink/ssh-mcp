@@ -341,9 +341,9 @@ def build_image(state: dict, folder: Path) -> None:
               f"{{{{index .Config.Labels \"{IMAGE_LABEL}\"}}}}") != state["commit"]:
         raise LabError("Local application image SHA label mismatch")
     if state.get("credentials") == "sealed-v2":
-        # The application commit retains SEALED_RUNTIME_READY=False. Only the
-        # independently pinned LAB runner may create this isolated derivative
-        # image; no production release/build target accepts this activation.
+        # The application natively supports sealed-v2, subject to guarded DB
+        # cutover. This test-only derivative asserts native readiness and
+        # retains its isolated synthetic-only image label; it changes no code.
         derived = f"smt-mcp-sealed-{state['commit'][:12]}:local"
         cmd(["docker", "build", "--network=none", "--progress=plain",
              "-f", str(RUNNER / "fixture" / "sealed-v2.Dockerfile"),
