@@ -255,7 +255,7 @@ def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
         validate_v2_secrets(changed)
         if _source(source)[1] != original:
             raise RotationError("Active revision changed during preparation")
-        raw = (json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        raw = (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode()
         if len(raw) > 65536:
             raise RotationError("Prepared sealed revision exceeds size bound")
         name = _STAGE_PREFIX + secrets.token_hex(12) + ".json"
