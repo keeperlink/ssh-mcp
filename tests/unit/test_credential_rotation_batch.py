@@ -1,4 +1,4 @@
-"""Synthetic, offline checks for SKY-360 batch sealed credential tooling."""
+"""Synthetic, offline checks for batch batch sealed credential tooling."""
 from __future__ import annotations
 
 import hashlib

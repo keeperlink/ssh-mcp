@@ -120,9 +120,8 @@ The current release associates each audit record with the verified OAuth
 CIMD labels come from the signed `clients` registry; DCR labels come from
 operator-approved registration names. Neither provides authorization.
 
-All SKY-344 historical audit-actor corrections on the managed test and
-production installations have been completed and independently verified.
-The old one-time migrator is no longer distributed or invoked at startup.
+The one-time historical audit-actor migrator is no longer distributed
+or invoked at startup. It is not part of current installation.
 
 For a new installation, initialize a fresh SQLite volume with the current
 application. If retaining a database from before client-scoped actors, do

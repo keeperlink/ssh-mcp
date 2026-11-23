@@ -264,14 +264,14 @@ This performs setup, the standard OAuth/MCP/SSH smoke checks, and
 ordinary cleanup (including on test failure). It does not verify
 public HTTPS, browser UI behavior or production SSH authorization.
 
-## Two-host transfer-file acceptance (SKY-358)
+## Two-host transfer-file acceptance
 
 The default fixture remains **single host**. To validate the merged
 `transfer_file` feature, use a separately reviewed, merged and immutable
 lab-runner revision supporting `setup --dual-host`:
 
 ~~~sh
-ssh-mcp-test setup --story SKY-355 --commit FULL_REVIEWED_COMMIT --dual-host
+ssh-mcp-test setup --story TEST-355 --commit FULL_REVIEWED_COMMIT --dual-host
 ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/transfer_file_acceptance.py
 ssh-mcp-test results --run RUN_ID
 ssh-mcp-test cleanup --run RUN_ID
@@ -291,7 +291,7 @@ are separately generated for each fixture, never passed in argv, environment,
 logs or source control:
 
 ~~~sh
-ssh-mcp-test setup --story SKY-355 --commit FULL_REVIEWED_COMMIT --dual-host --privileged-access always-granted
+ssh-mcp-test setup --story TEST-355 --commit FULL_REVIEWED_COMMIT --dual-host --privileged-access always-granted
 ssh-mcp-test exec --run RUN_ID -- python3 /source/tests/integration/transfer_file_acceptance.py --privileged
 ssh-mcp-test results --run RUN_ID
 ssh-mcp-test cleanup --run RUN_ID
@@ -302,9 +302,9 @@ integration tests as separately authorized. The transfer script's privileged
 mode uses **disposable legacy** sudo credentials, not a bypass of v2 unlocks.
 
 **Prerequisite:** Verify the actual LAB sudoers grants the exact
-`SKY-355` run-validated generated-secret cleanup path before setup, along
+`TEST-355` run-validated generated-secret cleanup path before setup, along
 with immutable runner pins, source origin/push guard, Docker isolation and
-the listener positive control. **Never reuse SKY-347's cleanup grant or
+the listener positive control. **Never reuse TEST-347's cleanup grant or
 start a run that cannot safely remove generated secrets.** Host-policy changes
 and runner-pin activation need separate operator authorization.
 
@@ -361,7 +361,7 @@ secret is kept in a read-only private file, not printed in arguments,
 inventory, logs or environment. Direct root login and SSH password
 authentication remain disabled. Default privileged access is `none`.
 
-## Sealed-v2 disposable LAB activation (SKY-347)
+## Sealed-v2 disposable LAB activation (TEST-347)
 
 Only after independent review, separate approval and merge of the paired
 source changes, stage and activate the immutable pinned runner under the LAB
@@ -387,7 +387,7 @@ separate sudo-password file. Neither plaintext file is mounted into the
 service. Every generated file is private, run-owned and removed at cleanup.
 
 ```sh
-ssh-mcp-test setup --story SKY-347 --commit FULL_REVIEWED_MERGED_SHA \
+ssh-mcp-test setup --story TEST-347 --commit FULL_REVIEWED_MERGED_SHA \
   --credentials sealed-v2 --access restricted --privileged-access restricted
 ssh-mcp-test exec --run RUN_ID -- \
   python3 /source/tests/integration/sealed_v2_acceptance.py

@@ -1,4 +1,4 @@
-"""Process-memory-only, issuance-scoped sudo credentials (SKY-347).
+"""Process-memory-only, issuance-scoped sudo credentials (sealed-v2).
 
 This module does not authorize an MCP request on its own. The caller must
 independently validate the live OAuth principal, grant issuance, readiness

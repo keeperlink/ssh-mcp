@@ -1,5 +1,8 @@
 """Public hosted CI and Docker Hub release-publisher safety contracts."""
 import re
+import runpy
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,6 +74,28 @@ class DockerHubPublishingContracts(unittest.TestCase):
         self.assertIn('"--min", "95"', validator)
         self.assertIn("assert tests import only the installed wheel and CLI", validator)
 
+
+    def test_public_guard_rejects_private_markers_and_accepts_synthetic(self):
+        guard_path = ROOT / "scripts/check_public_source.py"
+        if not guard_path.is_file():
+            self.skipTest("Source-only public CI guard is absent in installed-wheel fixtures")
+        scanner = runpy.run_path(str(guard_path))
+        check = scanner["check_no_internal_references"]
+        with tempfile.TemporaryDirectory(prefix="ssh-mcp-public-guard-") as temp:
+            root = Path(temp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            file = root / "README.md"
+            file.write_text("TEST-347 fixture at 192.168.10.5\\n")
+            subprocess.run(
+                ["git", "-C", str(root), "add", "README.md"], check=True
+            )
+            check.__globals__["ROOT"] = root
+            check()
+            for name in ("SK" + "Y-347", "sky" + "map4", "wikisky" + "-org"):
+                with self.subTest(marker=name):
+                    file.write_text("Synthetic example: " + name + "\\n")
+                    with self.assertRaises(RuntimeError):
+                        check()
 
     def test_getting_started_runs_published_image_without_source_build(self):
         guide = (ROOT / "docs/getting-started.md").read_text()

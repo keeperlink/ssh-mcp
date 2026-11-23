@@ -1,4 +1,4 @@
-"""Regressions for the six independent SKY-355 security and reliability findings."""
+"""Regressions for the six independent file-relay security and reliability findings."""
 from __future__ import annotations
 
 import ast

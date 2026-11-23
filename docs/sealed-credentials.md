@@ -1,22 +1,21 @@
-# Sealed managed credential format (SKY-347)
+# Sealed managed credential format
 
 For the separately reviewed operator-only offline preparation and guarded
 activation procedure, see [operator sealed rotation](operator-sealed-rotation.md).
 
-The v2 verifier, privileged approval and in-memory unlock support are
-implemented. The application image can accept sealed v2 input only after a
-separately approved offline history database snapshot and cutover for a
-legacy service. A merge is **not** a deployment or signing authorization.
-Read [the sealed database cutover procedure](sealed-db-cutover.md) before
-preparing a signed image or attempting any live upgrade.
+Sealed v2 is the supported managed credential format: independent one-way
+OAuth, Console and metrics verifiers, plus per-host encrypted sudo credentials
+unlocked by the approved operator. Fresh databases initialize v2 directly.
+A genuinely unmigrated legacy-v1 database requires separately authorized
+offline conversion, not repeated migration of an already healthy v2 system.
+A source merge is not authorization to sign or deploy.
+See [SQLite state and recovery](sealed-db-cutover.md).
 
 The signed managed reader accepts a v2 secret revision and passes only
 one-way verifiers and a Console session-generation marker to authentication
 and metrics code. It never exports the original OAuth, Console or metrics
-credential in process environment variables. The Console's durable session
-state replaces the old auxiliary PBKDF2 verifier with a generation-only row
-only at an explicitly approved v2 cutover; new generations invalidate
-previous cookies. Password checks run in two dedicated, admission-controlled
+credential in process environment variables. The Console's durable session state uses a generation-only row;
+new generations invalidate old cookies. Password checks run in two dedicated, admission-controlled
 workers, outside Starlette's shared pool. OAuth per-IP throttling counts
 in-flight verification alongside recent failures.
 
@@ -27,7 +26,7 @@ first take and verify an owner-only recovery snapshot and convert only the
 authentication table transactionally. Fresh databases can initialize v2
 directly. There is no environment variable that bypasses this check.
 
-### Stage 3A: in-memory grant handles and sealed readiness
+### In-memory grant handles and sealed readiness
 
 `app.grant_unlocks.GrantUnlocks` adds a bounded, process-memory-only
 credential registry. Each high-entropy opaque handle is bound to the exact
@@ -79,13 +78,13 @@ the same status vocabulary without labeling recently reachable hosts Offline
 or raising stale-SSH warnings merely because safety confirmation is missing.
 The external active/offline/retired eligibility contract is unchanged.
 
-### Stage 3B: interactive root approval and command handoff
+### Interactive root approval and command handoff
 
-Stage 3B wires these handles to the existing privileged approval flow.
+Memory-only grant handles integrate with the existing privileged approval flow.
 The root-only modal prompts for the Operator Console password on **each new
 root-grant interval**, including the signed
 `privileged_access: always-granted` policy. Ordinary SSH grants retain
-their previous behavior without a password prompt; v1 remains unchanged.
+their previous behavior without a password prompt. Legacy-v1 auth requires separate migration.
 Incorrect passwords leave the request and selected duration pending and
 show **Incorrect Console password.**. The prompt shares the Console login
 per-IP five-failure/five-minute throttle and displays **Too many incorrect
@@ -123,40 +122,19 @@ the originating MCP tool request releases the credential before returning.
 Timed root grants continue to expire/revoke only by their approved scope.
 The Console clears its root-password input on every submission and error.
 
-**Independent rollout approval remains mandatory:** signed release/image
-publication, database backup and cutover, credential rotation and host
-deployments are separate operations. Actual sudo implementations must
-independently pass LAB
-conclusive safety and fresh root-proof tests. DB recovery/cutover, offline
-rekey and mandatory rotation of old plaintext credentials remain separate
-gates before declaring SKY-347 complete.
+**Independent approval remains mandatory** for signing, live credential
+changes, host deployment, and database recovery. Confirm safe locked-state
+readiness and fresh root-proof against the installed sudo implementation.
 
-### Stage 3C: disposable LAB-only sealed activation fixture
+### Disposable synthetic sealed-v2 acceptance
 
-The separately installed, immutable `tests/lab/runner.py` can prepare
-`--credentials sealed-v2` with only synthetic SSH identities and host
-aliases. The normal application image natively supports v2, but startup
-**refuses legacy Console state** until the explicit backup and offline
-database cutover is completed. The runner builds a clearly labeled,
-nonpublishable disposable **derivative** that verifies native sealed
-activation without altering the installed wheel. Generated OAuth/Console
-passwords and metrics bearer values reach the synthetic test client only,
-while the sudo fixture password reaches only the SSH test host. The
-sealed service reads verifiers and a per-host AES-GCM envelope in its
-protected source file. All artifacts require owner-checked LAB cleanup.
-
-Stage/activate the new **eight-file** runner only after paired merges
-and separate LAB approval. `tests/integration/sealed_v2_acceptance.py`
-covers live synthetic OAuth, Console, metrics, Locked host discovery,
-sudo unlocks and revocation. This is LAB-only evidence, not approval for
-Jenkins credential changes, signing, deployment, remote password
-rotation or production sealed-mode cutover and rollback.
-
-**Temporary compatibility boundary:** the old managed v1 schema remains
-accepted solely to preserve existing offline fixtures and current deployed
-behavior during staged development. The final sealed cutover must reject v1
-without fallback; root operation while v2 is sealed cannot be accepted until
-the separately reviewed unlock/readiness implementation lands.
+The separately authorized immutable lab runner provides disposable synthetic
+OAuth, Console, SSH, metrics and sudo credentials. Its isolated acceptance
+tests cover authentication, locked-host discovery, scoped grants and
+revocation. Remove generated credentials and containers with run-owned
+cleanup. Test derivative images must never be published to production.
+This is a reusable test fixture, not an unfinished implementation phase
+or a requirement to repeat initial production conversion.
 
 ## Console bounds and database recovery
 
@@ -168,30 +146,18 @@ the separately reviewed unlock/readiness implementation lands.
   `maxlength=256` and 8192-byte request cap, even for supplementary Unicode.
   The independent OAuth password and metrics token retain their existing
   8192-character legacy bounds.
-- A v2-ready image **cannot automatically migrate** an existing v1
-  database. Before approved activation, stop all database writers and
-  perform the explicit `ops.history_db cutover` operation, which creates
-  and verifies a protected *pre-cutover* SQLite snapshot before it changes
-  the schema. Verify restore in a separately stopped recovery instance with
-  the corresponding signed image and matching credential revision.
-  See [sealed database cutover](sealed-db-cutover.md).
-- During the approved stopped-service cutover, enable
-  `PRAGMA secure_delete=ON` before dropping the legacy verifier table,
-  checkpoint/truncate the WAL, run `VACUUM`, then checkpoint again
-  **while the service remains stopped**. Verify active SQLite pages,
-  WAL/SHM files and newly created snapshots no longer contain the
-  retired auxiliary PBKDF2 verifier. Dropping a table alone does not
-  guarantee historical data retirement; separately account for old
-  backups and WAL files under the approved retention/rotation plan.
-- Rollback to a v1 image is permitted **only before any old credentials
-  have been rotated**, with the *verified pre-cutover* snapshot and
-  matching, still-valid legacy credentials. Use guarded `ops.history_db restore`
-  only with the service stopped, with WAL/SHM reconciled; restore
-  revokes persisted OAuth sessions **and all restored Console sessions**,
-  so an older cookie never becomes valid again. After any actual credential
-  rotation, rollback requires a **sealed-compatible** signed image and
-  its matching protected secret revision. Never reintroduce plaintext as
-  a silent fallback.
+- Existing v2 deployments preserve their current SQLite database; do not
+  repeat historical v1 conversion. A genuinely unmigrated v1 database
+  needs a separately approved, stopped-writer conversion with protected
+  snapshots, session revocation, WAL checkpoint/VACUUM cleanup, and
+  independently verified recovery. See
+  [SQLite state and recovery](sealed-db-cutover.md).
+- Post-rotation recovery requires a signed **sealed-v2-compatible** image,
+  the matching current protected credential revision and compatible audit
+  database. Never restore legacy plaintext credentials, retired host
+  passwords or a legacy-v1 image. Offline database restore requires stopped
+  writers, journal reconciliation, and subsequent authentication and
+  audit-continuity validation.
 
 ## Threat boundary
 
@@ -236,6 +202,7 @@ one step. `rotate_host_sudo` returns a copy with one host's new sealed
 password. Neither function changes a remote host password, authorizes a
 deployment or writes to a live secret mount.
 
-Follow the SKY-347 operator procedure for interactive provisioning, complete
-credential rotation, prior-secret retirement, recovery and sealed-compatible
-rollback. Those steps require separately approved LAB and production work.
+Follow [operator sealed rotation](operator-sealed-rotation.md) for future
+credential changes and [SQLite state and recovery](sealed-db-cutover.md)
+for stopped-service restore. Retire obsolete stages and snapshots under
+separate approval; deployment remains a distinct action.
