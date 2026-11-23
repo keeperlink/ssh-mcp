@@ -633,7 +633,8 @@ class SSHExecutor:
     def __init__(self, hosts: dict[str, HostSpec], *, enabled: bool,
                  output_bytes: int = config.SSH_OUTPUT_LIMIT_BYTES,
                  sudo_passwords: dict[str, Any] | None = None,
-                 readiness_settings: ReadinessSettings | None = None):
+                 readiness_settings: ReadinessSettings | None = None,
+                 sealed_sudo: dict[str, dict[str, str]] | None = None):
         if not 1 <= output_bytes <= 1048576:
             raise ValueError("Output byte cap must be between 1 and 1048576")
         self._hosts = hosts
@@ -645,6 +646,14 @@ class SSHExecutor:
             alias: password for alias, password in (sudo_passwords or {}).items()
             if alias in hosts and _usable_sudo_password(password)
         }
+        # Sealed envelopes are not decrypted on startup or by background
+        # readiness. A later explicitly approved grant issuance provides the
+        # Console password needed to unlock one host in process memory.
+        if set(sealed_sudo or {}) - set(hosts):
+            raise ValueError("Unknown sealed sudo host alias")
+        if set(sealed_sudo or {}) & set(self._sudo_passwords):
+            raise ValueError("Cannot mix sealed and plaintext sudo for a host")
+        self._sealed_sudo = dict(sealed_sudo or {})
         self._semaphores = {name: asyncio.Semaphore(host.max_parallel) for name, host in hosts.items()}
         self._global = asyncio.Semaphore(config.SSH_MAX_CONCURRENT)
         # Direct construction is the isolated transport-test seam. All service
@@ -652,7 +661,9 @@ class SSHExecutor:
         self.readiness = (
             ReadinessMonitor(readiness_settings, {
                 name: host.privileged_access != "none" for name, host in hosts.items()
-            }, self._readiness_probe) if readiness_settings is not None else None
+            }, self._readiness_probe,
+                sealed_hosts=frozenset(self._sealed_sudo))
+            if readiness_settings is not None else None
         )
 
     @classmethod
@@ -668,16 +679,49 @@ class SSHExecutor:
         # source. Never copy passwords into environment variables or argv.
         from . import runtime_files
         raw: dict[str, Any] = {}
-        if runtime_files.SECRETS.exists():
+        sealed: dict[str, dict[str, str]] = {}
+        secret_source = (
+            Path(config.MCP_MANAGED_SECRETS_SOURCE)
+            if config.MCP_MANAGED_SECRETS_VERSION == "2" and
+            config.MCP_MANAGED_SECRETS_SOURCE else runtime_files.SECRETS
+        )
+        if config.MCP_MANAGED_SECRETS_VERSION == "2" and (
+            not config.MCP_MANAGED_SECRETS_SOURCE
+            or not re.fullmatch("[0-9a-f]{64}", config.MCP_MANAGED_SECRETS_DIGEST)
+        ):
+            raise SSHDenied("Protected sealed secret revision is unavailable")
+        if secret_source.exists():
             try:
-                stored = runtime_files._json(runtime_files.SECRETS, 65536)
-                value = stored.get("sudo_passwords", {})
-                if type(value) is not dict:
-                    raise ValueError("Invalid credential mapping")
-                raw = value
+                stored = runtime_files._json(
+                    secret_source, 65536, reject_duplicates=True,
+                )
+                if config.MCP_MANAGED_SECRETS_VERSION == "2":
+                    from .sealed_credentials import validate_v2_secrets
+                    validate_v2_secrets(stored)
+                    if not secrets.compare_digest(
+                        runtime_files.managed_secrets_fingerprint(stored),
+                        config.MCP_MANAGED_SECRETS_DIGEST,
+                    ):
+                        raise ValueError("Sealed credential revision mismatch")
+                    # Signed inventory changes can retire a host before its
+                    # sealed entry is deleted. Validate the whole protected
+                    # revision, then retain only currently authorized hosts.
+                    sealed = {
+                        alias: envelope
+                        for alias, envelope in stored["sealed_sudo"].items()
+                        if alias in hosts
+                    }
+                else:
+                    value = stored.get("sudo_passwords", {})
+                    if type(value) is not dict:
+                        raise ValueError("Invalid credential mapping")
+                    raw = value
             except (ValueError, OSError, UnicodeError):
                 raise SSHDenied("Protected sudo secret configuration is invalid") from None
+        elif config.MCP_MANAGED_SECRETS_VERSION == "2":
+            raise SSHDenied("Protected sealed secret file is unavailable")
         return cls(hosts, enabled=True, sudo_passwords=raw,
+                   sealed_sudo=sealed,
                    readiness_settings=ReadinessSettings.from_environment())
 
     @staticmethod
@@ -732,6 +776,8 @@ class SSHExecutor:
         except SSHDenied:
             return ProbeResult(False, "ssh_configuration")
         password_probe = kind in {"sudo", "sudo_challenge"}
+        if password_probe and alias in self._sealed_sudo:
+            return ProbeResult(False, "sudo_locked")
         password = self._sudo_passwords.get(alias) if password_probe else None
         if password_probe and password is None:
             return ProbeResult(False, "sudo_credentials_missing")

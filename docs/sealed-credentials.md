@@ -23,6 +23,67 @@ change the audit database, and this cannot be overridden by environment.
 The later reviewed root-unlock/readiness and explicit database-recovery
 stage must remove this guard before any v2 production activation.
 
+### Stage 3A: in-memory grant handles and sealed readiness
+
+`app.grant_unlocks.GrantUnlocks` adds a bounded, process-memory-only
+credential registry. Each high-entropy opaque handle is bound to the exact
+operator actor, up-to-2048-character verified OAuth client ID, existing
+three-field agent-or-conversation approval key (including empty conversation
+for request-only grants), signed host alias, root issuance and secret
+generation. Request-only grants additionally bind one operation; timed grants
+can be reused by later authorized operations under the same grant issuance.
+All handles have a monotonic maximum 16-hour deadline, with event-loop
+timers that release idle expired credentials without another request.
+Callers must recheck the handle at capacity admission and immediately before
+sudo password submission.
+The password verifier and host-envelope decryption happen in the isolated
+worker via `prepare()`, producing only an uncommitted memory object.
+`commit()` runs on the service event loop, atomically rechecks a mandatory
+live authority callback (pending approval, session, actor, grant generation,
+host readiness), expiry, capacity and the registry revocation epoch before
+publishing a handle. Revoked/logged-out/cancelled work cannot publish late
+plaintext after password verification finishes.
+Revocation and operator logout clear the affected handles; credential
+rotation and service shutdown clear all handles. Immutable Python strings
+cannot be guaranteed to be zeroized after use. There are **no persistent
+unlock handles, derived keys or sudo passwords**.
+
+The signed bootstrap binds the complete validated v2 secret revision to a
+source path and SHA-256 fingerprint. The SSH executor reads that same
+protected source and rejects a missing, replaced or independently valid
+but different secret revision instead of combining unrelated verifier and
+sudo-envelope material. After full revision validation, sealed entries for
+host aliases retired from the signed inventory are ignored; the in-memory
+executor only retains envelopes for current authorized hosts. OAuth and
+Console passwords, the metrics bearer token, and host sudo passwords are
+not exported into environment variables. The
+recoverable JWT signing key remains supplied as `MCP_TOKEN_SIGNING_SECRET`.
+Its 30-second readiness monitor performs only pinned-identity
+SSH and noninteractive passwordless-root safety checks while sealed.
+Conclusive safe refusal displays **Locked**, not Offline/Degraded; ambiguous
+evidence displays **Safety unconfirmed** and distinct recent SSH reachability,
+blocks all SSH command admission
+and cannot make operator recheck succeed until conclusive safety proof; confirmed
+unsafe passwordless-root remains latched until conclusive safe evidence.
+Transient safety transport/timeout failures do not erase a previously
+conclusive safe result: ordinary SSH remains eligible until the existing
+readiness stale deadline, with the actual failure reason and warning shown.
+The failed live probe and explicit recheck still report failure. Confirmed
+unsafe or ambiguous safety evidence remains immediately fail-closed.
+Operator rechecks also remain password-free while locked. The Console uses
+the same status vocabulary without labeling recently reachable hosts Offline
+or raising stale-SSH warnings merely because safety confirmation is missing.
+The external active/offline/retired eligibility contract is unchanged.
+
+**Stage 3A does not yet wire** these handles to the privileged approval
+password field, the shared Console-login throttle, fresh live sudo proof,
+root grant issuance/revocation, or command/queued-job/batch password
+submission. Its locked root entrypoint remains intentionally denied;
+`SEALED_RUNTIME_READY=False` is unchanged. Do not treat this preparatory
+stage as authorization to activate or deploy v2. The next stage must
+integrate these boundaries and validate the actual deployed sudo
+implementations in an independently approved LAB environment.
+
 **Temporary compatibility boundary:** the old managed v1 schema remains
 accepted solely to preserve existing offline fixtures and current deployed
 behavior during staged development. The final sealed cutover must reject v1

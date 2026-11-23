@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.runtime_files import prepare
+from app.runtime_files import prepare, managed_secrets_fingerprint
 from app.sealed_credentials import from_legacy
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +40,9 @@ class SignedConfigurationTests(unittest.TestCase):
         self.write(self.secrets, converted, 0o600)
         env = self.prepare()
         self.assertEqual(env["MCP_MANAGED_SECRETS_VERSION"], "2")
+        self.assertEqual(env["MCP_MANAGED_SECRETS_SOURCE"], str(self.secrets.absolute()))
+        self.assertEqual(env["MCP_MANAGED_SECRETS_DIGEST"],
+                         managed_secrets_fingerprint(converted))
         self.assertEqual(env["HISTORY_VIEWER_GENERATION"], converted["viewer_generation"])
         self.assertEqual(json.loads(env["MCP_LOGIN_VERIFIER"]), converted["oauth_login_verifier"])
         self.assertEqual(json.loads(env["HISTORY_VIEWER_VERIFIER"]), converted["viewer_verifier"])
@@ -107,6 +110,9 @@ class SignedConfigurationTests(unittest.TestCase):
         with (patch.multiple(
             config,
             MCP_MANAGED_SECRETS_VERSION="2", MCP_LOGIN_KEY="",
+            MCP_TOKEN_SIGNING_SECRET=original["oauth_signing_key"],
+            MCP_ISSUER=self.settings["oauth"]["issuer"],
+            MCP_RESOURCE=self.settings["oauth"]["issuer"] + "/mcp",
             MCP_LOGIN_VERIFIER=converted["oauth_login_verifier"],
             HISTORY_VIEWER_VERIFIER=converted["viewer_verifier"],
             HISTORY_VIEWER_GENERATION=converted["viewer_generation"],

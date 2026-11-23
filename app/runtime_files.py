@@ -7,6 +7,7 @@ normalized inventory are written to service-owned tmpfs.
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,14 @@ def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("Duplicate member in managed JSON")
         result[key] = value
     return result
+
+
+def managed_secrets_fingerprint(secrets: dict[str, Any]) -> str:
+    """Fingerprint the validated complete revision without exporting secrets."""
+    canonical = json.dumps(
+        secrets, sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _json(path: Path, limit: int, *, reject_duplicates: bool = False) -> dict[str, Any]:
@@ -233,6 +242,8 @@ def prepare(config_source: Path = CONFIG, secrets_source: Path = SECRETS,
         validate_v2_secrets(secrets)
         auth_env = {
             "MCP_MANAGED_SECRETS_VERSION": "2",
+            "MCP_MANAGED_SECRETS_SOURCE": str(secrets_source.absolute()),
+            "MCP_MANAGED_SECRETS_DIGEST": managed_secrets_fingerprint(secrets),
             "MCP_LOGIN_VERIFIER": json.dumps(secrets["oauth_login_verifier"], sort_keys=True),
             "HISTORY_VIEWER_VERIFIER": json.dumps(secrets["viewer_verifier"], sort_keys=True),
             "HISTORY_VIEWER_GENERATION": secrets["viewer_generation"],
