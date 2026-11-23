@@ -25,6 +25,7 @@ MYPY_FILES = (
     "app/file_audit.py", "app/file_helper.py", "app/file_transport.py",
     "app/file_ops.py", "app/host_relay.py", "app/relay_scripts.py",
     "ops/history_db.py", "ssh_mcp_secrets/cli.py",
+    "ssh_mcp_secrets/batch.py", "ssh_mcp_secrets/apply.py",
     "scripts/check_coverage.py",
     "scripts/sync_requirements_dev.py", "tests/tools/validate.py",
     "tests/tools/run_unit_tests.py", "tests/tools/_offline_env.py",
@@ -152,7 +153,8 @@ def installed_wheel(temp: Path, env: dict[str, str]) -> None:
          "assert path.is_relative_to(venv),(path,venv);"
          "assert (venv/'bin'/'oauth-sessions').is_file();"
          "assert (venv/'bin'/'ssh-mcp-ctl').is_file();"
-         "assert (venv/'bin'/'ssh-mcp-secrets').is_file()"],
+         "assert (venv/'bin'/'ssh-mcp-secrets').is_file();"
+         "assert (venv/'bin'/'ssh-mcp-secrets-apply').is_file()"],
         cwd=validation, env=isolated_env)
     coverage_checks(validation, isolated_env, "installed-wheel", isolated_python)
 

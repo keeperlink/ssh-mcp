@@ -12,6 +12,98 @@ inventory, deployment environment and OAuth issuer must have been checked
 independently against the approved deployed configuration. The utility reads
 the inventory but **does not validate its digital signature**.
 
+## SKY-360 one-session batch rotation (optional)
+
+The reviewed `ssh-mcp-secrets batch-handoff` command combines private
+preparation and a guarded **production Jenkins secretFile** handoff. Run
+only in an operator-controlled root terminal, never through SSH-MCP,
+a Jenkins pipeline, a logged remote command or CI. The existing service
+keeps using its currently loaded credentials until explicitly redeployed.
+
+The operator prepares a **nonsecret** JSON mapping of approved Proxmox
+aliases to VMIDs inside the trusted workdir (use real VMIDs, never infer
+them from the host name):
+
+```json
+{"version": 1, "vmids": {"demo-node-a": 100, "demo-node-b": 200}}
+```
+
+The mapping is required by the batch command; the operator independently
+checks the signed inventory and exact inventory/source SHA-256, and uses a
+protected **0700 workdir** for generated outputs. The default production
+Jenkins secretFile has to be a regular, single-link, root:1000 mode-0640
+file in a root:1000 mode-0750 `deployment` directory; the host must have a
+reviewed installed wheel and the `openssl` executable. Use exactly one
+interactive invocation (set all paths, expected checksums and issuer to
+their independently verified values):
+
+```sh
+ssh-mcp-secrets batch-handoff \
+  --jenkins-file /path/to/jenkins/secrets/deployment/ssh-mcp-secrets \
+  --inventory /path/to/approved/production/inventory.json \
+  --vm-map /private/operator/rotation/vm-map.json \
+  --workdir /private/operator/rotation \
+  --deployment production --issuer https://approved-issuer.example \
+  --expected-source-sha256 EXPECTED_64_HEX_SHA256 \
+  --expected-inventory-sha256 EXPECTED_64_HEX_SHA256 \
+  --jenkins-container APPROVED_CONTROLLER_CONTAINER \
+  --jenkins-container-file /run/jenkins/secrets/deployment/ssh-mcp-secrets
+```
+
+The tool requires a real TTY; it prompts privately once for old/new
+OAuth and old/new Console passwords (both replacements confirmed),
+generates unique high-entropy sudo credentials for **every signed host**,
+and writes a complete encrypted v2 stage plus **independently salted
+SHA-512 crypt verifiers only** for each host and a Proxmox subset.
+It validates file ownership, hashes, source fingerprint and host bindings
+before atomically replacing the production Jenkins file. It verifies the
+new bytes inside the Jenkins controller mount. Output includes only
+file paths, alias counts and SHA-256 fingerprints, never passwords or
+crypt verifiers. Other environment-scoped credentials remain untouched.
+A missing/failed controller readback is **not PASS**; inspect current
+source digest after an uncertain post-commit failure and never rerun
+blindly. The protected staged source and exports remain for reconciliation.
+
+After `BATCH_HANDOFF=COMMITTED`, the operator can start Jenkins
+JCasC/job provisioning while a separately authorized operator uses the
+**production** SSH-MCP opaque `transfer_file` to place each private,
+hash-only file on its intended host with a source/destination root grant
+and exact SHA-256 preconditions. Do **not** place hash values in shell
+argv, ChatGPT text, SSH-MCP audit logs or Git. A source/destination
+file transfer is not permission to apply the password.
+
+On the selected host, use the installed root-only apply entrypoint,
+passing only protected file paths and their exact SHA-256:
+
+```sh
+ssh-mcp-secrets-apply local --file /protected/host-hashes.json \
+  --expected-sha256 VERIFIED_FILE_SHA256 --alias APPROVED_HOST_ALIAS
+
+ssh-mcp-secrets-apply proxmox --file /protected/proxmox-hashes.json \
+  --expected-sha256 VERIFIED_FILE_SHA256 \
+  --controller-host APPROVED_PROXMOX_HOST --expected-count APPROVED_VM_COUNT
+```
+
+Both modes require root. Local mode verifies the actual host identity
+and uses `chpasswd --encrypted` via stdin, not argv. Proxmox mode
+verifies **every** configured VMID/guest name and running guest-agent
+reachability before any writes, then sends only hash-bearing stdin via
+`qm guest exec --pass-stdin` to guest `chpasswd --encrypted`.
+It stops on failure, reporting only host aliases. Guest-agent timeouts
+may mean an operation completed despite no acknowledgment: investigate
+before retrying. Hash-only files are sensitive and must be cleaned up
+after accepted rotations.
+
+For a controller hosting VMs, rotate all guest passwords, verify/clean
+up, then rotate the controller's **own** account last among operations
+performed there. Rotate the administration host's own account **last
+overall**, **before** signed production SSH-MCP deployment. During the
+interim, new passwords on hosts will not work with the old running
+sealed SSH-MCP credential; preserve independent administrative access.
+Only after all host changes and successful Jenkins provisioning should
+the operator approve/redeploy SSH-MCP and verify OAuth, Console and all
+sudo grants. Never perform deployment in the batch helper.
+
 ## Protected inputs and restrictions
 
 The active JSON file and its parent must be owned by the executing operator.
