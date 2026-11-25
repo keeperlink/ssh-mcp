@@ -39,7 +39,7 @@ from .contracts import (
     CancelJobRequest, ExecuteCommandRequest, GetJobOutputRequest,
     GetJobRequest, GetJobStatsRequest, ListJobsRequest, ListServersRequest,
     ReadFileRequest, WriteFileRequest, ApplyPatchRequest,
-    UploadFileRequest, DownloadFileRequest, TransferFileRequest,
+    UploadFileRequest, UploadFileContentRequest, DownloadFileRequest, TransferFileRequest,
     ExecuteCommandsRequest, GetBatchRequest, ListBatchesRequest, CancelBatchRequest,
 )
 from .batch import BatchManager
@@ -239,8 +239,19 @@ FILE_TOOLS = [
         "Upload a native ChatGPT attached binary file to an approved SSH host. "
         "The helper stages bounded binary chunks, verifies SHA-256, and publishes "
         "atomically in create or explicit overwrite mode. Do not retry an uncertain "
-        "transfer automatically. The attachment URL and bytes are never audited.",
+        "transfer automatically. The attachment URL and bytes are never audited. "
+        "Clients without native ChatGPT attachments use upload_file_content.",
         UploadFileRequest, read_only=False,
+    ),
+    _job_tool(
+        "upload_file_content",
+        "Upload a small binary file supplied inline as base64 content_base64 "
+        f"(at most {config.SSH_UPLOAD_CONTENT_MAX_BYTES} decoded bytes) to an "
+        "approved SSH host, for MCP clients without native ChatGPT file attachments. "
+        "Same staged, SHA-256 verified atomic publication as upload_file, in create "
+        "or explicit overwrite mode. Do not retry an uncertain transfer automatically. "
+        "The bytes are never audited.",
+        UploadFileContentRequest, read_only=False,
     ),
     _job_tool(
         "download_file",
@@ -252,8 +263,9 @@ FILE_TOOLS = [
     ),
 ]
 # ChatGPT native uploaded-file parameter is not a generic model-written URL.
-FILE_TOOLS[-2].meta = {
-    **(FILE_TOOLS[-2].meta or {}), "openai/fileParams": ["file"],
+_NATIVE_UPLOAD_TOOL = next(tool for tool in FILE_TOOLS if tool.name == "upload_file")
+_NATIVE_UPLOAD_TOOL.meta = {
+    **(_NATIVE_UPLOAD_TOOL.meta or {}), "openai/fileParams": ["file"],
 }
 FILE_TOOLS.append(_job_tool(
     "transfer_file",
@@ -525,11 +537,13 @@ def create_mcp_server(*, job_registry: dict | None = None,
             except ValidationError:
                 return _error("Invalid SSH request arguments")
         file_request: (ReadFileRequest | WriteFileRequest | ApplyPatchRequest
-                       | UploadFileRequest | DownloadFileRequest | None) = None
+                       | UploadFileRequest | UploadFileContentRequest
+                       | DownloadFileRequest | None) = None
         if params.name in FILE_TOOL_NAMES:
             model = {
                 "read_file": ReadFileRequest, "write_file": WriteFileRequest,
                 "apply_patch": ApplyPatchRequest, "upload_file": UploadFileRequest,
+                "upload_file_content": UploadFileContentRequest,
                 "download_file": DownloadFileRequest,
             }[params.name]
             try:
@@ -609,7 +623,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                         "apply_patch": ("patch_preview"
                                         if isinstance(file_request, ApplyPatchRequest)
                                         and file_request.dry_run else "patch"),
-                        "upload_file": "upload", "download_file": "download",
+                        "upload_file": "upload", "upload_file_content": "upload",
+                        "download_file": "download",
                     }[params.name]
                     audit_id = files.audit.reserve(
                         actor, file_request.server, file_kind,
@@ -783,8 +798,11 @@ def create_mcp_server(*, job_registry: dict | None = None,
             if params.name in FILE_TOOL_NAMES:
                 if files is None:
                     return _error("File operations require durable audit storage")
-                if params.name == "upload_file":
-                    upload_request = UploadFileRequest.model_validate(arguments)
+                if params.name in {"upload_file", "upload_file_content"}:
+                    upload_request: UploadFileRequest | UploadFileContentRequest = (
+                        UploadFileRequest.model_validate(arguments)
+                        if params.name == "upload_file"
+                        else UploadFileContentRequest.model_validate(arguments))
                     data = await files.upload(actor, upload_request,
                                               precreated_id=audit_id)
                     return _result(data, is_error=data["status"] != "succeeded")

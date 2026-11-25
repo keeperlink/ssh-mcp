@@ -93,6 +93,10 @@ SSH_MAX_CONCURRENT = int(os.getenv("SSH_MAX_CONCURRENT", "4"))
 SSH_MAX_ACTIVE_JOBS = int(os.getenv("SSH_MAX_ACTIVE_JOBS", "32"))
 SSH_TRANSFER_MAX_BYTES = int(os.getenv("SSH_TRANSFER_MAX_BYTES", "1073741824"))
 SSH_TRANSFER_CHUNK_BYTES = int(os.getenv("SSH_TRANSFER_CHUNK_BYTES", "262144"))
+# Decoded-byte cap for inline base64 uploads (upload_file_content). The source
+# ceiling is the remote helper's 8 MiB staged binary transfer limit.
+SSH_UPLOAD_CONTENT_MAX_BYTES = int(os.getenv("SSH_UPLOAD_CONTENT_MAX_BYTES", "1048576"))
+UPLOAD_CONTENT_HARD_MAX_BYTES = 8 * 1024 * 1024
 
 
 
@@ -197,5 +201,6 @@ def validate_mcp_config() -> None:
             or not 1 <= SSH_MAX_ACTIVE_JOBS <= 256
             or not 1 <= SSH_TRANSFER_MAX_BYTES <= 4 * 1024**3
             or not 4096 <= SSH_TRANSFER_CHUNK_BYTES <= 4194304
-            or SSH_TRANSFER_CHUNK_BYTES > SSH_TRANSFER_MAX_BYTES):
+            or SSH_TRANSFER_CHUNK_BYTES > SSH_TRANSFER_MAX_BYTES
+            or not 1 <= SSH_UPLOAD_CONTENT_MAX_BYTES <= UPLOAD_CONTENT_HARD_MAX_BYTES):
         raise RuntimeError("Invalid operational limits")

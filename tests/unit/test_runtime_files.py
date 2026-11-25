@@ -269,6 +269,26 @@ class SignedConfigurationTests(unittest.TestCase):
                     _valid_settings(malformed)
         self.assertEqual(list(self.target.iterdir()), [])
 
+    def test_optional_signed_inline_upload_limit(self):
+        from app.runtime_files import _valid_settings
+
+        self.assertEqual(self.prepare()["SSH_UPLOAD_CONTENT_MAX_BYTES"], "1048576")
+        for target in list(self.target.iterdir()):
+            target.unlink()
+        custom = {**self.settings, "upload": {"content_max_bytes": 65536}}
+        _valid_settings(custom)
+        self.write(self.config, custom)
+        self.assertEqual(self.prepare()["SSH_UPLOAD_CONTENT_MAX_BYTES"], "65536")
+        for limits in (
+            None, 17, {}, {"content_max_bytes": True}, {"content_max_bytes": 0},
+            {"content_max_bytes": 8 * 1024 * 1024 + 1},
+            {"content_max_bytes": 1024, "other": 1},
+        ):
+            with self.subTest(limits=limits):
+                malformed = {**self.settings, "upload": limits}
+                with self.assertRaisesRegex(ValueError, "Invalid signed inline upload"):
+                    _valid_settings(malformed)
+
     def test_signed_settings_and_single_secret(self):
         result = self.prepare()
         self.assertEqual(result["MCP_ENVIRONMENT"], "production")

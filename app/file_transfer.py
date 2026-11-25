@@ -1,4 +1,7 @@
-"""Bounded ChatGPT binary ingress orchestrated through audited SSH helper.
+"""Bounded binary ingress orchestrated through audited SSH helper.
+
+Bytes come from a native ChatGPT attachment URL (upload_file) or from small
+inline base64 content (upload_file_content); both share the same transfer.
 
 The per-call transfer has no independent persistent artifact/session service.
 Remote upload staging is owned by the SSH account, published only after a
@@ -11,7 +14,7 @@ import hashlib
 from typing import Any
 
 from .binary_probe import BinaryProbeError, read_binary_file, source_failure_diagnostic
-from .contracts import DownloadFileRequest, UploadFileRequest
+from .contracts import DownloadFileRequest, UploadFileContentRequest, UploadFileRequest
 from .file_ops import FileService
 from .file_helper import MAX_BINARY_CHUNK_BYTES, MAX_BINARY_TRANSFER_BYTES
 from .file_transport import FileTransportError
@@ -37,7 +40,8 @@ def _remote_error(result: dict[str, Any], *, mutation: bool) -> FileTransportErr
 
 
 class BinaryTransferService(FileService):
-    async def upload(self, actor: str, request: UploadFileRequest, *,
+    async def upload(self, actor: str,
+                     request: UploadFileRequest | UploadFileContentRequest, *,
                      precreated_id: str | None = None) -> dict[str, Any]:
         try:
             self.executor.authorized_host(actor, request.server)
@@ -69,10 +73,13 @@ class BinaryTransferService(FileService):
         root = {"path": request.path, "base_dir": request.base_dir}
         outcome: dict[str, Any]
         source_diagnostic: dict[str, str | int] | None = None
+        source_url = (request.file.download_url
+                      if isinstance(request, UploadFileRequest) else "")
         try:
-            content = await read_binary_file(
-                request.file.download_url, max_bytes=MAX_TRANSFER_BYTES,
-            )
+            if isinstance(request, UploadFileRequest):
+                content = await read_binary_file(source_url, max_bytes=MAX_TRANSFER_BYTES)
+            else:
+                content = request.content()
             source_size = len(content)
             source_sha256 = hashlib.sha256(content).hexdigest()
             if (request.source_sha256 is not None
@@ -139,7 +146,7 @@ class BinaryTransferService(FileService):
             )
             return outcome
         except BinaryProbeError as exc:
-            source_diagnostic = source_failure_diagnostic(exc, request.file.download_url)
+            source_diagnostic = source_failure_diagnostic(exc, source_url)
             failure = FileTransportError(
                 "source_unavailable", "ChatGPT file source unavailable or exceeds transfer limit",
             )

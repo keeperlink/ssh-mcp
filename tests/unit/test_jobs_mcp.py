@@ -332,7 +332,8 @@ class JobHTTPTests(unittest.TestCase):
         )
         verbs = (
             "execute_command", "submit_job", "execute_commands", "read_file",
-            "write_file", "apply_patch", "upload_file", "download_file",
+            "write_file", "apply_patch", "upload_file", "upload_file_content",
+            "download_file",
         )
         with patch.object(FakeSSH, "access", "restricted"):
             for name in verbs:
@@ -350,7 +351,7 @@ class JobHTTPTests(unittest.TestCase):
                         })
                     if name in {
                         "read_file", "write_file", "apply_patch",
-                        "upload_file", "download_file",
+                        "upload_file", "upload_file_content", "download_file",
                     }:
                         arguments.update({
                             "reason": "synthetic authorization regression",
@@ -364,6 +365,8 @@ class JobHTTPTests(unittest.TestCase):
                             "*** Add File: synthetic/file.txt\n+fixture\n"
                             "*** End Patch"
                         )
+                    if name == "upload_file_content":
+                        arguments["content_base64"] = "Zml4dHVyZQ=="
                     if name == "upload_file":
                         arguments["file"] = {
                             "file_id": "synthetic-file-ref",
@@ -553,6 +556,7 @@ class JobHTTPTests(unittest.TestCase):
     def test_authenticated_upload_download_tools_and_native_binary_resource(self):
         import base64
         import hashlib
+        from app.contracts import UploadFileContentRequest
         from app.file_transfer import BinaryTransferService
 
         tools = {item["name"]: item for item in self.rpc("tools/list", {})["tools"]}
@@ -560,6 +564,10 @@ class JobHTTPTests(unittest.TestCase):
             self.assertIn(name, tools)
             self.assertFalse(tools[name]["inputSchema"]["additionalProperties"])
         self.assertEqual(tools["upload_file"]["_meta"]["openai/fileParams"], ["file"])
+        self.assertNotIn("openai/fileParams", tools["upload_file_content"]["_meta"])
+        self.assertNotIn("openai/fileParams", tools["download_file"].get("_meta", {}))
+        self.assertFalse(tools["upload_file_content"]["annotations"]["readOnlyHint"])
+        self.assertIn("1048576", tools["upload_file_content"]["description"])
         self.assertFalse(tools["upload_file"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["download_file"]["annotations"]["readOnlyHint"])
         source = b"never-store-in-history-\x00\xff" + bytes(range(128))
@@ -569,9 +577,16 @@ class JobHTTPTests(unittest.TestCase):
             "download_url": "https://probe.example.invalid/download?secret=never-log",
         }
 
+        inline_requests: list[bytes] = []
+
         async def fake_upload(_self, actor, request, *, precreated_id=None):
             self.assertEqual(actor, oauth.client_audit_actor(CLIENT))
             self.assertEqual(request.server, "demo-node-b")
+            self.assertIsNotNone(precreated_id)
+            if isinstance(request, UploadFileContentRequest):
+                inline_requests.append(request.content())
+                return {"status": "succeeded", "operation_id": "synthetic-inline-288",
+                        "result": {"bytes": len(source), "sha256": checksum}}
             self.assertEqual(request.file.file_id, file_reference["file_id"])
             return {"status": "succeeded", "operation_id": "synthetic-upload-237",
                     "result": {"bytes": len(source), "sha256": checksum}}
@@ -600,6 +615,15 @@ class JobHTTPTests(unittest.TestCase):
             blob = downloaded["content"][1]["resource"]
             self.assertEqual(blob["mimeType"], "application/octet-stream")
             self.assertEqual(base64.b64decode(blob["blob"]), source)
+            inline = self.tool("upload_file_content", {
+                **common, "content_base64": base64.b64encode(source).decode()})
+            self.assertFalse(inline.get("isError"), inline)
+            self.assertEqual(inline_requests, [source])
+            self.assertNotIn(base64.b64encode(source).decode(), inline["content"][0]["text"])
+            for invalid in ("not base64!", base64.b64encode(b"x" * 1048577).decode()):
+                rejected = self.tool("upload_file_content", {**common, "content_base64": invalid})
+                self.assertTrue(rejected.get("isError"))
+            self.assertEqual(inline_requests, [source])
             bad = self.tool("upload_file", {**common, "file": file_reference,
                                              "actor": "another-user"})
             self.assertTrue(bad.get("isError"))

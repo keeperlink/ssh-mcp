@@ -36,6 +36,9 @@
     "max_bytes": 1073741824,
     "chunk_bytes": 262144
   },
+  "upload": {
+    "content_max_bytes": 1048576
+  },
   "jobs": {
     "enabled": true,
     "database": "/var/lib/ssh-mcp/jobs.sqlite",

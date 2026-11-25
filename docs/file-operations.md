@@ -139,7 +139,24 @@ chunks no larger than the maximum file size. Transfer execution also obeys
 the existing SSH timeout and host/global concurrency limits. No temporary
 relay files are written inside the SSH-MCP container.
 
-## Native binary upload (current client limitation)
+## Binary upload
+
+Two tools share the same staged, SHA-256-verified transfer described below:
+
+- `upload_file` takes a **native ChatGPT attached file** (ChatGPT clients).
+- `upload_file_content` takes the file inline as base64 `content_base64`, for
+  any MCP client without native attachments (for example Claude Code, Cursor
+  or scripts). It accepts the same `server`, `path`, `base_dir`, `mode`,
+  `create_parents`, `source_sha256`, `expected_sha256`, `reason`, `story_id`
+  and `operation_id` fields. The decoded size is capped by
+  `SSH_UPLOAD_CONTENT_MAX_BYTES` (standalone) or the optional signed
+  `{"upload": {"content_max_bytes": 1048576}}` section; the default is
+  **1 MiB** and the hard ceiling is 8 MiB. Oversized or invalid base64 is
+  rejected before any SSH call. Content is never written to logs, audit or
+  history. A model writes every byte into its tool call, so keep inline
+  uploads small.
+
+### Native ChatGPT attachments
 
 `upload_file` uses a **native ChatGPT attached file** in the
 `file` parameter (`openai/fileParams`). It is not an
@@ -150,7 +167,7 @@ and performs public-IP DNS pinning, TLS certificate
 verification, restricted port/redirect checks and
 bounded time/size reads; it never logs signed URLs.
 
-Upload limit: **8 MiB**, transferred in 128-KiB SHA-256-
+Attachment upload limit: **8 MiB**, transferred in 128-KiB SHA-256-
 verified chunks to a private staging file on the target.
 The helper verifies the whole digest before atomic
 publication. Default `mode=create` refuses existing
@@ -168,8 +185,8 @@ chunk. MCP resource delivery does not guarantee a
 particular client's UI renders it as a downloadable
 attachment.
 
-A vendor-neutral upload workflow is planned separately;
-do not advertise this ChatGPT adapter as universal.
+Do not advertise `upload_file` as universal; non-ChatGPT
+clients use `upload_file_content`.
 
 ## Audit and recovery
 
