@@ -7,8 +7,8 @@ token exchange under `/oauth/authorize` and `/oauth/token`.
 
 **Unknown clients can connect without preregistration.** For each HTTPS URL-form
 OAuth `client_id`, SSH-MCP retrieves the Client ID Metadata Document (CIMD)
-over certificate-validated HTTPS, validates its exact client ID and redirect URI,
-and displays the client name, document URL and callback before asking the
+over certificate-validated HTTPS, validates its exact client ID and registered redirect URI (allowing only the
+port to vary for an HTTP loopback callback), and displays the client name, document URL and callback before asking the
 operator to authorize it with the private login key. The claimed client name
 is **not** independently attested. Inspect the actual metadata and callback
 origin before approving an unfamiliar client.

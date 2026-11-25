@@ -25,7 +25,7 @@ from mcp.server.auth.provider import AccessToken
 
 from . import config
 from .oauth_sessions import SessionStore, ClientRegistrationRevoked
-from .client_metadata import ClientMetadataRegistry, redirect_origin, _parts
+from .client_metadata import ClientMetadataRegistry, redirect_origin, redirect_uri_matches, _parts
 from .dcr_registry import DCRStore, RegistrationError
 from .form_body import read_bounded_body
 from .auth_workers import run_auth
@@ -181,7 +181,7 @@ async def _validate_cimd(client_id: str, redirect_uri: str) -> dict[str, Any]:
         # single-client deployments retain their fail-closed allowlist.
         if client_id != MCP_CIMD_CLIENT_ID:
             raise ValueError("Unrecognized OAuth client_id")
-        if redirect_uri not in MCP_ALLOWED_REDIRECT_URIS:
+        if not any(redirect_uri_matches(uri, redirect_uri) for uri in MCP_ALLOWED_REDIRECT_URIS):
             raise ValueError("OAuth redirect_uri is not allowlisted")
         _parts(client_id, metadata=True)
         redirect_origin(redirect_uri)
@@ -618,7 +618,7 @@ async def oauth_authorize_get(request: Request) -> Response:
 
     scope_items = "".join(f"<li>{html.escape(scope)}</li>" for scope in scopes)
     # Metadata is client-declared, not a brand-identity attestation.
-    client_name = html.escape(str(client_metadata.get("client_name", "Unknown client")))
+    client_name = html.escape(str(client_metadata.get("client_name", client_id)))
     client_address = html.escape(client_id)
     client_identity_label = "Registered client ID" if client_id.startswith("dcr_") else "Verified metadata URL"
     callback_address = html.escape(redirect_uri)

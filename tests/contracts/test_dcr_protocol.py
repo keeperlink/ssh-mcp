@@ -169,6 +169,15 @@ class DCRProtocolTests(unittest.TestCase):
         code = self.login(client, variant)
         self.assertEqual(self.exchange(client, code, variant).status_code, 200)
 
+    def test_localhost_registration_binds_exact_callback_port(self):
+        client = self.register(redirect_uris=["http://localhost/callback"]).json()["client_id"]
+        callback = "http://localhost:60002/callback"
+        self.assertEqual(self.authorize(client, callback).status_code, 200)
+        self.assertEqual(self.authorize(client, "http://127.0.0.1:60002/callback").status_code, 400)
+        code = self.login(client, callback)
+        self.assertEqual(self.exchange(client, code, "http://localhost:60003/callback").status_code, 400)
+        self.assertEqual(self.exchange(client, code, callback).status_code, 200)
+
     def test_dcr_disabled_does_not_affect_cimd(self):
         with patch.object(config, "MCP_DCR_ENABLED", False):
             discovery = self.app.get("/.well-known/oauth-authorization-server").json()
