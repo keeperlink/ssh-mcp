@@ -768,6 +768,63 @@ class JobHTTPTests(unittest.TestCase):
         })
         self.assertTrue(bad.get("isError"))
 
+    def test_validation_rejections_name_field_without_echoing_values(self):
+        """TEST-371: structured, value-free rejections; no audit or SSH."""
+        secret_url = "https://probe.example.invalid/x?secret=NEVER_ECHO_371"
+        oversized = base64.b64encode(b"\x01" * (1048576 + 1)).decode()
+        common = {"server": "demo-node-b", "path": "/tmp/sky371.bin",
+                  "reason": "TEST-371 validation"}
+        cases = [
+            ("upload_file_content", {**common, "content_base64": "not*valid@base64!!="},
+             "content_base64", "base64"),
+            ("upload_file_content", {**common, "content_base64": oversized},
+             "content_base64", "exceeds"),
+            ("upload_file_content", {**common, "content_base64": "YQ==", "actor": "root"},
+             "actor", "Extra inputs"),
+            ("upload_file_content", {**common, "content_base64": "YQ==", "bad key!": 1},
+             "?", "Extra inputs"),
+            ("write_file", {**common, "content": 5}, "content", "string"),
+            ("upload_file", {**common, "file": {"file_id": "", "download_url": secret_url}},
+             "file.file_id", "at least 1"),
+            ("upload_file", {**common, "file": {"download_url": secret_url}},
+             "file.file_id", "required"),
+            ("download_file", {**common, "max_bytes": 65537}, "max_bytes", "65536"),
+            ("transfer_file", {"source_server": "demo-node-b", "source_path": "/a",
+                               "dest_server": "demo-node-b", "dest_path": "/b",
+                               "reason": "TEST-371"}, "arguments", "different"),
+            ("submit_job", {"server": "demo-node-b", "argv": [], "reason": "TEST-371"},
+             "argv", "at least 1"),
+            ("execute_command", {"server": "demo-node-b", "argv": ["id"]},
+             "reason", "required"),
+            ("list_jobs", {"limit": 1000}, "limit", "100"),
+        ]
+        with sqlite3.connect(os.environ["SSH_JOBS_DB"]) as db:
+            tables = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+            before = {t: db.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                      for t in tables}
+        with patch.object(FileTransport, "execute",
+                          side_effect=AssertionError("validation must precede SSH")):
+            for name, arguments, field, fragment in cases:
+                with self.subTest(name=name, field=field):
+                    reply = self.tool(name, arguments)
+                    self.assertTrue(reply.get("isError"), reply)
+                    text = reply["content"][0]["text"]
+                    body = json.loads(text)
+                    self.assertEqual(body["status"], "rejected")
+                    self.assertEqual(body["failure_kind"], "invalid_request")
+                    self.assertEqual(body["failed_field"], field)
+                    self.assertIn(fragment, body["error"])
+                    self.assertGreaterEqual(body["error_count"], 1)
+                    self.assertLessEqual(len(body["error"]), 160)
+                    for value in ("not*valid@base64", oversized[:64], secret_url,
+                                  "NEVER_ECHO_371", "bad key!"):
+                        self.assertNotIn(value, text)
+        with sqlite3.connect(os.environ["SSH_JOBS_DB"]) as db:
+            after = {t: db.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+                     for t in tables}
+        self.assertEqual(before, after)
+
     def test_private_full_audit_request_not_leaked_by_mcp_summary(self):
         call = self.tool("submit_job", {
             "server": "demo-node-b",

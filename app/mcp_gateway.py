@@ -310,6 +310,37 @@ def _error(message: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=message)], is_error=True)
 
 
+_SAFE_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_MAX_REJECTION_MESSAGE = 160
+
+
+def _validation_rejection(error: ValidationError) -> CallToolResult:
+    """Name the first invalid field without echoing any submitted value.
+
+    Field paths come from the request schema; an unknown key is shown only
+    when it is a plain identifier. Messages are Pydantic's or our fixed
+    validator texts, and are replaced when they would contain the input.
+    """
+    details = error.errors(include_url=False)
+    first = details[0] if details else {}
+    pieces: list[str] = []
+    for piece in first.get("loc", ()):
+        if type(piece) is int:
+            pieces.append(str(piece))
+        elif isinstance(piece, str):
+            pieces.append(piece if _SAFE_FIELD.fullmatch(piece) else "?")
+    message = str(first.get("msg", "Invalid value")).strip()
+    submitted = first.get("input")
+    if (len(message) > _MAX_REJECTION_MESSAGE
+            or isinstance(submitted, str) and len(submitted) >= 4 and submitted in message):
+        message = "Invalid value"
+    return _result({
+        "status": "rejected", "failure_kind": "invalid_request",
+        "failed_field": ".".join(pieces) or "arguments",
+        "error": message, "error_count": len(details),
+    }, is_error=True)
+
+
 def handle_tool(name: str, arguments: dict | None) -> CallToolResult:
     """Handle the no-side-effect diagnostic; SSH goes through authenticated dispatcher."""
     args = arguments or {}
@@ -379,8 +410,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
             return _error("Host-to-host file relay requires durable SSH auditing")
         try:
             request = TransferFileRequest.model_validate(arguments)
-        except ValidationError:
-            return _error("Invalid transfer_file request")
+        except ValidationError as invalid:
+            return _validation_rejection(invalid)
         for alias in (request.source_server, request.dest_server):
             try:
                 executor.authorized_host(actor, alias)
@@ -534,8 +565,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
         if params.name in {"execute_command", "submit_job"}:
             try:
                 command_request = ExecuteCommandRequest.model_validate(arguments)
-            except ValidationError:
-                return _error("Invalid SSH request arguments")
+            except ValidationError as invalid:
+                return _validation_rejection(invalid)
         file_request: (ReadFileRequest | WriteFileRequest | ApplyPatchRequest
                        | UploadFileRequest | UploadFileContentRequest
                        | DownloadFileRequest | None) = None
@@ -548,8 +579,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
             }[params.name]
             try:
                 file_request = model.model_validate(arguments)
-            except ValidationError:
-                return _error("Invalid file operation arguments")
+            except ValidationError as invalid:
+                return _validation_rejection(invalid)
         privileged = (batch_request.privileged if batch_request is not None
                       else command_request.privileged if command_request is not None
                       else False)
@@ -918,8 +949,8 @@ def create_mcp_server(*, job_registry: dict | None = None,
                     return _result(data) if data is not None else _error("Job unavailable")
             assert command_request is not None
             request = command_request
-        except ValidationError:
-            return _error("Invalid SSH request arguments")
+        except ValidationError as invalid:
+            return _validation_rejection(invalid)
         except (SSHDenied, RuntimeError, ValueError, sqlite3.DatabaseError, OSError):
             # Never expose SQL, file paths, requests or output in MCP errors.
             return _error("SSH job request rejected")
