@@ -58,23 +58,33 @@ def _validated_document(document: Any) -> dict[str, Any]:
         raise RegistrationError("invalid_client_metadata", "Too many client metadata fields")
     if document.get("token_endpoint_auth_method", "none") != "none":
         raise RegistrationError("invalid_client_metadata", "Only public clients are supported")
-    if document.get("application_type", "web") not in ("web", "native"):
+    if "application_type" in document and document["application_type"] not in ("web", "native"):
         raise RegistrationError("invalid_client_metadata", "Unsupported application_type")
     grants = document.get("grant_types", ["authorization_code", "refresh_token"])
     responses = document.get("response_types", ["code"])
     if (not isinstance(grants, list) or not grants
-            or len(grants) != len(set(map(str, grants)))
-            or any(x not in ("authorization_code", "refresh_token") for x in grants)
+            or any(not isinstance(x, str) or not x for x in grants)
+            or len(grants) != len(set(grants))
             or "authorization_code" not in grants
-            or not isinstance(responses, list) or responses != ["code"]):
+            or not isinstance(responses, list) or not responses
+            or any(not isinstance(x, str) or not x for x in responses)
+            or len(responses) != len(set(responses))
+            or "code" not in responses):
         raise RegistrationError("invalid_client_metadata", "Only authorization-code/PKCE clients are supported")
     redirects = document.get("redirect_uris")
     if (not isinstance(redirects, list) or not 1 <= len(redirects) <= 16
             or len(set(map(str, redirects))) != len(redirects)):
         raise RegistrationError("invalid_redirect_uri", "One to sixteen unique redirect URIs required")
-    native = document.get("application_type", "web") == "native"
+    application_type = document.get("application_type")
+    # RFC 7591 clients need not send the OIDC application_type extension.
+    # Permit inference only when it was omitted, and still validate every URI.
+    if application_type is None:
+        application_type = "native" if any(
+            isinstance(uri, str) and uri.lower().startswith("http://")
+            for uri in redirects
+        ) else "web"
     for redirect in redirects:
-        _valid_redirect(redirect, native=native)
+        _valid_redirect(redirect, native=application_type == "native")
     client_name = document.get("client_name", "Unidentified MCP client")
     if (not isinstance(client_name, str) or not 1 <= len(client_name) <= 160
             or any(ord(c) < 32 for c in client_name)):
@@ -90,9 +100,10 @@ def _validated_document(document: Any) -> dict[str, Any]:
     return {
         "client_name": client_name,
         "redirect_uris": redirects,
-        "application_type": document.get("application_type", "web"),
-        "grant_types": grants,
-        "response_types": responses,
+        "application_type": application_type,
+        "grant_types": [grant for grant in ("authorization_code", "refresh_token")
+                        if grant in grants],
+        "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     }
 

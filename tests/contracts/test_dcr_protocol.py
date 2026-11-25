@@ -160,6 +160,54 @@ class DCRProtocolTests(unittest.TestCase):
                 self.assertEqual(self.register(**doc).status_code, 400)
         self.assertEqual(self.register(redirect_uris=["https://callback.example/"]).status_code, 201)
 
+    def test_omitted_application_type_infers_native_loopback_only(self):
+        for host in ("localhost", "127.0.0.2", "[::1]"):
+            with self.subTest(host=host):
+                callback = f"http://{host}:60002/callback"
+                result = self.app.post("/oauth/register", json={
+                    "redirect_uris": [f"http://{host}/callback"],
+                })
+                self.assertEqual(result.status_code, 201, result.text)
+                data = result.json()
+                self.assertEqual(data["application_type"], "native")
+                self.assertEqual(self.authorize(data["client_id"], callback).status_code, 200)
+        for host in ("192.168.1.1", "localhost.evil.example"):
+            result = self.app.post("/oauth/register", json={
+                "redirect_uris": [f"http://{host}/callback"],
+            })
+            self.assertEqual(result.status_code, 400)
+        web = self.app.post("/oauth/register", json={
+            "redirect_uris": ["https://example.org/callback"],
+        })
+        self.assertEqual(web.status_code, 201, web.text)
+        self.assertEqual(web.json()["application_type"], "web")
+        explicit = self.app.post("/oauth/register", json={
+            "application_type": "web", "redirect_uris": ["http://localhost/callback"],
+        })
+        self.assertEqual(explicit.status_code, 400)
+
+    def test_grant_and_response_supersets_are_reduced_to_supported_types(self):
+        result = self.register(
+            grant_types=["implicit", "refresh_token", "authorization_code", "client_credentials"],
+            response_types=["token", "code", "id_token"],
+        )
+        self.assertEqual(result.status_code, 201, result.text)
+        doc = result.json()
+        self.assertEqual(doc["grant_types"], ["authorization_code", "refresh_token"])
+        self.assertEqual(doc["response_types"], ["code"])
+        stored = oauth.dcr_store().get(doc["client_id"])
+        self.assertEqual(stored["grant_types"], doc["grant_types"])
+        self.assertEqual(stored["response_types"], doc["response_types"])
+        code_only = self.register(grant_types=["authorization_code", "implicit"],
+                                  response_types=["token", "code"])
+        self.assertEqual(code_only.status_code, 201, code_only.text)
+        self.assertEqual(code_only.json()["grant_types"], ["authorization_code"])
+        for fields in ({"grant_types": ["authorization_code", None]},
+                       {"response_types": ["code", {}]},
+                       {"response_types": ["code", "code"]},
+                       {"application_type": None}):
+            self.assertEqual(self.register(**fields).status_code, 400)
+
     def test_loopback_port_variation_and_redirect_binding(self):
         client = self.register().json()["client_id"]
         variant = "http://127.0.0.1:47135/callback"
