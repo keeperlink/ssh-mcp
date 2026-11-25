@@ -77,6 +77,17 @@ class RuntimeUnitTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Invalid operational limits"):
                     config.validate_mcp_config()
 
+    def test_inline_upload_cap_defaults_to_one_mebibyte_with_hard_ceiling(self):
+        self.assertEqual(config.SSH_UPLOAD_CONTENT_MAX_BYTES, 1048576)
+        for value in (1, 8 * 1024 * 1024):
+            with patch.object(config, "SSH_UPLOAD_CONTENT_MAX_BYTES", value):
+                config.validate_mcp_config()
+        for value in (0, -1, 8 * 1024 * 1024 + 1):
+            with self.subTest(value=value), patch.object(
+                    config, "SSH_UPLOAD_CONTENT_MAX_BYTES", value):
+                with self.assertRaisesRegex(RuntimeError, "Invalid operational limits"):
+                    config.validate_mcp_config()
+
     def test_local_entrypoint_is_loopback_only_by_default(self):
         with patch.dict(os.environ, {"MCP_BIND_HOST": "", "MCP_BIND_PORT": ""}):
             os.environ.pop("MCP_BIND_HOST", None)

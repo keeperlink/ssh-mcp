@@ -5,6 +5,8 @@ Directly parsing a request alone does not execute a command.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Self
@@ -304,6 +306,41 @@ class UploadFileRequest(FileOperationRequest):
     create_parents: bool = False
     source_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+
+
+def _base64_length(size: int) -> int:
+    return (size + 2) // 3 * 4
+
+
+class UploadFileContentRequest(FileOperationRequest):
+    """Upload small inline base64 binary content via the same staged SSH transfer.
+
+    For MCP clients without native ChatGPT attachments. The decoded size is
+    capped by SSH_UPLOAD_CONTENT_MAX_BYTES; content is never audited.
+    """
+    content_base64: str = Field(
+        max_length=_base64_length(config.UPLOAD_CONTENT_HARD_MAX_BYTES), strict=True,
+    )
+    mode: Literal["create", "overwrite"] = "create"
+    create_parents: bool = False
+    source_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    expected_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+
+    @field_validator("content_base64")
+    @classmethod
+    def bounded_base64(cls, value: str) -> str:
+        if len(value) > _base64_length(config.SSH_UPLOAD_CONTENT_MAX_BYTES):
+            raise ValueError("content_base64 exceeds the configured upload size")
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("content_base64 must be valid base64") from None
+        if len(decoded) > config.SSH_UPLOAD_CONTENT_MAX_BYTES:
+            raise ValueError("content_base64 exceeds the configured upload size")
+        return value
+
+    def content(self) -> bytes:
+        return base64.b64decode(self.content_base64, validate=True)
 
 
 class DownloadFileRequest(FileOperationRequest):
@@ -702,6 +739,9 @@ CONTRACTS: tuple[ToolContract, ...] = (
                  ApplyPatchRequest, ApplyPatchResponse, False),
     ToolContract("upload_file", "Upload an attached binary with staged SHA-256 verified publication.",
                  UploadFileRequest, FileOperationResponse, False),
+    ToolContract("upload_file_content",
+                 "Upload small inline base64 binary content with staged SHA-256 verified publication.",
+                 UploadFileContentRequest, FileOperationResponse, False),
     ToolContract("download_file", "Download a bounded binary chunk as an MCP blob resource.",
                  DownloadFileRequest, FileOperationResponse, True),
 )

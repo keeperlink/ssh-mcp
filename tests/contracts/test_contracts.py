@@ -78,7 +78,7 @@ class ContractTests(unittest.TestCase):
             "list_batches",
             "cancel_batch",
             "read_file", "write_file", "apply_patch",
-            "upload_file", "download_file",
+            "upload_file", "upload_file_content", "download_file",
         ]
         self.assertEqual([t.name for t in CONTRACTS], expected)
         self.assertEqual(len(CONTRACTS_BY_NAME), len(expected))
@@ -86,7 +86,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual([t.read_only for t in CONTRACTS], [
             True, True, False, True, True, True, True, False,
             False, True, True, False,
-            True, False, False, False, True,
+            True, False, False, False, False, True,
         ])
         doc = contract_document()
         self.assertEqual(doc["status"], "active")

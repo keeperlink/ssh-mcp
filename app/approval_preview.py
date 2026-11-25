@@ -13,7 +13,7 @@ from typing import Any
 
 from .contracts import (
     ApplyPatchRequest, DownloadFileRequest, ExecuteCommandRequest, ExecuteCommandsRequest,
-    ReadFileRequest, UploadFileRequest, WriteFileRequest,
+    ReadFileRequest, UploadFileContentRequest, UploadFileRequest, WriteFileRequest,
 )
 from .file_helper import _parse_patch
 
@@ -21,6 +21,7 @@ FILE_REQUESTS = {
     "read_file": ReadFileRequest,
     "write_file": WriteFileRequest,
     "upload_file": UploadFileRequest,
+    "upload_file_content": UploadFileContentRequest,
     "download_file": DownloadFileRequest,
 }
 
