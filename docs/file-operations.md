@@ -196,6 +196,23 @@ bodies, patches, binary payloads, temporary signed
 URLs and SSH helper stdin. The Operator Console has
 no file upload/download action.
 
+Invalid arguments are rejected before any audit record or SSH call with
+a structured tool error, for example:
+
+~~~json
+{"status": "rejected", "failure_kind": "invalid_request",
+ "failed_field": "content_base64", "error": "Value error, content_base64 must be valid base64",
+ "error_count": 1}
+~~~
+
+`failed_field` is the schema path of the first invalid field (`arguments`
+for whole-request checks); `error_count` is the number of problems found.
+The rejection never repeats submitted values: content, base64, patches and
+attachment URLs are not echoed, an unknown field name is shown only if it
+is a plain identifier, and any message that would contain the input is
+replaced with `Invalid value`. The same format applies to `transfer_file`,
+`execute_command`, `submit_job` and the job query tools.
+
 Typical errors include `not_found`, `already_exists`,
 `invalid_cursor`, `changed_file`,
 `precondition_failed`, `payload_limit`,
