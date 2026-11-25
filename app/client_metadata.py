@@ -121,7 +121,7 @@ async def _public_address(hostname: str, port: int) -> str:
         if not addresses or any(not ipaddress.ip_address(addr).is_global
                                 for addr in addresses):
             raise ValueError("OAuth client metadata network address is not public")
-        return addresses[0]
+        return min(addresses, key=lambda addr: (ipaddress.ip_address(addr).version, addr))
     except (OSError, asyncio.TimeoutError) as exc:
         raise ValueError("OAuth client metadata DNS lookup failed") from exc
 

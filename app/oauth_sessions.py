@@ -166,7 +166,7 @@ class SessionStore:
                 db.execute("UPDATE oauth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
                            (now, row["id"]))
             elif (row["client_id"] != client_id or row["resource"] != resource
-                  or (scopes is not None and row["scopes"] != scopes)):
+                  or (scopes is not None and set(row["scopes"].split()) != set(scopes.split()))):
                 # Binding mismatch: reject silently without revoking or
                 # consuming the token. The presenting client has no standing
                 # over this family regardless of whether the token is fresh

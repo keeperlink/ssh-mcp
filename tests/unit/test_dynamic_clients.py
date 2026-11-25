@@ -470,6 +470,21 @@ class DynamicOAuthTests(unittest.TestCase):
         self.assertEqual(first_status["jobs"]["queued"], 1)
         self.assertEqual(second_status["jobs"]["queued"], 2)
 
+    def test_metadata_dns_prefers_ipv4_but_checks_every_address(self):
+        from app import client_metadata
+        records = [(10, 1, 6, "", ("2600::1", 443, 0, 0)),
+                   (2, 1, 6, "", ("52.1.2.3", 443))]
+        with patch.object(client_metadata.socket, "getaddrinfo", return_value=records):
+            self.assertEqual(asyncio.run(client_metadata._public_address("example.org", 443)),
+                             "52.1.2.3")
+        with patch.object(client_metadata.socket, "getaddrinfo", return_value=records[:1]):
+            self.assertEqual(asyncio.run(client_metadata._public_address("example.org", 443)),
+                             "2600::1")
+        with patch.object(client_metadata.socket, "getaddrinfo",
+                          return_value=records + [(2, 1, 6, "", ("127.0.0.1", 443))]):
+            with self.assertRaises(ValueError):
+                asyncio.run(client_metadata._public_address("example.org", 443))
+
     def test_private_metadata_address_rejected(self):
         from app import client_metadata
         with patch.object(client_metadata.socket, "getaddrinfo",

@@ -141,7 +141,7 @@ class SessionStoreTests(unittest.TestCase):
                       dict(scopes="mcp.access ssh.execute admin"),
                       dict(scopes="mcp.access")):
             self.assertIsNone(self.rotate(old, **edits))
-        valid = self.rotate(old, scopes="mcp.access ssh.execute")
+        valid = self.rotate(old, scopes="  ssh.execute   mcp.access  ")
         self.assertEqual(valid["scopes"], "mcp.access ssh.execute")
 
     def test_invalid_secret_does_not_revoke_other_sessions(self):
