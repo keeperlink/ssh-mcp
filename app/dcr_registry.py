@@ -15,9 +15,8 @@ import time
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
-from .client_metadata import _parts
+from .client_metadata import _parts, redirect_uri_matches
 from .sqlite_support import _ClosingConnection, _prepare_path
 
 MAX_REGISTRATIONS = 4096
@@ -28,7 +27,6 @@ PER_IP_RATE = 12
 GLOBAL_RATE = 120
 DCR_CLIENT_ID_PATTERN = re.compile(r"dcr_[A-Za-z0-9_-]{32,64}\Z", re.ASCII)
 _CLIENT_ID = DCR_CLIENT_ID_PATTERN  # Preserve existing registry-internal reference.
-_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
 class RegistrationError(ValueError):
@@ -45,11 +43,9 @@ def _valid_redirect(value: Any, *, native: bool) -> None:
         # Validate the original bytes: urlsplit strips leading C0 controls
         # and would otherwise accept a different URI than the one stored.
         parts = _parts(value)
-        if "#" in value:  # Includes an empty fragment component.
-            raise ValueError("Fragments are forbidden")
     except ValueError as exc:
         raise RegistrationError("invalid_redirect_uri", "Invalid redirect URI") from exc
-    if parts.scheme == "http" and (not native or parts.hostname not in _LOOPBACK):
+    if parts.scheme == "http" and not native:
         raise RegistrationError("invalid_redirect_uri", "HTTP redirect requires native loopback")
     if parts.scheme not in {"https", "http"}:
         raise RegistrationError("invalid_redirect_uri", "Unsupported redirect scheme")
@@ -106,18 +102,7 @@ def _redirect_matches(meta: dict[str, Any], redirect: str) -> bool:
         _valid_redirect(redirect, native=meta["application_type"] == "native")
     except RegistrationError:
         return False
-    if redirect in meta["redirect_uris"]:
-        return True
-    requested = urlsplit(redirect)
-    if meta["application_type"] != "native" or requested.scheme != "http" or requested.hostname not in _LOOPBACK:
-        return False
-    for saved in meta["redirect_uris"]:
-        registered = urlsplit(saved)
-        if (registered.scheme == requested.scheme and registered.hostname == requested.hostname
-                and registered.hostname in _LOOPBACK and registered.path == requested.path
-                and registered.query == requested.query and requested.port is not None):
-            return True
-    return False
+    return any(redirect_uri_matches(saved, redirect) for saved in meta["redirect_uris"])
 
 
 class DCRStore:

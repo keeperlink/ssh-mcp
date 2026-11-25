@@ -1,7 +1,7 @@
 """Bounded, pinned-IP OAuth Client ID Metadata Document discovery.
 
 Unknown client IDs are untrusted URLs. No redirects, proxy use or private-network
-connections are permitted; an exact metadata/redirect match is required.
+connections are permitted; redirects match exactly except for loopback ports.
 """
 from __future__ import annotations
 
@@ -34,7 +34,8 @@ def _parts(value: str, *, metadata: bool = False) -> SplitResult:
     except ValueError as exc:
         raise ValueError("Invalid OAuth URL") from exc
     if (not hostname or parts.username is not None or parts.password is not None
-            or parts.fragment or "%" in parts.netloc or "\\" in parts.netloc):
+            or "#" in value or "%" in parts.netloc or "\\" in parts.netloc
+            or parts.netloc.endswith(":")):
         # Zone-scoped IPv6 literals and escaped/ambiguous authorities must not
         # enter the browser CSP or the MCP transport Origin allowlist.
         raise ValueError("Invalid OAuth URL")
@@ -56,8 +57,13 @@ def _parts(value: str, *, metadata: bool = False) -> SplitResult:
             for label in hostname.split(".")
         ):
             raise ValueError("Invalid OAuth URL hostname")
-    if parts.scheme == "http" and hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("Insecure OAuth redirect URI")
+    if parts.scheme == "http" and hostname != "localhost":
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError("Insecure OAuth redirect URI")
     if metadata and parts.scheme != "https":
         raise ValueError("OAuth client ID must be HTTPS")
     return parts
@@ -74,6 +80,34 @@ def redirect_origin(value: str) -> str:
     default_port = 443 if parts.scheme == "https" else 80
     port = f":{parts.port}" if parts.port is not None and parts.port != default_port else ""
     return f"{parts.scheme}://{host}{port}"
+
+
+def redirect_uri_matches(registered: str, requested: str) -> bool:
+    """Compare exactly, except for the port of an HTTP loopback redirect.
+
+    RFC 8252 / RFC 9700 permit ephemeral loopback ports. The URL parser
+    restricts HTTP to loopback addresses (including localhost). Compare
+    the original strings after removing only the authority port: do not
+    normalize the hostname, path, query, or percent encoding.
+    """
+    try:
+        approved = _parts(registered)
+        actual = _parts(requested)
+    except ValueError:
+        return False
+    if registered == requested:
+        return True
+    if approved.scheme != "http" or actual.scheme != "http":
+        return False
+
+    def without_port(value: str, parts: SplitResult) -> str:
+        start = len(parts.scheme) + 3
+        authority = parts.netloc
+        if parts.port is not None:
+            authority = authority.rsplit(":", 1)[0]
+        return value[:start] + authority + value[start + len(parts.netloc):]
+
+    return without_port(registered, approved) == without_port(requested, actual)
 
 
 async def _public_address(hostname: str, port: int) -> str:
@@ -129,14 +163,16 @@ def _verify_metadata(client_id: str, redirect_uri: str, document: dict[str, Any]
     redirect_origin(redirect_uri)
     if document.get("client_id") != client_id:
         raise ValueError("CIMD client_id mismatch")
-    if not isinstance(document.get("client_name"), str) or not 1 <= len(document["client_name"]) <= 160:
-        raise ValueError("CIMD client_name is missing or invalid")
+    if "client_name" in document:
+        name = document["client_name"]
+        if not isinstance(name, str) or not 1 <= len(name) <= 160:
+            raise ValueError("CIMD client_name is invalid")
     redirects = document.get("redirect_uris")
     if not isinstance(redirects, list) or not 1 <= len(redirects) <= 32:
         raise ValueError("CIMD redirect_uris are invalid")
     if any(not isinstance(uri, str) or len(uri) > 2048 for uri in redirects):
         raise ValueError("Invalid CIMD redirect URI")
-    if redirect_uri not in redirects:
+    if not any(redirect_uri_matches(uri, redirect_uri) for uri in redirects):
         raise ValueError("CIMD does not allow this redirect_uri")
     response_types = document.get("response_types", ["code"])
     grant_types = document.get("grant_types", ["authorization_code"])

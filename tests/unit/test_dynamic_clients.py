@@ -152,6 +152,86 @@ class DynamicOAuthTests(unittest.TestCase):
         self.assertEqual(wrong.status_code, 400)
         self.assertEqual(SessionStore(self.db).list_sessions(), [])
 
+    def test_loopback_redirect_matching(self):
+        from app.client_metadata import redirect_uri_matches
+        for registered, requested in (
+            ("http://localhost/callback", "http://localhost:60002/callback"),
+            ("http://localhost:1111/callback", "http://localhost:65432/callback"),
+            ("http://127.0.0.1/callback", "http://127.0.0.1:60002/callback"),
+            ("http://127.0.0.2:1111/callback", "http://127.0.0.2:65432/callback"),
+            ("http://[::1]/callback?x=1", "http://[::1]:65432/callback?x=1"),
+            ("http://localhost", "http://localhost:60002"),
+            ("https://example.org", "https://example.org"),
+        ):
+            with self.subTest(registered=registered, requested=requested):
+                self.assertTrue(redirect_uri_matches(registered, requested))
+        for registered, requested in (
+            ("http://localhost/callback", "http://localhost:60002/other"),
+            ("http://localhost/callback", "http://127.0.0.1:60002/callback"),
+            ("http://localhost/callback", "http://LOCALHOST:60002/callback"),
+            ("http://localhost/callback", "http://localhost.evil.example:60002/callback"),
+            ("http://localhost/callback", "http://localhost:60002/callback?"),
+            ("http://localhost/callback?x=1", "http://localhost:60002/callback?x=2"),
+            ("http://localhost/callback", "http://localhost:0/callback"),
+            ("http://localhost/callback", "http://localhost:65536/callback"),
+            ("http://localhost/callback", "http://localhost:60002/callback#"),
+            ("http://localhost/callback", "http://localhost:/callback"),
+            ("http://127.0.0.1/callback", "http://127.0.0.2:60002/callback"),
+            ("https://example.org/callback", "https://example.org:60002/callback"),
+            ("http://localhost", "http://localhost:60002/"),
+            ("http://localhost/callback", "http://localhost@evil.example/callback"),
+        ):
+            with self.subTest(registered=registered, requested=requested):
+                self.assertFalse(redirect_uri_matches(registered, requested))
+
+    def test_cimd_loopback_flow_binds_actual_port_and_origin(self):
+        client_id = next(iter(CLIENTS))
+        registered = "http://localhost/callback"
+        callback = "http://localhost:60002/callback"
+        doc = {**metadata(client_id), "redirect_uris": [registered]}
+        params = {"client_id": client_id, "redirect_uri": callback,
+                  "response_type": "code", "code_challenge": CHALLENGE,
+                  "code_challenge_method": "S256", "resource": config.MCP_RESOURCE,
+                  "scope": "mcp.access", "state": "synthetic"}
+        with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                   return_value=doc):
+            page = self.client.get("/oauth/authorize", params=params, follow_redirects=False)
+            self.assertEqual(page.status_code, 200, page.text)
+            self.assertIn("form-action 'self' http://localhost:60002",
+                          page.headers["content-security-policy"])
+            token = re.search(r'name="request_token" value="([^"]+)"', page.text).group(1)
+            post = self.client.post("/oauth/authorize", data={
+                "request_token": token, "mcp_login_key": config.MCP_LOGIN_KEY,
+                "decision": "grant",
+            }, follow_redirects=False)
+            self.assertEqual(post.status_code, 302, post.text)
+            self.assertTrue(post.headers["location"].startswith(callback + "?"))
+            code = parse_qs(urlparse(post.headers["location"]).query)["code"][0]
+            data = {"grant_type": "authorization_code", "code": code,
+                    "client_id": client_id, "code_verifier": VERIFIER,
+                    "resource": config.MCP_RESOURCE}
+            wrong = self.client.post("/oauth/token", data={
+                **data, "redirect_uri": "http://localhost:60003/callback"})
+            self.assertEqual(wrong.json()["error"], "invalid_grant")
+            result = self.client.post("/oauth/token", data={**data, "redirect_uri": callback})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertIn("http://localhost:60002", self.origins)
+            self.assertNotIn("http://localhost:60003", self.origins)
+
+    def test_unnamed_cimd_client_uses_verified_metadata_url(self):
+        client_id = next(iter(CLIENTS))
+        doc = metadata(client_id)
+        del doc["client_name"]
+        with patch("app.client_metadata._fetch_metadata", new_callable=AsyncMock,
+                   return_value=doc):
+            page = self.authorization(client_id)
+            self.assertEqual(page.status_code, 200, page.text)
+            self.assertIn(client_id, page.text)
+        for name in (None, "", 1):
+            with self.assertRaises(ValueError):
+                _verify_metadata(client_id, CLIENTS[client_id][1],
+                                 {**doc, "client_name": name})
+
     def test_metadata_public_client_requirements(self):
         a = next(iter(CLIENTS))
         correct = metadata(a)
