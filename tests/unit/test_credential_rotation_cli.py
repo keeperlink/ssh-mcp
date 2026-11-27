@@ -142,6 +142,123 @@ class OperatorRotationTests(unittest.TestCase):
                                     deployment="lab", issuer=BIND["issuer"],
                                     alias="demo-node-a", username="gateway"), NEW_SUDO)
 
+    def enrollment_inventory(self, policy: str = "restricted") -> None:
+        inventory = json.loads(self.inventory.read_text())
+        inventory["hosts"].append({
+            "alias": "demo-node-c", "username": "builder", "privileged_access": policy,
+        })
+        self.inventory.write_text(json.dumps(inventory))
+
+    def test_add_sudo_exactly_one_envelope_and_activate(self):
+        self.enrollment_inventory()
+        before = self.source.read_bytes()
+        self.assertIn("operation=add-sudo", cli.plan(**self.params("add-sudo", "demo-node-c")))
+        self.assertFalse((self.root / ".ssh-mcp-secrets.lock").exists())
+        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
+        metadata, revised = cli._prepared(self.source, candidate)
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(metadata["inventory_sha256"], cli._digest(self.inventory.read_bytes()))
+        envelope = revised["sealed_sudo"].pop("demo-node-c")
+        self.assertEqual(revised, self.sealed)
+        self.assertEqual(unseal_sudo(CONSOLE, envelope, **BIND,
+                                    alias="demo-node-c", username="builder"), NEW_SUDO)
+        for binding in (dict(BIND, deployment="production"),
+                        dict(BIND, issuer="https://different.example.org")):
+            with self.assertRaises(ValueError):
+                unseal_sudo(CONSOLE, envelope, **binding,
+                            alias="demo-node-c", username="builder")
+        for alias, username in (("demo-node-a", "builder"), ("demo-node-c", "gateway")):
+            with self.assertRaises(ValueError):
+                unseal_sudo(CONSOLE, envelope, **BIND, alias=alias, username=username)
+        self.assertNotIn(NEW_SUDO.encode(), candidate.read_bytes())
+        cli.activate(source=self.source, staged=candidate, stopped=True, recovery=True,
+                     consumers=True, migration_ready=False)
+        self.assertEqual(cli._source(self.source)[0]["sealed_sudo"]["demo-node-c"], envelope)
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**self.params("add-sudo", "demo-node-c"))
+        self.assertIn("PLAN=PASS", cli.plan(**self.params("sudo", "demo-node-c")))
+
+    def test_add_sudo_rejects_ineligible_targets_and_existing_alias(self):
+        for policy in ("none", "invalid"):
+            with self.subTest(policy=policy):
+                self.enrollment_inventory(policy)
+                with self.assertRaises(cli.RotationError):
+                    cli.plan(**self.params("add-sudo", "demo-node-c"))
+                data = json.loads(self.inventory.read_text())
+                data["hosts"].pop()
+                self.inventory.write_text(json.dumps(data))
+        self.enrollment_inventory()
+        data = json.loads(self.inventory.read_text())
+        data["hosts"][0]["privileged_access"] = "restricted"
+        self.inventory.write_text(json.dumps(data))
+        for operation, host in (("add-sudo", "demo-node-a"), ("add-sudo", "unknown"),
+                                ("add-sudo", None), ("sudo", "demo-node-c"),
+                                ("add-sudo", "demo-node-b")):
+            with self.subTest(operation=operation, host=host):
+                with self.assertRaises(cli.RotationError):
+                    cli.plan(**self.params(operation, host))
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**dict(self.params("add-sudo", "demo-node-c"), inventory=Path("relative")))
+        self.inventory.chmod(0o666)
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**self.params("add-sudo", "demo-node-c"))
+        self.assertEqual(cli._source(self.source)[0], self.sealed)
+
+    def test_add_sudo_invalid_passwords_and_binding_leave_source_intact(self):
+        self.enrollment_inventory()
+        before = self.source.read_bytes()
+        for answers in (("wrong-console", NEW_SUDO, NEW_SUDO),
+                        (CONSOLE, NEW_SUDO, "mismatch"),
+                        (CONSOLE, CONSOLE, CONSOLE),
+                        (CONSOLE, OAUTH, OAUTH),
+                        (CONSOLE, METRICS, METRICS),
+                        (CONSOLE, "", "")):
+            with self.subTest(case=answers[0] == CONSOLE):
+                with patch.object(cli.getpass, "getpass", side_effect=answers):
+                    with self.assertRaises(ValueError):
+                        cli.stage(**self.params("add-sudo", "demo-node-c"))
+        for binding in ({"deployment": "production"}, {"issuer": "https://wrong.example.org"}):
+            with patch.object(cli.getpass, "getpass", side_effect=(CONSOLE, NEW_SUDO, NEW_SUDO)):
+                with self.assertRaises(ValueError):
+                    cli.stage(**(self.params("add-sudo", "demo-node-c") | binding))
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
+    def test_add_sudo_inventory_drift_rejected_at_activation_and_discard_allowed(self):
+        self.enrollment_inventory()
+        before = self.source.read_bytes()
+        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
+        self.inventory.write_bytes(self.inventory.read_bytes() + b" ")
+        with self.assertRaises(cli.RotationError):
+            cli._prepared(self.source, candidate)
+        with self.assertRaises(cli.RotationError):
+            cli.activate(source=self.source, staged=candidate, stopped=True, recovery=True,
+                         consumers=True, migration_ready=False)
+        self.assertEqual(self.source.read_bytes(), before)
+        cli.discard(source=self.source, staged=candidate)
+        self.assertFalse(candidate.exists())
+
+    def test_add_sudo_rejects_inventory_drift_during_stage(self):
+        self.enrollment_inventory()
+        answers = iter((CONSOLE, NEW_SUDO, NEW_SUDO))
+
+        def prompt(*_args):
+            self.inventory.write_bytes(self.inventory.read_bytes() + b" ")
+            return next(answers)
+
+        with patch.object(cli.getpass, "getpass", side_effect=prompt):
+            with self.assertRaises(cli.RotationError):
+                cli.stage(**self.params("add-sudo", "demo-node-c"))
+        self.assertEqual(cli._source(self.source)[0], self.sealed)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+
+    def test_add_sudo_to_initial_empty_mapping(self):
+        self.enrollment_inventory("always-granted")
+        self.write_private(self.source, dict(self.sealed, sealed_sudo={}))
+        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
+        _, revised = cli._prepared(self.source, candidate)
+        self.assertEqual(set(revised["sealed_sudo"]), {"demo-node-c"})
+
     def test_migration_does_not_expose_passwords_or_activate_without_db_gate(self):
         self.write_private(self.source, LEGACY)
         original = self.source.read_bytes()

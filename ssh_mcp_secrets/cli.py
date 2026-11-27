@@ -22,12 +22,12 @@ from typing import Any, Iterator
 
 from app.runtime_files import _https_url, managed_secrets_fingerprint
 from app.sealed_credentials import (
-    create_token_verifier, create_verifier, from_legacy,
+    add_host_sudo, create_token_verifier, create_verifier, from_legacy,
     rotate_console, rotate_host_sudo, validate_v2_secrets, verify_password,
     verify_token,
 )
 
-_OPERATIONS = ("migrate", "oauth", "console", "sudo", "metrics")
+_OPERATIONS = ("migrate", "oauth", "console", "sudo", "add-sudo", "metrics")
 _STAGE_PREFIX = ".ssh-mcp-stage-"
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 _USERNAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
@@ -127,6 +127,20 @@ def _parse_hosts(raw: bytes) -> dict[str, str]:
     return result
 
 
+def _enrollment_inventory(path: Path, host: str | None) -> tuple[dict[str, str], str]:
+    """Read and pin the exact operator-verified inventory for enrollment."""
+    if not path.is_absolute():
+        raise RotationError("Enrollment inventory must be an absolute path")
+    raw = _read_file(path, private=False, maximum=1048576)
+    hosts = _parse_hosts(raw)
+    if host not in hosts:
+        raise RotationError("Target host is not in the approved inventory")
+    target = next(entry for entry in _decode(raw)["hosts"] if entry["alias"] == host)
+    if target.get("privileged_access") not in ("restricted", "always-granted"):
+        raise RotationError("Target host does not permit privileged access")
+    return hosts, _digest(raw)
+
+
 def _digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -175,7 +189,7 @@ def _prompt(label: str, *, confirm: bool = False) -> str:
 
 def _select(value: dict[str, Any], *, operation: str, host: str | None,
             hosts: dict[str, str]) -> None:
-    if operation not in _OPERATIONS or ((operation == "sudo") != (host is not None)):
+    if operation not in _OPERATIONS or ((operation in ("sudo", "add-sudo")) != (host is not None)):
         raise RotationError("Invalid rotation operation or host selection")
     if operation == "migrate":
         if value.get("version") != 1:
@@ -188,6 +202,8 @@ def _select(value: dict[str, Any], *, operation: str, host: str | None,
             raise RotationError("Source contains unsigned sudo host")
         if operation == "sudo" and host not in value["sealed_sudo"]:
             raise RotationError("Target host has no sealed sudo entry")
+        if operation == "add-sudo" and (host not in hosts or host in value["sealed_sudo"]):
+            raise RotationError("Target host is unknown or already has a sealed sudo entry")
 
 
 def _transform(value: dict[str, Any], *, operation: str, host: str | None,
@@ -201,7 +217,7 @@ def _transform(value: dict[str, Any], *, operation: str, host: str | None,
         new = _prompt("New Console password", confirm=True)
         return rotate_console(value, old_password=old, new_password=new,
                               deployment=deployment, issuer=issuer, hosts=hosts)
-    if operation == "sudo":
+    if operation in ("sudo", "add-sudo"):
         assert host is not None
         old = _prompt("Existing Console password")
         new = _prompt("New sudo credential for selected host", confirm=True)
@@ -209,6 +225,9 @@ def _transform(value: dict[str, Any], *, operation: str, host: str | None,
                 or verify_password(new, value["oauth_login_verifier"], "oauth-login")
                 or verify_token(new, value["metrics_verifier"])):
             raise RotationError("New host credential is reused")
+        if operation == "add-sudo":
+            return add_host_sudo(value, console_password=old, new_sudo_password=new,
+                                 deployment=deployment, issuer=issuer, alias=host, hosts=hosts)
         return rotate_host_sudo(value, console_password=old, new_sudo_password=new,
                                 deployment=deployment, issuer=issuer,
                                 alias=host, username=hosts[host])
@@ -242,7 +261,8 @@ def _transform(value: dict[str, Any], *, operation: str, host: str | None,
 def plan(*, source: Path, inventory: Path, deployment: str, issuer: str,
          operation: str, host: str | None) -> str:
     value, sha = _source(source)
-    hosts = _hosts(inventory)
+    hosts = (_enrollment_inventory(inventory, host)[0] if operation == "add-sudo"
+             else _hosts(inventory))
     _select(value, operation=operation, host=host, hosts=hosts)
     _binding(deployment, issuer)
     return f"PLAN=PASS operation={operation} host={host or '-'} aliases={len(hosts)} source_sha256={sha}"
@@ -252,7 +272,11 @@ def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
           operation: str, host: str | None) -> Path:
     with _locked(source):
         value, original = _source(source)
-        hosts = _hosts(inventory)
+        inventory_digest = None
+        if operation == "add-sudo":
+            hosts, inventory_digest = _enrollment_inventory(inventory, host)
+        else:
+            hosts = _hosts(inventory)
         _select(value, operation=operation, host=host, hosts=hosts)
         _binding(deployment, issuer)
         changed = _transform(value, operation=operation, host=host, hosts=hosts,
@@ -260,17 +284,23 @@ def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
         validate_v2_secrets(changed)
         if _source(source)[1] != original:
             raise RotationError("Active revision changed during preparation")
+        if (inventory_digest is not None
+                and _enrollment_inventory(inventory, host)[1] != inventory_digest):
+            raise RotationError("Approved inventory changed during preparation")
         raw = (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode()
         if len(raw) > 65536:
             raise RotationError("Prepared sealed revision exceeds size bound")
         name = _STAGE_PREFIX + secrets.token_hex(12) + ".json"
         staged = source.parent / name
         manifest = staged.with_name(name + ".plan")
-        metadata = {
+        metadata: dict[str, Any] = {
             "format": 1, "source": source.name, "source_sha256": original,
             "stage_sha256": _digest(raw), "operation": operation, "host": host,
             "sealed_digest": managed_secrets_fingerprint(changed),
         }
+        if inventory_digest is not None:
+            metadata["inventory_path"] = str(inventory)
+            metadata["inventory_sha256"] = inventory_digest
         try:
             _write_new(staged, raw)
             _write_new(manifest, (json.dumps(metadata, sort_keys=True) + "\n").encode())
@@ -291,8 +321,11 @@ def _prepared(source: Path, staged: Path, *,
         raise RotationError("Stage must be a generated sibling of active source")
     manifest = staged.with_name(staged.name + ".plan")
     info = _decode(_read_file(manifest, private=True, maximum=4096))
-    if (set(info) != {"format", "source", "source_sha256", "stage_sha256",
-                      "operation", "host", "sealed_digest"}
+    expected_keys = {"format", "source", "source_sha256", "stage_sha256",
+                     "operation", "host", "sealed_digest"}
+    if info.get("operation") == "add-sudo":
+        expected_keys |= {"inventory_path", "inventory_sha256"}
+    if (set(info) != expected_keys
             or info["format"] != 1 or info["source"] != source.name
             or info["operation"] not in _OPERATIONS
             or type(info["source_sha256"]) is not str or _SHA.fullmatch(info["source_sha256"]) is None
@@ -304,8 +337,31 @@ def _prepared(source: Path, staged: Path, *,
     validate_v2_secrets(data)
     if _digest(raw) != info["stage_sha256"] or managed_secrets_fingerprint(data) != info["sealed_digest"]:
         raise RotationError("Staged revision integrity failed")
-    if require_current_source and _source(source)[1] != info["source_sha256"]:
-        raise RotationError("Active source changed: restage required")
+    if info["operation"] == "add-sudo":
+        if (type(info["host"]) is not str or _ALIAS.fullmatch(info["host"]) is None
+                or type(info["inventory_path"]) is not str
+                or not Path(info["inventory_path"]).is_absolute()
+                or type(info["inventory_sha256"]) is not str
+                or _SHA.fullmatch(info["inventory_sha256"]) is None):
+            raise RotationError("Invalid enrollment stage metadata")
+    if require_current_source:
+        original, checksum = _source(source)
+        if checksum != info["source_sha256"]:
+            raise RotationError("Active source changed: restage required")
+        if info["operation"] == "add-sudo":
+            hosts, digest = _enrollment_inventory(Path(info["inventory_path"]), info["host"])
+            if digest != info["inventory_sha256"]:
+                raise RotationError("Approved inventory changed: restage required")
+            _select(original, operation="add-sudo", host=info["host"], hosts=hosts)
+            if info["host"] not in data["sealed_sudo"]:
+                raise RotationError("Missing new sealed sudo entry")
+            # The entire revision must differ only by the newly enrolled alias.
+            unchanged = dict(data, sealed_sudo={
+                alias: envelope for alias, envelope in data["sealed_sudo"].items()
+                if alias != info["host"]
+            })
+            if unchanged != original:
+                raise RotationError("Enrollment changed unrelated credentials")
     return info, data
 
 

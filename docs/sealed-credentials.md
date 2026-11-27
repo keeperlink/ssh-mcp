@@ -199,7 +199,9 @@ permissions and atomic activation.
 `rotate_console` returns an independently prepared copy, re-encrypting
 **all** existing per-host entries and changing the Console generation in
 one step. `rotate_host_sudo` returns a copy with one host's new sealed
-password. Neither function changes a remote host password, authorizes a
+password. `add_host_sudo` returns a copy with exactly one additional host's
+sealed password, never overwriting an existing envelope. None of these
+functions changes a remote host password, authorizes a
 deployment or writes to a live secret mount.
 
 Follow [operator sealed rotation](operator-sealed-rotation.md) for future

@@ -349,3 +349,33 @@ def rotate_host_sudo(value: dict[str, Any], *, console_password: str,
         alias=alias, username=username,
     )
     return replacement
+
+
+def add_host_sudo(value: dict[str, Any], *, console_password: str,
+                  new_sudo_password: str, deployment: str, issuer: str,
+                  alias: str, hosts: dict[str, str]) -> dict[str, Any]:
+    """Prepare one new envelope; existing entries and generation stay unchanged.
+
+    The caller must independently verify the signed inventory and its
+    privileged policy. An empty source has no existing envelope with which
+    to authenticate the deployment/issuer binding.
+    """
+    validate_v2_secrets(value)
+    if (alias not in hosts or alias in value["sealed_sudo"]
+            or set(value["sealed_sudo"]) - set(hosts)
+            or not verify_password(console_password, value["viewer_verifier"], "console-login")):
+        raise InvalidCredential("Sudo enrollment not authorized")
+    # Authenticate the supplied environment and issuer against one existing
+    # envelope when available, without rekeying or opening the entire fleet.
+    entries = value["sealed_sudo"]
+    if entries:
+        existing = next(iter(entries))
+        unseal_sudo(console_password, entries[existing], deployment=deployment,
+                    issuer=issuer, alias=existing, username=hosts[existing])
+    replacement = deepcopy(value)
+    replacement["sealed_sudo"][alias] = seal_sudo(
+        console_password, new_sudo_password, deployment=deployment, issuer=issuer,
+        alias=alias, username=hosts[alias],
+    )
+    validate_v2_secrets(replacement)
+    return replacement

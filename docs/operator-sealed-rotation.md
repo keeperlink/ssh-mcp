@@ -135,9 +135,23 @@ ssh-mcp-secrets plan --source "$SOURCE" --inventory "$INVENTORY" \
 ```
 
 For `--operation`, choose exactly **migrate**, **oauth**, **console**,
-**sudo**, or **metrics**. For sudo rotation also add
+**sudo**, **add-sudo**, or **metrics**. For sudo rotation or enrollment also add
 `--host APPROVED_ALIAS`; use the actual signed inventory, not a guessed
 alias. Migration accepts only legacy v1 source; other modes require v2.
+
+Use `--operation add-sudo --host APPROVED_ALIAS` to enroll exactly one
+existing inventory host whose privileged policy explicitly permits sudo and
+which has no sealed entry. The explicit `--source` selects the credential
+revision, not the host alias or any deployment credential scope. Choose the
+correct protected source and corresponding signed inventory independently.
+The tool does not create hosts, contact them or overwrite existing entries;
+use `sudo` for rotation. The enrollment inventory path must be absolute and
+its exact bytes are pinned in the stage manifest, rechecked during staging,
+verification and activation. If it changes, discard and restage against the
+new independently verified inventory. For a nonempty mapping an existing
+envelope authenticates the deployment/issuer binding; for an empty mapping
+the operator must independently verify the binding. No signature validation
+is implied by these checks.
 
 ## Stage, verify, and explicitly activate
 
@@ -208,6 +222,18 @@ alias. Migration accepts only legacy v1 source; other modes require v2.
   between host and service changes, **do not rollback to mismatched secrets**:
   maintain the host isolation, inspect stage and active hashes and complete
   the matching handoff through the independent recovery channel.
+- **Add host sudo:** independently verify the new signed host and its
+  privileged policy; select the intended protected credential source. Stage
+  with `add-sudo`, enter the existing Console password and a new unique
+  host password twice (choose a password not used on any other host), then
+  verify. Set that exact password through independent guest administration;
+  confirm password-required sudo and rejection of passwordless sudo. Activate
+  using the existing stopped-service/recovery/consumer attestations. Deploy
+  the approved signed inventory and matching new revision using the existing
+  protected handoff, then verify ordinary SSH and an approved privileged
+  command. No database migration or Console rekey is needed. If interrupted,
+  reconcile source/stage digests and the host password before proceeding.
+  Existing host envelopes are not re-encrypted or overwritten.
 - **Metrics:** stage the new bearer verifier and coordinate the protected
   scraper-side replacement. Verify both new-token acceptance and old-token
   rejection after deployment.
