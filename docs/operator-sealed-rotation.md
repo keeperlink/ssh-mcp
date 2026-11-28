@@ -177,12 +177,21 @@ is implied by these checks.
    and the protected directory first.
 3. Confirm independently: administrative recovery and retained backups;
    the correct sealed-format-compatible signed target and rollback image;
-   downstream consumer handoff; stopped application and stopped database
-   writers. For v1 migration, complete the approved database cutover and
-   rollback snapshot procedure in
+   and downstream consumer handoff. Plan, stage and verify operate on
+   protected offline files and do not require the application to stop.
+   For v1 migration, stop the application and database writers and complete
+   the approved database cutover and rollback snapshot procedure in
    [sealed database cutover](sealed-db-cutover.md) **before** activation.
-   The tool does not independently verify stopped service or downstream
-   readiness: these flags are explicit operator attestations.
+
+   **Current activation limitation:** the utility requires
+   `--confirm-stopped` for every operation, including `add-sudo` on an
+   independent offline copy. This is a generic activation guard, not a
+   database migration requirement for host enrollment. The tool does not
+   independently verify service state or downstream readiness: these flags
+   are explicit operator attestations. Never assert that a running service
+   is stopped. If the operator requires activation without a preliminary
+   service stop, a reviewed utility change is required; staging and
+   verification may continue while the existing service runs.
 4. Only after the separately approved handoff, run:
 
    ```sh
@@ -227,13 +236,20 @@ is implied by these checks.
   with `add-sudo`, enter the existing Console password and a new unique
   host password twice (choose a password not used on any other host), then
   verify. Set that exact password through independent guest administration;
-  confirm password-required sudo and rejection of passwordless sudo. Activate
-  using the existing stopped-service/recovery/consumer attestations. Deploy
-  the approved signed inventory and matching new revision using the existing
-  protected handoff, then verify ordinary SSH and an approved privileged
-  command. No database migration or Console rekey is needed. If interrupted,
+  confirm password-required sudo and rejection of passwordless sudo.
+  No database migration, Console rekey, or early service interruption is
+  needed for preparation: existing host envelopes and other credentials
+  remain unchanged. An independent offline source and protected downstream
+  secret-file handoff do not reload the running container's immutable
+  credential snapshot. Nevertheless, the current activation CLI still
+  requires the stopped-service attestation described above; do not bypass
+  it or claim that a running service is stopped. Once activation and handoff
+  have been completed under the applicable approved procedure, reconcile
+  the downstream secret registration, deploy the approved signed inventory
+  and matching revision, and verify ordinary SSH and an approved privileged
+  command. The normal deployment replaces the running container; a file
+  handoff alone does not activate its new credentials. If interrupted,
   reconcile source/stage digests and the host password before proceeding.
-  Existing host envelopes are not re-encrypted or overwritten.
 - **Metrics:** stage the new bearer verifier and coordinate the protected
   scraper-side replacement. Verify both new-token acceptance and old-token
   rejection after deployment.
