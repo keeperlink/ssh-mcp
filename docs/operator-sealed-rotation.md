@@ -160,9 +160,14 @@ ssh-mcp-secrets apply \
   --operation add-sudo --host APPROVED_ALIAS
 ```
 
-The deployment directory must be root:1000 mode 0750; the single-link regular
+Flat or one-level scoped paths (e.g. `deployment/nonprod/<leaf>` or
+`deployment/demo-node-a/<leaf>`) are supported; the controller mount must
+match the complete relative path under deployment, not just the leaf.
+The deployment directory and any scope directory must be root:1000 mode
+0750 and not symlinks; the single-link regular
 secretFile must be root:1000 mode 0640. The utility verifies the source and
-inventory, takes the same private directory lock used by batch-handoff, prepares
+inventory, takes an advisory flock on the existing deployment directory inode shared
+by flat and scoped writes and batch-handoff (no persistent lockfile), prepares
 and validates the full sealed revision in memory, writes a securely created
 sibling temporary file, fsyncs it, rechecks source/inventory fingerprints, and
 atomically replaces only the selected file. It preserves the required file

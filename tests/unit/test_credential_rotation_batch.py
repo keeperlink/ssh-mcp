@@ -1,7 +1,6 @@
 """Synthetic, offline checks for batch batch sealed credential tooling."""
 from __future__ import annotations
 
-from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -216,7 +215,8 @@ class BatchRotationTests(unittest.TestCase):
         original = hashlib.sha256(source.read_bytes()).hexdigest()
         workdir = self.root / "output"
         prompts = [OAUTH, NEW_OAUTH, NEW_OAUTH, CONSOLE, NEW_CONSOLE, NEW_CONSOLE]
-        def readback(_name: str, _file: str, expected: str) -> None:
+        def readback(_name: str, _file: str, expected: str, relative: str) -> None:
+            self.assertEqual(relative, "ssh-mcp-secrets")
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), expected)
             if postcheck_error is not None:
                 raise postcheck_error
@@ -230,7 +230,7 @@ class BatchRotationTests(unittest.TestCase):
         with patch.object(batch.os, "geteuid", return_value=0), \
              patch.object(batch.os, "fchown", side_effect=destination_error), \
              patch.object(batch, "_trusted_jenkins", side_effect=trusted), \
-             patch.object(batch.cli, "_locked", return_value=nullcontext()), \
+             patch.object(batch, "_check_jenkins_dir_info"), \
              patch.object(batch.cli, "_private_dir"), \
              patch.object(batch.cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
              patch.object(batch.getpass, "getpass", side_effect=prompts), \
@@ -261,6 +261,7 @@ class BatchRotationTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(jenkins.read_bytes()).hexdigest(), result["staged_sha256"])
         self.assertTrue(verify_password(NEW_OAUTH, json.loads(jenkins.read_text())["oauth_login_verifier"],
                                         "oauth-login"))
+        self.assertEqual([p.name for p in jenkins.parent.iterdir()], ["ssh-mcp-secrets"])
         workdir = self.root / "output"
         files = list(workdir.iterdir())
         self.assertEqual(len(files), 6)

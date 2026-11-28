@@ -465,18 +465,20 @@ class OperatorRotationTests(unittest.TestCase):
             cli.plan(**self.params())
 
     def test_jenkins_target_commit_and_controller_readback(self):
-        from contextlib import nullcontext
         from ssh_mcp_secrets import batch
+        directory = self.root / "deployment" / "nonprod"
+        directory.mkdir(parents=True)
+        self.source = self.source.rename(directory / self.source.name)
         before = self.source.read_bytes()
         self.source.chmod(0o640)
         args = dict(self.params("metrics"), jenkins=True,
                     expected_source=cli._digest(before),
                     expected_inventory=cli._digest(self.inventory.read_bytes()),
                     container="synthetic-controller",
-                    container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
+                    container_file="/run/jenkins/secrets/deployment/nonprod/ssh-mcp-secrets")
         with patch.object(cli.os, "geteuid", return_value=0), \
              patch.object(cli.os, "fchown"), \
-             patch.object(cli, "_locked", return_value=nullcontext()), \
+             patch.object(batch, "_check_jenkins_dir_info"), \
              patch.object(batch, "_trusted_jenkins", side_effect=lambda path: path.read_bytes()), \
              patch.object(cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
              patch.object(batch, "_postcheck_container") as postcheck, \
@@ -486,14 +488,29 @@ class OperatorRotationTests(unittest.TestCase):
         self.assertEqual(self.source.stat().st_mode & 0o777, 0o640)
         self.assertEqual(cli._digest(self.source.read_bytes()), digest)
         self.assertTrue(verify_token(NEW_METRICS, json.loads(self.source.read_text())["metrics_verifier"]))
-        postcheck.assert_called_once_with(args["container"], args["container_file"], digest)
+        postcheck.assert_called_once_with(args["container"], args["container_file"], digest, "nonprod/" + self.source.name)
+        self.assertEqual([p.name for p in self.source.parent.iterdir()], [self.source.name])
+        self.assertEqual([p.name for p in directory.parent.iterdir()], ["nonprod"])
 
-    def test_jenkins_lock_shared_with_local_lock(self):
+    def test_jenkins_lock_shared_across_flat_and_scoped_sources(self):
         from ssh_mcp_secrets import batch
-        with patch.object(batch, "_trusted_jenkins", return_value=self.source.read_bytes()):
-            with cli._locked(self.source, jenkins=True):
-                with self.assertRaises(BlockingIOError), cli._locked(self.source):
+        directory = self.root / "deployment"
+        directory.mkdir()
+        flat = self.source.rename(directory / self.source.name)
+        scope = directory / "nonprod"
+        scope.mkdir()
+        scoped = scope / flat.name
+        self.write_private(scoped, self.sealed)
+        with patch.object(batch, "_trusted_jenkins", return_value=flat.read_bytes()), \
+             patch.object(batch, "_check_jenkins_dir_info"):
+            with cli._locked(flat, jenkins=True):
+                with self.assertRaises(BlockingIOError), cli._locked(scoped, jenkins=True):
                     self.fail("Unexpected concurrent writer")
+            with cli._locked(scoped, jenkins=True):
+                with self.assertRaises(BlockingIOError), cli._locked(flat, jenkins=True):
+                    self.fail("Unexpected concurrent writer")
+        self.assertEqual(set(p.name for p in directory.iterdir()), {flat.name, "nonprod"})
+        self.assertEqual([p.name for p in scope.iterdir()], [scoped.name])
 
     def test_jenkins_target_requires_explicit_pins_and_mount(self):
         args = self.params("metrics")
@@ -511,8 +528,10 @@ class OperatorRotationTests(unittest.TestCase):
                           container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
 
     def test_jenkins_controller_failure_reports_expected_digest(self):
-        from contextlib import nullcontext
         from ssh_mcp_secrets import batch
+        directory = self.root / "deployment"
+        directory.mkdir()
+        self.source = self.source.rename(directory / self.source.name)
         before = self.source.read_bytes()
         self.source.chmod(0o640)
         args = dict(self.params("metrics"), jenkins=True,
@@ -522,7 +541,7 @@ class OperatorRotationTests(unittest.TestCase):
                     container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
         with patch.object(cli.os, "geteuid", return_value=0), \
              patch.object(cli.os, "fchown"), \
-             patch.object(cli, "_locked", return_value=nullcontext()), \
+             patch.object(batch, "_check_jenkins_dir_info"), \
              patch.object(batch, "_trusted_jenkins", side_effect=lambda path: path.read_bytes()), \
              patch.object(cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
              patch.object(batch, "_postcheck_container", side_effect=OSError("synthetic readback failure")), \

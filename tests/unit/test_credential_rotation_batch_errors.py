@@ -135,20 +135,20 @@ class RotationErrorPaths(unittest.TestCase):
                            ("invalid/name", "/run/jenkins/secrets/deployment/secret"),
                            ("controller", "/invalid/path")):
             with self.subTest(name=name, path=path), self.assertRaises(cli.RotationError):
-                batch._postcheck_container(name, path, "a" * 64)
+                batch._postcheck_container(name, path, "a" * 64, "secret")
         with patch.object(batch.subprocess, "run",
                           return_value=SimpleNamespace(returncode=0, stdout=b"b" * 64 + b"  path\n")):
             with self.assertRaises(cli.CommitUncertain):
                 batch._postcheck_container("controller",
-                                           "/run/jenkins/secrets/deployment/secret", "a" * 64)
+                                           "/run/jenkins/secrets/deployment/secret", "a" * 64, "secret")
         with patch.object(batch.subprocess, "run",
                           return_value=SimpleNamespace(returncode=1, stdout=b"")):
             with self.assertRaises(cli.CommitUncertain):
                 batch._postcheck_container("controller",
-                                           "/run/jenkins/secrets/deployment/secret", "a" * 64)
+                                           "/run/jenkins/secrets/deployment/secret", "a" * 64, "secret")
         with patch.object(batch.subprocess, "run",
                           return_value=SimpleNamespace(returncode=0, stdout=b"a" * 64 + b"  path\n")):
-            batch._postcheck_container("controller", "/run/jenkins/secrets/deployment/secret", "a" * 64)
+            batch._postcheck_container("controller", "/run/jenkins/secrets/deployment/secret", "a" * 64, "secret")
 
     def test_trusted_jenkins_rejects_untrusted_leaf_and_metadata(self) -> None:
         file = self.root / "bad-name"
@@ -172,6 +172,44 @@ class RotationErrorPaths(unittest.TestCase):
                                                        st_uid=0, st_gid=1000)), \
              patch.object(cli, "_read_file", return_value=b"synthetic"):
             self.assertEqual(batch._trusted_jenkins(file), b"synthetic")
+
+    def test_jenkins_scoped_path_and_mount_binding(self) -> None:
+        root = self.root / "deployment"
+        for scope in ("nonprod", "demo-node-a"):
+            with self.subTest(scope=scope):
+                file = root / scope / "ssh-mcp-secrets"
+                relative = scope + "/ssh-mcp-secrets"
+                self.assertEqual(batch._jenkins_location(file), (root, relative))
+                mount = "/run/jenkins/secrets/deployment/" + relative
+                batch._validate_container("controller", mount, relative)
+                for wrong in ("/run/jenkins/secrets/deployment/ssh-mcp-secrets",
+                              "/run/jenkins/secrets/deployment/other/ssh-mcp-secrets"):
+                    with self.assertRaises(cli.RotationError):
+                        batch._validate_container("controller", wrong, relative)
+                    with self.assertRaises(cli.RotationError):
+                        batch._postcheck_container("controller", wrong, "a" * 64, relative)
+        for path in (root / "bad_scope" / "ssh-mcp-secrets",
+                     root / "nonprod" / "nested" / "ssh-mcp-secrets",
+                     root / "-invalid" / "ssh-mcp-secrets"):
+            with self.assertRaises(cli.RotationError):
+                batch._jenkins_location(path)
+
+    def test_jenkins_scoped_directories_both_validated(self) -> None:
+        root = self.root / "deployment"
+        scope = root / "nonprod"
+        scope.mkdir(parents=True)
+        file = scope / "ssh-mcp-secrets"
+        file.write_bytes(b"synthetic")
+        with patch.object(batch, "_check_jenkins_dir_info") as check, \
+             patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=0o100640,
+                          st_nlink=1, st_uid=0, st_gid=1000)), \
+             patch.object(cli, "_read_file", return_value=b"synthetic"):
+            self.assertEqual(batch._trusted_jenkins(file), b"synthetic")
+            self.assertEqual(check.call_count, 2)
+        linked = root / "demo-node-a"
+        linked.symlink_to(scope, target_is_directory=True)
+        with patch.object(batch, "_check_jenkins_dir_info"), self.assertRaises(cli.RotationError):
+            batch._trusted_jenkins(linked / "ssh-mcp-secrets")
 
     def test_manifest_rejects_invalid_shapes(self) -> None:
         baseline = {**META, "type": "host-hash-only", "entry": dict(ENTRY)}

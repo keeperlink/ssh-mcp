@@ -29,17 +29,32 @@ def _json(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
-def _trusted_jenkins(path: Path) -> bytes:
-    # Jenkins consumes a host file via the existing read-only controller mount.
-    if (not path.is_absolute() or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", path.name) is None
-            or path.name in {".", ".."}):
-        raise cli.RotationError("Invalid deployment secretFile leaf")
-    if path.parent.name != "deployment" or path.parent.is_symlink():
-        raise cli.RotationError("Untrusted deployment secret directory")
-    parent = path.parent.stat()
-    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_gid != 1000 or
-            stat.S_IMODE(parent.st_mode) != 0o750):
+_SCOPE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _jenkins_location(path: Path) -> tuple[Path, str]:
+    if (not path.is_absolute() or ".." in path.parts
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", path.name) is None):
+        raise cli.RotationError("Invalid deployment secretFile path")
+    if path.parent.name == "deployment":
+        return path.parent, path.name
+    if path.parent.parent.name == "deployment" and _SCOPE.fullmatch(path.parent.name):
+        return path.parent.parent, path.parent.name + "/" + path.name
+    raise cli.RotationError("Invalid Jenkins deployment credential scope")
+
+
+def _check_jenkins_dir_info(info: os.stat_result) -> None:
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 1000
+            or stat.S_IMODE(info.st_mode) != 0o750):
         raise cli.RotationError("Untrusted Jenkins deployment directory")
+
+
+def _trusted_jenkins(path: Path) -> bytes:
+    root, _ = _jenkins_location(path)
+    for directory in (root,) if root == path.parent else (root, path.parent):
+        if directory.is_symlink():
+            raise cli.RotationError("Untrusted deployment secret directory")
+        _check_jenkins_dir_info(directory.stat())
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
             info.st_uid != 0 or info.st_gid != 1000 or
@@ -130,20 +145,19 @@ def _generate(old: dict[str, Any], *, hosts: dict[str, str],
     return new, passwords
 
 
-def _validate_container(name: str, file: str, expected_leaf: str) -> None:
+def _validate_container(name: str, file: str, expected_relative: str) -> None:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name):
         raise cli.RotationError("Invalid Jenkins controller container")
     if (type(file) is not str or not file.startswith("/")
             or any(component in (".", "..", "") for component in file[1:].split("/"))):
         raise cli.RotationError("Invalid mounted Jenkins secret path")
     mounted = PurePosixPath(file)
-    if (mounted.parent != PurePosixPath("/run/jenkins/secrets/deployment")
-            or mounted.name != expected_leaf):
+    if mounted != PurePosixPath("/run/jenkins/secrets/deployment") / expected_relative:
         raise cli.RotationError("Jenkins mount path does not match approved secretFile")
 
 
-def _postcheck_container(name: str, file: str, expected: str) -> None:
-    _validate_container(name, file, PurePosixPath(file).name)
+def _postcheck_container(name: str, file: str, expected: str, relative: str) -> None:
+    _validate_container(name, file, relative)
     proc = subprocess.run(
         ["docker", "exec", name, "sha256sum", file],
         capture_output=True, timeout=20, check=False,
@@ -165,7 +179,8 @@ def batch_handoff(*, jenkins_file: Path, inventory: Path, vm_map: Path,
         raise cli.RotationError("Operator must be root")
     if _SHA.fullmatch(expected_source) is None or _SHA.fullmatch(expected_inventory) is None:
         raise cli.RotationError("Expected source and inventory checksums required")
-    _validate_container(container, container_file, jenkins_file.name)
+    _, relative = _jenkins_location(jenkins_file)
+    _validate_container(container, container_file, relative)
     cli._private_dir(workdir)
     cli._binding(deployment, issuer)
     approved_inventory = cli._read_file(inventory, private=False, maximum=1048576)
@@ -240,7 +255,7 @@ def batch_handoff(*, jenkins_file: Path, inventory: Path, vm_map: Path,
         cli._sync(workdir)
         cli._commit(jenkins_file, stage, jenkins=True, precheck=precheck,
                     readback=lambda: cli._digest(_trusted_jenkins(jenkins_file)),
-                    postcheck=lambda: _postcheck_container(container, container_file, stage_sha))
+                    postcheck=lambda: _postcheck_container(container, container_file, stage_sha, relative))
     return {
         "staged_sha256": stage_sha,
         "staged_path": str(workdir / (prefix + ".sealed.json")),

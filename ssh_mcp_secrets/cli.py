@@ -166,10 +166,20 @@ def _sync(folder: Path) -> None:
 @contextmanager
 def _locked(source: Path, *, jenkins: bool = False) -> Iterator[None]:
     if jenkins:
-        from ssh_mcp_secrets.batch import _trusted_jenkins
+        from ssh_mcp_secrets.batch import _check_jenkins_dir_info, _jenkins_location, _trusted_jenkins
         _trusted_jenkins(source)
-    else:
-        _private_dir(source.parent)
+        directory, _ = _jenkins_location(source)
+        # The deployment directory is a strict Jenkins inventory, not a place
+        # for lockfiles. Lock its existing inode across flat/scoped writers.
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            _check_jenkins_dir_info(os.fstat(fd))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
+        finally:
+            os.close(fd)
+        return
+    _private_dir(source.parent)
     lock = source.parent / ".ssh-mcp-secrets.lock"
     fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
@@ -276,10 +286,11 @@ def _target_options(source: Path, jenkins: bool, expected_source: str | None,
     if not source.is_absolute():
         raise RotationError("Absolute credential source required")
     if jenkins:
-        from ssh_mcp_secrets.batch import _validate_container
+        from ssh_mcp_secrets.batch import _jenkins_location, _validate_container
         if os.geteuid() != 0 or container is None or container_file is None:
             raise RotationError("Root and explicit Jenkins controller mount required")
-        _validate_container(container, container_file, source.name)
+        _, relative = _jenkins_location(source)
+        _validate_container(container, container_file, relative)
         if expected_source is None or expected_inventory is None:
             raise RotationError("Expected Jenkins source and inventory checksums required")
     elif container is not None or container_file is not None:
@@ -388,9 +399,10 @@ def apply(*, source: Path, inventory: Path, deployment: str, issuer: str,
 
         def postcheck() -> None:
             if jenkins:
-                from ssh_mcp_secrets.batch import _postcheck_container
+                from ssh_mcp_secrets.batch import _jenkins_location, _postcheck_container
                 assert container is not None and container_file is not None
-                _postcheck_container(container, container_file, _digest(raw))
+                _, relative = _jenkins_location(source)
+                _postcheck_container(container, container_file, _digest(raw), relative)
 
         return _commit(source, raw, jenkins=jenkins, precheck=precheck,
                        readback=lambda: _read_target(source, jenkins)[1], postcheck=postcheck)
