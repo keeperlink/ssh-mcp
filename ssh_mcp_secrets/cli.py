@@ -1,8 +1,6 @@
-"""Offline sealed credential staging; never connects to SSH or a service.
+"""Atomic offline sealed credential changes through a trusted terminal.
 
-The operator supplies credentials through a real terminal. Stage, verify and
-activate are independent steps; this program does not deploy, change host sudo,
-revoke sessions, update metrics consumers or select a rollback image.
+Never deploys, changes host passwords, or restarts the running service.
 """
 from __future__ import annotations
 
@@ -18,17 +16,17 @@ import re
 import secrets
 import stat
 import sys
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
-from app.runtime_files import _https_url, managed_secrets_fingerprint
+from app.runtime_files import _https_url
 from app.sealed_credentials import (
-    add_host_sudo, create_token_verifier, create_verifier, from_legacy,
+    add_host_sudo, create_token_verifier, create_verifier,
     rotate_console, rotate_host_sudo, validate_v2_secrets, verify_password,
     verify_token,
 )
 
-_OPERATIONS = ("migrate", "oauth", "console", "sudo", "add-sudo", "metrics")
-_STAGE_PREFIX = ".ssh-mcp-stage-"
+_OPERATIONS = ("oauth", "console", "sudo", "add-sudo", "metrics")
+_TEMP_PREFIX = ".ssh-mcp-commit-"
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\Z")
 _USERNAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
@@ -38,8 +36,12 @@ class RotationError(ValueError):
     """Fail closed, without surfacing a protected credential value."""
 
 
-class ActivationUncertain(RuntimeError):
-    """The complete revision might already be active; reconcile before retry."""
+class CommitUncertain(RuntimeError):
+    """The complete revision might already be committed; reconcile before retry."""
+
+    def __init__(self, message: str, *, expected_digest: str | None = None) -> None:
+        super().__init__(message)
+        self.expected_digest = expected_digest
 
 
 def _binding(deployment: str, issuer: str) -> None:
@@ -54,18 +56,22 @@ def _private_dir(folder: Path) -> None:
         raise RotationError("A private absolute directory is required")
     info = folder.stat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
-            or info.st_mode & 0o077):
+            or stat.S_IMODE(info.st_mode) != 0o700):
         raise RotationError("Credential directory must be owned by operator and mode 0700")
 
 
-def _read_file(path: Path, *, private: bool, maximum: int = 65536) -> bytes:
+def _read_file(path: Path, *, private: bool, maximum: int = 65536,
+               jenkins: bool = False) -> bytes:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or info.st_size < 1 or info.st_size > maximum
                 or info.st_mode & (0o077 if private else 0o022)
-                or (private and info.st_uid != os.geteuid())):
+                or (private and (info.st_uid != os.geteuid()
+                                 or stat.S_IMODE(info.st_mode) != 0o600))
+                or (jenkins and (info.st_uid != 0 or info.st_gid != 1000
+                                 or stat.S_IMODE(info.st_mode) != 0o640))):
             raise RotationError("Untrusted file owner, permissions, size or links")
         with os.fdopen(fd, "rb", closefd=False) as stream:
             data = stream.read(maximum + 1)
@@ -96,16 +102,8 @@ def _source(path: Path) -> tuple[dict[str, Any], str]:
     _private_dir(path.parent)
     data = _read_file(path, private=True)
     value = _decode(data)
-    if value.get("version") == 2:
-        validate_v2_secrets(value)
-    elif value.get("version") != 1:
-        raise RotationError("Unsupported managed credential revision")
+    validate_v2_secrets(value)
     return value, hashlib.sha256(data).hexdigest()
-
-
-def _hosts(path: Path) -> dict[str, str]:
-    # Caller independently verifies the inventory's signed provenance.
-    return _parse_hosts(_read_file(path, private=False, maximum=1048576))
 
 
 def _parse_hosts(raw: bytes) -> dict[str, str]:
@@ -148,6 +146,7 @@ def _digest(raw: bytes) -> str:
 def _write_new(path: Path, data: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(data)
             stream.flush()
@@ -165,7 +164,21 @@ def _sync(folder: Path) -> None:
 
 
 @contextmanager
-def _locked(source: Path) -> Iterator[None]:
+def _locked(source: Path, *, jenkins: bool = False) -> Iterator[None]:
+    if jenkins:
+        from ssh_mcp_secrets.batch import _check_jenkins_dir_info, _jenkins_location, _trusted_jenkins
+        _trusted_jenkins(source)
+        directory, _ = _jenkins_location(source)
+        # The deployment directory is a strict Jenkins inventory, not a place
+        # for lockfiles. Lock its existing inode across flat/scoped writers.
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            _check_jenkins_dir_info(os.fstat(fd))
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
+        finally:
+            os.close(fd)
+        return
     _private_dir(source.parent)
     lock = source.parent / ".ssh-mcp-secrets.lock"
     fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -191,27 +204,17 @@ def _select(value: dict[str, Any], *, operation: str, host: str | None,
             hosts: dict[str, str]) -> None:
     if operation not in _OPERATIONS or ((operation in ("sudo", "add-sudo")) != (host is not None)):
         raise RotationError("Invalid rotation operation or host selection")
-    if operation == "migrate":
-        if value.get("version") != 1:
-            raise RotationError("Migration requires a legacy source")
-        if set(value.get("sudo_passwords", {})) - set(hosts):
-            raise RotationError("Source contains unsigned sudo host")
-    else:
-        validate_v2_secrets(value)
-        if set(value["sealed_sudo"]) - set(hosts):
-            raise RotationError("Source contains unsigned sudo host")
-        if operation == "sudo" and host not in value["sealed_sudo"]:
-            raise RotationError("Target host has no sealed sudo entry")
-        if operation == "add-sudo" and (host not in hosts or host in value["sealed_sudo"]):
-            raise RotationError("Target host is unknown or already has a sealed sudo entry")
+    validate_v2_secrets(value)
+    if set(value["sealed_sudo"]) - set(hosts):
+        raise RotationError("Source contains unsigned sudo host")
+    if operation == "sudo" and host not in value["sealed_sudo"]:
+        raise RotationError("Target host has no sealed sudo entry")
+    if operation == "add-sudo" and (host not in hosts or host in value["sealed_sudo"]):
+        raise RotationError("Target host is unknown or already has a sealed sudo entry")
 
 
 def _transform(value: dict[str, Any], *, operation: str, host: str | None,
                hosts: dict[str, str], deployment: str, issuer: str) -> dict[str, Any]:
-    if operation == "migrate":
-        old = _prompt("Existing Console password")
-        return from_legacy(value, console_password=old, deployment=deployment,
-                           issuer=issuer, hosts=hosts)
     if operation == "console":
         old = _prompt("Existing Console password")
         new = _prompt("New Console password", confirm=True)
@@ -258,162 +261,170 @@ def _transform(value: dict[str, Any], *, operation: str, host: str | None,
     raise RotationError("Unsupported operation")
 
 
+def _read_inventory(inventory: Path, operation: str, host: str | None) -> tuple[dict[str, str], str]:
+    if not inventory.is_absolute():
+        raise RotationError("Absolute approved inventory required")
+    if operation == "add-sudo":
+        return _enrollment_inventory(inventory, host)
+    raw = _read_file(inventory, private=False, maximum=1048576)
+    return _parse_hosts(raw), _digest(raw)
+
+
+def _read_target(source: Path, jenkins: bool) -> tuple[dict[str, Any], str]:
+    if not jenkins:
+        return _source(source)
+    from ssh_mcp_secrets.batch import _trusted_jenkins
+    raw = _trusted_jenkins(source)
+    value = _decode(raw)
+    validate_v2_secrets(value)
+    return value, _digest(raw)
+
+
+def _target_options(source: Path, jenkins: bool, expected_source: str | None,
+                    expected_inventory: str | None, container: str | None,
+                    container_file: str | None) -> None:
+    if not source.is_absolute():
+        raise RotationError("Absolute credential source required")
+    if jenkins:
+        from ssh_mcp_secrets.batch import _jenkins_location, _validate_container
+        if os.geteuid() != 0 or container is None or container_file is None:
+            raise RotationError("Root and explicit Jenkins controller mount required")
+        _, relative = _jenkins_location(source)
+        _validate_container(container, container_file, relative)
+        if expected_source is None or expected_inventory is None:
+            raise RotationError("Expected Jenkins source and inventory checksums required")
+    elif container is not None or container_file is not None:
+        raise RotationError("Controller options require a Jenkins target")
+    for checksum in (expected_source, expected_inventory):
+        if checksum is not None and _SHA.fullmatch(checksum) is None:
+            raise RotationError("Invalid expected checksum")
+
+
+def _check_expected(actual: str, expected: str | None) -> None:
+    if expected is not None and actual != expected:
+        raise RotationError("Approved source or inventory changed")
+
+
 def plan(*, source: Path, inventory: Path, deployment: str, issuer: str,
-         operation: str, host: str | None) -> str:
-    value, sha = _source(source)
-    hosts = (_enrollment_inventory(inventory, host)[0] if operation == "add-sudo"
-             else _hosts(inventory))
+         operation: str, host: str | None, jenkins: bool = False,
+         expected_source: str | None = None, expected_inventory: str | None = None,
+         container: str | None = None, container_file: str | None = None) -> str:
+    _target_options(source, jenkins, expected_source, expected_inventory, container, container_file)
+    value, sha = _read_target(source, jenkins)
+    hosts, inventory_sha = _read_inventory(inventory, operation, host)
+    _check_expected(sha, expected_source)
+    _check_expected(inventory_sha, expected_inventory)
     _select(value, operation=operation, host=host, hosts=hosts)
     _binding(deployment, issuer)
-    return f"PLAN=PASS operation={operation} host={host or '-'} aliases={len(hosts)} source_sha256={sha}"
+    return (f"PLAN=PASS operation={operation} host={host or '-'} aliases={len(hosts)} "
+            f"source_sha256={sha} inventory_sha256={inventory_sha}")
 
 
-def stage(*, source: Path, inventory: Path, deployment: str, issuer: str,
-          operation: str, host: str | None) -> Path:
-    with _locked(source):
-        value, original = _source(source)
-        inventory_digest = None
-        if operation == "add-sudo":
-            hosts, inventory_digest = _enrollment_inventory(inventory, host)
-        else:
-            hosts = _hosts(inventory)
+def _commit(source: Path, raw: bytes, *, jenkins: bool,
+            precheck: Callable[[], None], readback: Callable[[], str],
+            postcheck: Callable[[], None]) -> str:
+    """Caller holds the common directory lock; never roll back after rename."""
+    digest = _digest(raw)
+    if len(raw) > 65536:
+        raise RotationError("Prepared sealed revision exceeds size bound")
+    validate_v2_secrets(_decode(raw))
+    temp = source.parent / (_TEMP_PREFIX + secrets.token_hex(12))
+    owned = False
+    committed = False
+    replacing = False
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        owned = True
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            if jenkins:
+                os.fchown(stream.fileno(), 0, 1000)
+                os.fchmod(stream.fileno(), 0o640)
+            else:
+                os.fchmod(stream.fileno(), 0o600)
+            os.fsync(stream.fileno())
+        if _digest(_read_file(temp, private=not jenkins, jenkins=jenkins)) != digest:
+            raise RotationError("Prepared revision integrity failed")
+        precheck()
+        replacing = True
+        os.replace(temp, source)
+        committed = True
+        _sync(source.parent)
+        if readback() != digest:
+            raise CommitUncertain("Committed source readback differs")
+        postcheck()
+        return digest
+    except BaseException:
+        # A signal immediately after rename can arrive before the assignment
+        # above. If the owned candidate disappeared during rename, fail uncertain.
+        if committed or (replacing and not temp.exists()):
+            committed = True
+            raise CommitUncertain("Offline commit may have succeeded; compare source digest",
+                                  expected_digest=digest) from None
+        raise
+    finally:
+        if owned and not committed:
+            temp.unlink(missing_ok=True)
+
+
+def apply(*, source: Path, inventory: Path, deployment: str, issuer: str,
+          operation: str, host: str | None, jenkins: bool = False,
+          expected_source: str | None = None, expected_inventory: str | None = None,
+          container: str | None = None, container_file: str | None = None) -> str:
+    _target_options(source, jenkins, expected_source, expected_inventory, container, container_file)
+    with _locked(source, jenkins=jenkins):
+        value, original = _read_target(source, jenkins)
+        hosts, inventory_sha = _read_inventory(inventory, operation, host)
+        _check_expected(original, expected_source)
+        _check_expected(inventory_sha, expected_inventory)
         _select(value, operation=operation, host=host, hosts=hosts)
         _binding(deployment, issuer)
         changed = _transform(value, operation=operation, host=host, hosts=hosts,
                              deployment=deployment, issuer=issuer)
         validate_v2_secrets(changed)
-        if _source(source)[1] != original:
-            raise RotationError("Active revision changed during preparation")
-        if (inventory_digest is not None
-                and _enrollment_inventory(inventory, host)[1] != inventory_digest):
-            raise RotationError("Approved inventory changed during preparation")
-        raw = (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode()
-        if len(raw) > 65536:
-            raise RotationError("Prepared sealed revision exceeds size bound")
-        name = _STAGE_PREFIX + secrets.token_hex(12) + ".json"
-        staged = source.parent / name
-        manifest = staged.with_name(name + ".plan")
-        metadata: dict[str, Any] = {
-            "format": 1, "source": source.name, "source_sha256": original,
-            "stage_sha256": _digest(raw), "operation": operation, "host": host,
-            "sealed_digest": managed_secrets_fingerprint(changed),
-        }
-        if inventory_digest is not None:
-            metadata["inventory_path"] = str(inventory)
-            metadata["inventory_sha256"] = inventory_digest
-        try:
-            _write_new(staged, raw)
-            _write_new(manifest, (json.dumps(metadata, sort_keys=True) + "\n").encode())
-            _sync(source.parent)
-        except BaseException:
-            # An interrupted/failed stage can never activate without its valid manifest.
-            manifest.unlink(missing_ok=True)
-            staged.unlink(missing_ok=True)
-            raise
-        return staged
-
-
-def _prepared(source: Path, staged: Path, *,
-              require_current_source: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
-    _private_dir(source.parent)
-    if (staged.parent != source.parent or not staged.name.startswith(_STAGE_PREFIX)
-            or not re.fullmatch(r"\.ssh-mcp-stage-[a-f0-9]{24}\.json", staged.name)):
-        raise RotationError("Stage must be a generated sibling of active source")
-    manifest = staged.with_name(staged.name + ".plan")
-    info = _decode(_read_file(manifest, private=True, maximum=4096))
-    expected_keys = {"format", "source", "source_sha256", "stage_sha256",
-                     "operation", "host", "sealed_digest"}
-    if info.get("operation") == "add-sudo":
-        expected_keys |= {"inventory_path", "inventory_sha256"}
-    if (set(info) != expected_keys
-            or info["format"] != 1 or info["source"] != source.name
-            or info["operation"] not in _OPERATIONS
-            or type(info["source_sha256"]) is not str or _SHA.fullmatch(info["source_sha256"]) is None
-            or type(info["stage_sha256"]) is not str or _SHA.fullmatch(info["stage_sha256"]) is None
-            or type(info["sealed_digest"]) is not str or _SHA.fullmatch(info["sealed_digest"]) is None):
-        raise RotationError("Invalid stage metadata")
-    raw = _read_file(staged, private=True)
-    data = _decode(raw)
-    validate_v2_secrets(data)
-    if _digest(raw) != info["stage_sha256"] or managed_secrets_fingerprint(data) != info["sealed_digest"]:
-        raise RotationError("Staged revision integrity failed")
-    if info["operation"] == "add-sudo":
-        if (type(info["host"]) is not str or _ALIAS.fullmatch(info["host"]) is None
-                or type(info["inventory_path"]) is not str
-                or not Path(info["inventory_path"]).is_absolute()
-                or type(info["inventory_sha256"]) is not str
-                or _SHA.fullmatch(info["inventory_sha256"]) is None):
-            raise RotationError("Invalid enrollment stage metadata")
-    if require_current_source:
-        original, checksum = _source(source)
-        if checksum != info["source_sha256"]:
-            raise RotationError("Active source changed: restage required")
-        if info["operation"] == "add-sudo":
-            hosts, digest = _enrollment_inventory(Path(info["inventory_path"]), info["host"])
-            if digest != info["inventory_sha256"]:
-                raise RotationError("Approved inventory changed: restage required")
-            _select(original, operation="add-sudo", host=info["host"], hosts=hosts)
-            if info["host"] not in data["sealed_sudo"]:
-                raise RotationError("Missing new sealed sudo entry")
-            # The entire revision must differ only by the newly enrolled alias.
-            unchanged = dict(data, sealed_sudo={
-                alias: envelope for alias, envelope in data["sealed_sudo"].items()
-                if alias != info["host"]
+        if operation == "add-sudo":
+            unchanged = dict(changed, sealed_sudo={
+                alias: envelope for alias, envelope in changed["sealed_sudo"].items()
+                if alias != host
             })
-            if unchanged != original:
+            if host not in changed["sealed_sudo"] or unchanged != value:
                 raise RotationError("Enrollment changed unrelated credentials")
-    return info, data
+        raw = (json.dumps(changed, sort_keys=True, indent=2) + "\n").encode()
 
+        def precheck() -> None:
+            _check_expected(_read_target(source, jenkins)[1], original)
+            _check_expected(_read_inventory(inventory, operation, host)[1], inventory_sha)
 
-def activate(*, source: Path, staged: Path, stopped: bool,
-             recovery: bool, consumers: bool, migration_ready: bool) -> str:
-    if not all((stopped, recovery, consumers)):
-        raise RotationError("Service stop, independent recovery and consumer handoff confirmations required")
-    with _locked(source):
-        info, _ = _prepared(source, staged)
-        if info["operation"] == "migrate" and not migration_ready:
-            raise RotationError("Migration requires independently verified database cutover readiness")
-        # All persistent writes before this line are staged and nonactive.
-        os.replace(staged, source)
-        try:
-            _sync(source.parent)
-            staged.with_name(staged.name + ".plan").unlink()
-            _sync(source.parent)
-        except OSError:
-            raise ActivationUncertain("Revision may already be active; inspect source digest") from None
-        return str(info["stage_sha256"])
+        def postcheck() -> None:
+            if jenkins:
+                from ssh_mcp_secrets.batch import _jenkins_location, _postcheck_container
+                assert container is not None and container_file is not None
+                _, relative = _jenkins_location(source)
+                _postcheck_container(container, container_file, _digest(raw), relative)
 
-
-def discard(*, source: Path, staged: Path) -> None:
-    with _locked(source):
-        # Stale stages must remain removable after an unrelated activation.
-        # Still verify the same private sibling path, manifest and full digest.
-        _prepared(source, staged, require_current_source=False)
-        staged.unlink()
-        staged.with_name(staged.name + ".plan").unlink()
-        _sync(source.parent)
+        return _commit(source, raw, jenkins=jenkins, precheck=precheck,
+                       readback=lambda: _read_target(source, jenkins)[1], postcheck=postcheck)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="command", required=True)
-    for cmd in ("plan", "stage"):
+    for cmd in ("plan", "apply"):
         sub = actions.add_parser(cmd)
-        sub.add_argument("--source", type=Path, required=True)
+        target = sub.add_mutually_exclusive_group(required=True)
+        target.add_argument("--source", type=Path)
+        target.add_argument("--jenkins-file", type=Path)
+        sub.add_argument("--expected-source-sha256")
+        sub.add_argument("--expected-inventory-sha256")
+        sub.add_argument("--jenkins-container")
+        sub.add_argument("--jenkins-container-file")
         sub.add_argument("--inventory", type=Path, required=True)
         sub.add_argument("--deployment", required=True, choices=("lab", "production"))
         sub.add_argument("--issuer", required=True)
         sub.add_argument("--operation", required=True, choices=_OPERATIONS)
         sub.add_argument("--host")
-    for cmd in ("verify", "activate", "discard"):
-        sub = actions.add_parser(cmd)
-        sub.add_argument("--source", type=Path, required=True)
-        sub.add_argument("--staged", type=Path, required=True)
-        if cmd == "activate":
-            sub.add_argument("--confirm-stopped", action="store_true")
-            sub.add_argument("--confirm-recovery", action="store_true")
-            sub.add_argument("--confirm-consumers-ready", action="store_true")
-            sub.add_argument("--confirm-db-ready", action="store_true")
     batch = actions.add_parser("batch-handoff")
     batch.add_argument("--jenkins-file", type=Path, required=True)
     batch.add_argument("--inventory", type=Path, required=True)
@@ -444,36 +455,28 @@ def main(argv: list[str] | None = None) -> int:
                   "staged_sha256={staged_sha256} hashes_sha256={hashes_sha256} "
                   "proxmox_sha256={proxmox_sha256} hashes_path={hashes_path} "
                   "proxmox_path={proxmox_path} hash_prefix={hash_prefix}".format(**batch_result))
-        elif args.command == "plan":
-            print(plan(source=args.source, inventory=args.inventory,
-                       deployment=args.deployment, issuer=args.issuer,
-                       operation=args.operation, host=args.host))
-        elif args.command == "stage":
-            if not (sys.stdin.isatty() and sys.stderr.isatty()):
-                raise RotationError("Trusted interactive terminal required for credential entry")
-            result = stage(source=args.source, inventory=args.inventory,
-                           deployment=args.deployment, issuer=args.issuer,
-                           operation=args.operation, host=args.host)
-            print(f"STAGE=PASS path={result}")
-        elif args.command == "verify":
-            info, _ = _prepared(args.source, args.staged)
-            print(f"VERIFY=PASS operation={info['operation']} host={info['host'] or '-'} "
-                  f"expected_source={info['source_sha256']} staged_sha256={info['stage_sha256']}")
-        elif args.command == "activate":
-            digest = activate(source=args.source, staged=args.staged,
-                              stopped=args.confirm_stopped, recovery=args.confirm_recovery,
-                              consumers=args.confirm_consumers_ready,
-                              migration_ready=args.confirm_db_ready)
-            print(f"ACTIVATE=PASS sha256={digest}; redeploy and independently verify consumers")
         else:
-            discard(source=args.source, staged=args.staged)
-            print("DISCARD=PASS")
+            params = dict(source=args.source or args.jenkins_file, inventory=args.inventory,
+                          deployment=args.deployment, issuer=args.issuer, operation=args.operation,
+                          host=args.host, jenkins=args.jenkins_file is not None,
+                          expected_source=args.expected_source_sha256,
+                          expected_inventory=args.expected_inventory_sha256,
+                          container=args.jenkins_container, container_file=args.jenkins_container_file)
+            if args.command == "plan":
+                print(plan(**params))
+            else:
+                if not (sys.stdin.isatty() and sys.stderr.isatty()):
+                    raise RotationError("Trusted interactive terminal required for credential entry")
+                digest = apply(**params)
+                print(f"APPLY=PASS sha256={digest}; deploy separately and independently verify consumers")
         return 0
-    except ActivationUncertain:
-        print("Activation outcome uncertain: compare source revision before any retry",
+    except CommitUncertain as exc:
+        print("Offline commit outcome uncertain: compare source revision before any retry",
               file=sys.stderr)
+        if exc.expected_digest is not None and _SHA.fullmatch(exc.expected_digest):
+            print(f"expected_committed_sha256={exc.expected_digest}", file=sys.stderr)
         return 2
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, BlockingIOError):
+    except (OSError, ValueError, TypeError, KeyError, EOFError, KeyboardInterrupt):
         print("Sealed revision operation rejected; inspect permissions, source and procedure",
               file=sys.stderr)
         return 1

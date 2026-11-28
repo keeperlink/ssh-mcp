@@ -61,26 +61,21 @@ class OperatorRotationTests(unittest.TestCase):
         return {"source": self.source, "inventory": self.inventory,
                 "operation": operation, "host": host, **BIND}
 
-    def stage(self, operation: str, *answers: str, host: str | None = None) -> Path:
+    def commit(self, operation: str, *answers: str, host: str | None = None) -> dict:
         with patch.object(cli.getpass, "getpass", side_effect=answers) as prompts:
-            candidate = cli.stage(**self.params(operation, host))
+            digest = cli.apply(**self.params(operation, host))
         self.assertEqual(prompts.call_count, len(answers))
-        self.assertEqual(candidate.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(candidate.with_name(candidate.name + ".plan").stat().st_mode & 0o777, 0o600)
-        return candidate
+        self.assertEqual(digest, cli._digest(self.source.read_bytes()))
+        self.assertEqual(self.source.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
+        return cli._source(self.source)[0]
 
-    def test_prepared_and_activated_credentials_are_pretty_printed(self):
-        candidate = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        staged_text = candidate.read_text()
-        metadata, sealed = cli._prepared(self.source, candidate)
-        self.assertEqual(staged_text, json.dumps(sealed, sort_keys=True, indent=2) + "\n")
-        self.assertGreater(len(staged_text.splitlines()), 8)
-        self.assertEqual(json.loads(staged_text), sealed)
-        self.assertEqual(cli.activate(source=self.source, staged=candidate, stopped=True,
-                                      recovery=True, consumers=True, migration_ready=False),
-                         metadata["stage_sha256"])
-        self.assertEqual(self.source.read_text(), staged_text)
-        self.assertEqual(cli._source(self.source)[0], sealed)
+    def test_committed_credentials_are_pretty_printed(self):
+        sealed = self.commit("metrics", METRICS, NEW_METRICS, NEW_METRICS)
+        self.assertEqual(self.source.read_text(), json.dumps(sealed, sort_keys=True, indent=2) + "\n")
+        self.assertGreater(len(self.source.read_text().splitlines()), 8)
+        self.assertEqual(set(p.name for p in self.root.iterdir()),
+                         {"ssh-mcp-secrets", "inventory.json", ".ssh-mcp-secrets.lock"})
 
     def test_read_only_plan_does_not_make_lock(self):
         before = self.source.read_bytes()
@@ -91,11 +86,8 @@ class OperatorRotationTests(unittest.TestCase):
         self.assertEqual(self.source.read_bytes(), before)
         self.assertFalse((self.root / ".ssh-mcp-secrets.lock").exists())
 
-    def test_console_rekey_is_complete_and_activated_only_with_confirmations(self):
-        before = self.source.read_bytes()
-        candidate = self.stage("console", CONSOLE, NEW_CONSOLE, NEW_CONSOLE)
-        metadata, sealed = cli._prepared(self.source, candidate)
-        self.assertEqual(self.source.read_bytes(), before)
+    def test_console_rekey_is_complete_and_preserves_other_credentials(self):
+        sealed = self.commit("console", CONSOLE, NEW_CONSOLE, NEW_CONSOLE)
         self.assertNotEqual(sealed["viewer_generation"], self.sealed["viewer_generation"])
         self.assertTrue(verify_password(NEW_CONSOLE, sealed["viewer_verifier"], "console-login"))
         self.assertFalse(verify_password(CONSOLE, sealed["viewer_verifier"], "console-login"))
@@ -105,38 +97,28 @@ class OperatorRotationTests(unittest.TestCase):
                             issuer=BIND["issuer"], alias=alias, username=principal),
                 LEGACY["sudo_passwords"][alias],
             )
-        with self.assertRaises(cli.RotationError):
-            cli.activate(source=self.source, staged=candidate, stopped=True, recovery=False,
-                         consumers=True, migration_ready=False)
-        self.assertEqual(self.source.read_bytes(), before)
-        checksum = cli.activate(source=self.source, staged=candidate, stopped=True,
-                                recovery=True, consumers=True, migration_ready=False)
-        self.assertEqual(checksum, metadata["stage_sha256"])
-        self.assertEqual(cli._source(self.source)[0], sealed)
-        self.assertFalse(candidate.exists())
-        self.assertFalse(candidate.with_name(candidate.name + ".plan").exists())
+        for key in ("oauth_login_verifier", "metrics_verifier", "oauth_signing_key", "ssh_private_key"):
+            self.assertEqual(sealed[key], self.sealed[key])
 
     def test_oauth_and_metrics_rotate_independently(self):
-        for mode, original, replacement in (
-            ("oauth", OAUTH, NEW_OAUTH), ("metrics", METRICS, NEW_METRICS),
+        for mode, original, replacement, key in (
+            ("oauth", OAUTH, NEW_OAUTH, "oauth_login_verifier"),
+            ("metrics", METRICS, NEW_METRICS, "metrics_verifier"),
         ):
             with self.subTest(mode=mode):
-                candidate = self.stage(mode, original, replacement, replacement)
-                _, revised = cli._prepared(self.source, candidate)
-                self.assertEqual(revised["sealed_sudo"], self.sealed["sealed_sudo"])
-                self.assertEqual(revised["viewer_verifier"], self.sealed["viewer_verifier"])
+                before = cli._source(self.source)[0]
+                revised = self.commit(mode, original, replacement, replacement)
+                self.assertEqual({k:v for k,v in revised.items() if k != key},
+                                 {k:v for k,v in before.items() if k != key})
                 if mode == "oauth":
-                    self.assertTrue(verify_password(replacement, revised["oauth_login_verifier"], "oauth-login"))
-                    self.assertFalse(verify_password(original, revised["oauth_login_verifier"], "oauth-login"))
+                    self.assertTrue(verify_password(replacement, revised[key], "oauth-login"))
+                    self.assertFalse(verify_password(original, revised[key], "oauth-login"))
                 else:
-                    self.assertTrue(verify_token(replacement, revised["metrics_verifier"]))
-                    self.assertFalse(verify_token(original, revised["metrics_verifier"]))
-                cli.discard(source=self.source, staged=candidate)
-                self.assertFalse(candidate.exists())
+                    self.assertTrue(verify_token(replacement, revised[key]))
+                    self.assertFalse(verify_token(original, revised[key]))
 
     def test_host_sudo_rotation_is_scoped_to_one_alias(self):
-        candidate = self.stage("sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-a")
-        _, revised = cli._prepared(self.source, candidate)
+        revised = self.commit("sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-a")
         self.assertEqual(revised["sealed_sudo"]["demo-node-b"], self.sealed["sealed_sudo"]["demo-node-b"])
         self.assertEqual(unseal_sudo(CONSOLE, revised["sealed_sudo"]["demo-node-a"],
                                     deployment="lab", issuer=BIND["issuer"],
@@ -149,15 +131,11 @@ class OperatorRotationTests(unittest.TestCase):
         })
         self.inventory.write_text(json.dumps(inventory))
 
-    def test_add_sudo_exactly_one_envelope_and_activate(self):
+    def test_add_sudo_exactly_one_envelope_and_commit(self):
         self.enrollment_inventory()
-        before = self.source.read_bytes()
         self.assertIn("operation=add-sudo", cli.plan(**self.params("add-sudo", "demo-node-c")))
         self.assertFalse((self.root / ".ssh-mcp-secrets.lock").exists())
-        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
-        metadata, revised = cli._prepared(self.source, candidate)
-        self.assertEqual(self.source.read_bytes(), before)
-        self.assertEqual(metadata["inventory_sha256"], cli._digest(self.inventory.read_bytes()))
+        revised = self.commit("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
         envelope = revised["sealed_sudo"].pop("demo-node-c")
         self.assertEqual(revised, self.sealed)
         self.assertEqual(unseal_sudo(CONSOLE, envelope, **BIND,
@@ -170,9 +148,7 @@ class OperatorRotationTests(unittest.TestCase):
         for alias, username in (("demo-node-a", "builder"), ("demo-node-c", "gateway")):
             with self.assertRaises(ValueError):
                 unseal_sudo(CONSOLE, envelope, **BIND, alias=alias, username=username)
-        self.assertNotIn(NEW_SUDO.encode(), candidate.read_bytes())
-        cli.activate(source=self.source, staged=candidate, stopped=True, recovery=True,
-                     consumers=True, migration_ready=False)
+        self.assertNotIn(NEW_SUDO.encode(), self.source.read_bytes())
         self.assertEqual(cli._source(self.source)[0]["sealed_sudo"]["demo-node-c"], envelope)
         with self.assertRaises(cli.RotationError):
             cli.plan(**self.params("add-sudo", "demo-node-c"))
@@ -216,29 +192,15 @@ class OperatorRotationTests(unittest.TestCase):
             with self.subTest(case=answers[0] == CONSOLE):
                 with patch.object(cli.getpass, "getpass", side_effect=answers):
                     with self.assertRaises(ValueError):
-                        cli.stage(**self.params("add-sudo", "demo-node-c"))
+                        cli.apply(**self.params("add-sudo", "demo-node-c"))
         for binding in ({"deployment": "production"}, {"issuer": "https://wrong.example.org"}):
             with patch.object(cli.getpass, "getpass", side_effect=(CONSOLE, NEW_SUDO, NEW_SUDO)):
                 with self.assertRaises(ValueError):
-                    cli.stage(**(self.params("add-sudo", "demo-node-c") | binding))
+                    cli.apply(**(self.params("add-sudo", "demo-node-c") | binding))
         self.assertEqual(self.source.read_bytes(), before)
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
-    def test_add_sudo_inventory_drift_rejected_at_activation_and_discard_allowed(self):
-        self.enrollment_inventory()
-        before = self.source.read_bytes()
-        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
-        self.inventory.write_bytes(self.inventory.read_bytes() + b" ")
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, candidate)
-        with self.assertRaises(cli.RotationError):
-            cli.activate(source=self.source, staged=candidate, stopped=True, recovery=True,
-                         consumers=True, migration_ready=False)
-        self.assertEqual(self.source.read_bytes(), before)
-        cli.discard(source=self.source, staged=candidate)
-        self.assertFalse(candidate.exists())
-
-    def test_add_sudo_rejects_inventory_drift_during_stage(self):
+    def test_add_sudo_rejects_inventory_drift_during_apply(self):
         self.enrollment_inventory()
         answers = iter((CONSOLE, NEW_SUDO, NEW_SUDO))
 
@@ -248,125 +210,52 @@ class OperatorRotationTests(unittest.TestCase):
 
         with patch.object(cli.getpass, "getpass", side_effect=prompt):
             with self.assertRaises(cli.RotationError):
-                cli.stage(**self.params("add-sudo", "demo-node-c"))
+                cli.apply(**self.params("add-sudo", "demo-node-c"))
         self.assertEqual(cli._source(self.source)[0], self.sealed)
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
     def test_add_sudo_to_initial_empty_mapping(self):
         self.enrollment_inventory("always-granted")
         self.write_private(self.source, dict(self.sealed, sealed_sudo={}))
-        candidate = self.stage("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
-        _, revised = cli._prepared(self.source, candidate)
+        revised = self.commit("add-sudo", CONSOLE, NEW_SUDO, NEW_SUDO, host="demo-node-c")
         self.assertEqual(set(revised["sealed_sudo"]), {"demo-node-c"})
 
-    def test_migration_does_not_expose_passwords_or_activate_without_db_gate(self):
+    def test_legacy_source_is_refused_without_mutation(self):
         self.write_private(self.source, LEGACY)
-        original = self.source.read_bytes()
-        candidate = self.stage("migrate", CONSOLE)
-        _, revised = cli._prepared(self.source, candidate)
-        self.assertEqual(self.source.read_bytes(), original)
-        for secret in (CONSOLE, OAUTH, METRICS, SUDO):
-            self.assertNotIn(secret.encode(), candidate.read_bytes())
-        with self.assertRaises(cli.RotationError):
-            cli.activate(source=self.source, staged=candidate, stopped=True,
-                         recovery=True, consumers=True, migration_ready=False)
-        self.assertEqual(self.source.read_bytes(), original)
-        cli.activate(source=self.source, staged=candidate, stopped=True,
-                     recovery=True, consumers=True, migration_ready=True)
-        self.assertEqual(cli._source(self.source)[0], revised)
-
-    def test_failed_and_interrupted_preparation_never_touch_active(self):
         before = self.source.read_bytes()
-        with patch.object(cli.getpass, "getpass", return_value="synthetic-wrong"):
-            with self.assertRaises(ValueError):
-                cli.stage(**self.params("console"))
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
-        candidate = self.stage("console", CONSOLE, NEW_CONSOLE, NEW_CONSOLE)
-        candidate.with_name(candidate.name + ".plan").unlink()
-        with self.assertRaises(OSError):
-            cli.activate(source=self.source, staged=candidate, stopped=True,
-                         recovery=True, consumers=True, migration_ready=False)
+        with self.assertRaises(ValueError), patch.object(cli.getpass, "getpass") as prompt:
+            cli.apply(**self.params())
+        prompt.assert_not_called()
         self.assertEqual(self.source.read_bytes(), before)
 
-    def test_source_version_change_and_tampering_fail_closed(self):
-        candidate = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        self.source.write_bytes(self.source.read_bytes() + b" ")
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, candidate)
-        self.write_private(self.source, self.sealed)
-        altered = json.loads(candidate.read_text())
-        altered["viewer_generation"] = "a" * 32
-        self.write_private(candidate, altered)
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, candidate)
+    def test_precommit_failures_leave_source_and_remove_owned_temp(self):
+        before = self.source.read_bytes()
+        for method in ("fsync", "replace"):
+            with self.subTest(method=method):
+                with patch.object(cli.os, method, side_effect=OSError("synthetic failure")), \
+                     patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)):
+                    with self.assertRaises(OSError):
+                        cli.apply(**self.params("metrics"))
+                self.assertEqual(self.source.read_bytes(), before)
+                self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
-    def test_discard_stale_stage_after_another_revision_activated(self):
-        stale = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        current = self.stage("oauth", OAUTH, NEW_OAUTH, NEW_OAUTH)
-        cli.activate(source=self.source, staged=current, stopped=True,
-                     recovery=True, consumers=True, migration_ready=False)
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, stale)
-        self.assertTrue(stale.is_file())
-        cli.discard(source=self.source, staged=stale)
-        self.assertFalse(stale.exists())
-        self.assertFalse(stale.with_name(stale.name + ".plan").exists())
-        self.assertTrue(verify_password(NEW_OAUTH, cli._source(self.source)[0]["oauth_login_verifier"],
-                                        "oauth-login"))
+    def test_concurrent_writer_is_refused_before_prompt(self):
+        before = self.source.read_bytes()
+        with cli._locked(self.source), patch.object(cli.getpass, "getpass") as prompt:
+            with self.assertRaises(BlockingIOError):
+                cli.apply(**self.params("metrics"))
+        prompt.assert_not_called()
+        self.assertEqual(self.source.read_bytes(), before)
 
-    def test_stale_discard_still_rejects_corrupted_stage(self):
-        stale = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        current = self.stage("oauth", OAUTH, NEW_OAUTH, NEW_OAUTH)
-        cli.activate(source=self.source, staged=current, stopped=True,
-                     recovery=True, consumers=True, migration_ready=False)
-        stale.write_bytes(stale.read_bytes() + b" ")
-        with self.assertRaises(cli.RotationError):
-            cli.discard(source=self.source, staged=stale)
-        self.assertTrue(stale.exists())
-
-    def test_partial_staged_file_is_removed_when_write_or_fsync_fails(self):
-        original = self.source.read_bytes()
-        for failure in ("write", "fsync"):
-            with self.subTest(failure=failure):
-                with patch.object(cli.getpass, "getpass",
-                                  side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
-                    if failure == "write":
-                        real_write = cli._write_new
-
-                        def interrupted_write(path: Path, data: bytes) -> None:
-                            if path.name.endswith(".json"):
-                                path.write_bytes(data[:16])  # Partial generated key material.
-                                path.chmod(0o600)
-                                raise OSError("synthetic interrupted stage")
-                            real_write(path, data)
-
-                        target = patch.object(cli, "_write_new", side_effect=interrupted_write)
-                    else:
-                        target = patch.object(cli.os, "fsync", side_effect=OSError("synthetic disk full"))
-                    with target:
-                        with self.assertRaises(OSError):
-                            cli.stage(**self.params("console"))
-                self.assertEqual(self.source.read_bytes(), original)
-                self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
-
-    def test_manifest_write_failure_removes_complete_candidate(self):
-        original = self.source.read_bytes()
-        real_write = cli._write_new
-
-        def interrupted_manifest(path: Path, data: bytes) -> None:
-            if path.name.endswith(".plan"):
-                path.write_bytes(data[:12])
-                path.chmod(0o600)
-                raise OSError("synthetic interrupted manifest")
-            real_write(path, data)
-
-        with patch.object(cli.getpass, "getpass",
-                          side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
-            with patch.object(cli, "_write_new", side_effect=interrupted_manifest):
-                with self.assertRaises(OSError):
-                    cli.stage(**self.params("console"))
-        self.assertEqual(self.source.read_bytes(), original)
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+    def test_candidate_collision_is_not_removed(self):
+        name = self.root / (cli._TEMP_PREFIX + "a" * 24)
+        name.write_bytes(b"synthetic-existing-artifact")
+        name.chmod(0o600)
+        with patch.object(cli.secrets, "token_hex", return_value="a" * 24), \
+             patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)):
+            with self.assertRaises(FileExistsError):
+                cli.apply(**self.params("metrics"))
+        self.assertEqual(name.read_bytes(), b"synthetic-existing-artifact")
 
     def test_private_file_permissions_symlinks_and_unknown_alias(self):
         self.source.chmod(0o644)
@@ -386,13 +275,13 @@ class OperatorRotationTests(unittest.TestCase):
     def test_reused_passwords_and_untrusted_production_binding_fail(self):
         with patch.object(cli.getpass, "getpass", side_effect=(OAUTH, OAUTH, OAUTH)):
             with self.assertRaises(cli.RotationError):
-                cli.stage(**self.params("oauth"))
+                cli.apply(**self.params("oauth"))
         with patch.object(cli.getpass, "getpass", side_effect=(CONSOLE, CONSOLE, CONSOLE)):
             with self.assertRaises(cli.RotationError):
-                cli.stage(**self.params("sudo", "demo-node-a"))
+                cli.apply(**self.params("sudo", "demo-node-a"))
         with patch.object(cli.getpass, "getpass", side_effect=(METRICS, METRICS, METRICS)):
             with self.assertRaises(cli.RotationError):
-                cli.stage(**self.params("metrics"))
+                cli.apply(**self.params("metrics"))
         with self.assertRaises(cli.RotationError):
             cli.plan(**{**self.params(), "deployment": "production",
                         "issuer": "http://not-a-trusted-issuer.example"})
@@ -417,39 +306,34 @@ class OperatorRotationTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stderr(output), patch.object(cli.getpass, "getpass") as prompt:
             self.assertEqual(cli.main([
-                "stage", "--source", str(self.source), "--inventory", str(self.inventory),
+                "apply", "--source", str(self.source), "--inventory", str(self.inventory),
                 "--deployment", "lab", "--issuer", BIND["issuer"],
                 "--operation", "console",
             ]), 1)
         prompt.assert_not_called()
         self.assertIn("rejected", output.getvalue())
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
-    def test_uncertain_activation_after_successful_rename_never_blindly_retries(self):
-        candidate = self.stage("console", CONSOLE, NEW_CONSOLE, NEW_CONSOLE)
-        source_before = self.source.read_bytes()
-        with patch.object(cli, "_sync", side_effect=OSError("synthetic I/O interruption")):
-            with self.assertRaises(cli.ActivationUncertain):
-                cli.activate(source=self.source, staged=candidate, stopped=True,
-                             recovery=True, consumers=True, migration_ready=False)
-        self.assertNotEqual(source_before, self.source.read_bytes())
-        self.assertFalse(candidate.exists())
-        self.assertTrue(candidate.with_name(candidate.name + ".plan").exists())
-        with self.assertRaises(OSError):
-            cli._prepared(self.source, candidate)
+    def test_uncertain_commit_after_rename(self):
+        before = self.source.read_bytes()
+        with patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)), \
+             patch.object(cli, "_sync", side_effect=OSError("synthetic I/O interruption")):
+            with self.assertRaises(cli.CommitUncertain) as failure:
+                cli.apply(**self.params("metrics"))
+        self.assertNotEqual(before, self.source.read_bytes())
+        self.assertEqual(failure.exception.expected_digest, cli._digest(self.source.read_bytes()))
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
-    def test_cli_verify_no_credentials_or_implicit_activation(self):
-        candidate = self.stage("console", CONSOLE, NEW_CONSOLE, NEW_CONSOLE)
-        output, errors = io.StringIO(), io.StringIO()
-        with redirect_stdout(output), redirect_stderr(errors):
-            self.assertEqual(cli.main(["verify", "--source", str(self.source),
-                                       "--staged", str(candidate)]), 0)
-            self.assertEqual(cli.main(["activate", "--source", str(self.source),
-                                       "--staged", str(candidate)]), 1)
-        self.assertIn("VERIFY=PASS", output.getvalue())
-        self.assertNotIn(CONSOLE, output.getvalue() + errors.getvalue())
-        self.assertNotIn(NEW_CONSOLE, output.getvalue() + errors.getvalue())
-        self.assertTrue(candidate.exists())
+    def test_rename_then_signal_reports_uncertain(self):
+        replace = cli.os.replace
+        def interrupted(src, dst):
+            replace(src, dst)
+            raise KeyboardInterrupt()
+        with patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)), \
+             patch.object(cli.os, "replace", side_effect=interrupted):
+            with self.assertRaises(cli.CommitUncertain) as failure:
+                cli.apply(**self.params("metrics"))
+        self.assertEqual(failure.exception.expected_digest, cli._digest(self.source.read_bytes()))
 
     def test_rejects_untrusted_directories_and_lock(self):
         with self.assertRaises(cli.RotationError):
@@ -466,7 +350,7 @@ class OperatorRotationTests(unittest.TestCase):
         lock.write_bytes(b"lock")
         lock.chmod(0o644)
         with self.assertRaises(cli.RotationError):
-            cli.stage(**self.params("console"))
+            cli.apply(**self.params("console"))
 
     def test_invalid_json_and_unsigned_inventory_are_rejected(self):
         for raw in (b'{"version":1,"version":1}', b'[]'):
@@ -474,7 +358,7 @@ class OperatorRotationTests(unittest.TestCase):
                 with self.assertRaises(cli.RotationError):
                     cli._decode(raw)
         self.write_private(self.source, {"version": 99})
-        with self.assertRaises(cli.RotationError):
+        with self.assertRaises(ValueError):
             cli._source(self.source)
         self.write_private(self.source, self.sealed)
         for hosts in (None, [], ["not-object"],
@@ -483,10 +367,10 @@ class OperatorRotationTests(unittest.TestCase):
             with self.subTest(hosts=hosts):
                 self.inventory.write_text(json.dumps({"version": 1, "hosts": hosts}))
                 with self.assertRaises(cli.RotationError):
-                    cli._hosts(self.inventory)
+                    cli._read_inventory(self.inventory, 'console', None)
         self.inventory.write_text(json.dumps({"version": 2, "hosts": []}))
         with self.assertRaises(cli.RotationError):
-            cli._hosts(self.inventory)
+            cli._read_inventory(self.inventory, 'console', None)
 
     def test_invalid_operation_or_unsigned_host_denied(self):
         for operation, host in (("console", "demo-node-a"),
@@ -498,7 +382,7 @@ class OperatorRotationTests(unittest.TestCase):
         self.write_private(self.source, LEGACY)
         altered = dict(LEGACY, sudo_passwords={"unapproved": SUDO})
         self.write_private(self.source, altered)
-        with self.assertRaises(cli.RotationError):
+        with self.assertRaises(ValueError):
             cli.plan(**self.params("migrate"))
         self.write_private(self.source, self.sealed)
         revised = dict(self.sealed, sealed_sudo={
@@ -514,13 +398,13 @@ class OperatorRotationTests(unittest.TestCase):
             with self.subTest(operation=operation):
                 with patch.object(cli.getpass, "getpass", return_value="wrong-old-credential"):
                     with self.assertRaises(cli.RotationError):
-                        cli.stage(**self.params(operation))
+                        cli.apply(**self.params(operation))
         with patch.object(cli.getpass, "getpass",
                           side_effect=(CONSOLE, NEW_CONSOLE, "different-confirmation")):
             with self.assertRaises(cli.RotationError):
-                cli.stage(**self.params("console"))
+                cli.apply(**self.params("console"))
         self.assertEqual(self.source.read_bytes(), before)
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
     def test_source_changed_during_rekey_is_rejected_before_staging(self):
         before = self.source.read_bytes()
@@ -537,65 +421,151 @@ class OperatorRotationTests(unittest.TestCase):
             with patch.object(cli.getpass, "getpass",
                               side_effect=(OAUTH, NEW_OAUTH, NEW_OAUTH)):
                 with self.assertRaises(cli.RotationError):
-                    cli.stage(**self.params("oauth"))
+                    cli.apply(**self.params("oauth"))
         self.assertEqual(self.source.read_bytes(), before)
-        self.assertEqual(list(self.root.glob(".ssh-mcp-stage-*")), [])
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
-    def test_prepared_stage_rejects_foreign_path_and_invalid_manifest(self):
-        candidate = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        bad = self.root / "wrong-name.json"
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, bad)
-        sidecar = candidate.with_name(candidate.name + ".plan")
-        manifest = json.loads(sidecar.read_text())
-        manifest["unexpected_key"] = True
-        self.write_private(sidecar, manifest)
-        with self.assertRaises(cli.RotationError):
-            cli._prepared(self.source, candidate)
-
-    def test_cli_plan_stage_activate_and_discard_dispatch(self):
+    def test_cli_plan_apply_and_uncertain_dispatch(self):
         output = io.StringIO()
+        args = ["--source", str(self.source), "--inventory", str(self.inventory),
+                "--deployment", "lab", "--issuer", BIND["issuer"], "--operation", "metrics"]
         with redirect_stdout(output):
-            self.assertEqual(cli.main([
-                "plan", "--source", str(self.source), "--inventory", str(self.inventory),
-                "--deployment", "lab", "--issuer", BIND["issuer"],
-                "--operation", "console",
-            ]), 0)
+            self.assertEqual(cli.main(["plan", *args]), 0)
         self.assertIn("PLAN=PASS", output.getvalue())
-        with patch.object(cli.sys, "stdin") as stdin, patch.object(cli.sys, "stderr") as stderr:
-            stdin.isatty.return_value = True
-            stderr.isatty.return_value = True
-            with patch.object(cli.getpass, "getpass",
-                              side_effect=(CONSOLE, NEW_CONSOLE, NEW_CONSOLE)):
-                with redirect_stdout(output):
-                    self.assertEqual(cli.main([
-                        "stage", "--source", str(self.source), "--inventory", str(self.inventory),
-                        "--deployment", "lab", "--issuer", BIND["issuer"],
-                        "--operation", "console",
-                    ]), 0)
-        self.assertIn("STAGE=PASS", output.getvalue())
-        stages = list(self.root.glob(".ssh-mcp-stage-*.json"))
-        self.assertEqual(len(stages), 1)
-        with redirect_stdout(output):
-            self.assertEqual(cli.main([
-                "activate", "--source", str(self.source), "--staged", str(stages[0]),
-                "--confirm-stopped", "--confirm-recovery", "--confirm-consumers-ready",
-            ]), 0)
-        self.assertIn("ACTIVATE=PASS", output.getvalue())
-        with patch.object(cli, "activate", side_effect=cli.ActivationUncertain("synthetic")):
-            with redirect_stderr(io.StringIO()) as error:
-                self.assertEqual(cli.main([
-                    "activate", "--source", str(self.source), "--staged", str(stages[0]),
-                    "--confirm-stopped", "--confirm-recovery", "--confirm-consumers-ready",
-                ]), 2)
-            self.assertIn("uncertain", error.getvalue())
-        # Exercise discard dispatch using a valid stage pinned to a separate new revision.
-        fresh = self.stage("metrics", METRICS, NEW_METRICS, NEW_METRICS)
-        with redirect_stdout(output):
-            self.assertEqual(cli.main([
-                "discard", "--source", str(self.source), "--staged", str(fresh),
-            ]), 0)
-        self.assertIn("DISCARD=PASS", output.getvalue())
+        with patch.object(cli.sys.stdin, "isatty", return_value=True), \
+             patch.object(cli.sys.stderr, "isatty", return_value=True), \
+             patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)), \
+             redirect_stdout(output):
+            self.assertEqual(cli.main(["apply", *args]), 0)
+        self.assertIn("APPLY=PASS", output.getvalue())
+        with redirect_stderr(io.StringIO()) as err, \
+             patch.object(cli.sys.stdin, "isatty", return_value=True), \
+             patch.object(cli.sys.stderr, "isatty", return_value=True), \
+             patch.object(cli, "apply", side_effect=cli.CommitUncertain("synthetic", expected_digest="a"*64)):
+            self.assertEqual(cli.main(["apply", *args]), 2)
+        self.assertIn("uncertain", err.getvalue())
+        self.assertIn("expected_committed_sha256=" + "a"*64, err.getvalue())
+        for removed in ("stage", "verify", "activate", "discard"):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main([removed, *args])
+        self.assertNotIn(NEW_METRICS, output.getvalue())
+
+    def test_stale_expected_digests_rejected_before_prompt(self):
+        for key in ("expected_source", "expected_inventory"):
+            with self.subTest(key=key), patch.object(cli.getpass, "getpass") as prompt:
+                with self.assertRaises(cli.RotationError):
+                    cli.apply(**self.params("metrics"), **{key: "a"*64})
+                prompt.assert_not_called()
+
+    def test_hardlink_rejected(self):
+        import os
+        other = self.root / "linked-secret"
+        os.link(self.source, other)
+        with self.assertRaises(cli.RotationError):
+            cli.plan(**self.params())
+
+    def test_jenkins_target_commit_and_controller_readback(self):
+        from ssh_mcp_secrets import batch
+        directory = self.root / "deployment" / "nonprod"
+        directory.mkdir(parents=True)
+        self.source = self.source.rename(directory / self.source.name)
+        before = self.source.read_bytes()
+        self.source.chmod(0o640)
+        args = dict(self.params("metrics"), jenkins=True,
+                    expected_source=cli._digest(before),
+                    expected_inventory=cli._digest(self.inventory.read_bytes()),
+                    container="synthetic-controller",
+                    container_file="/run/jenkins/secrets/deployment/nonprod/ssh-mcp-secrets")
+        with patch.object(cli.os, "geteuid", return_value=0), \
+             patch.object(cli.os, "fchown"), \
+             patch.object(batch, "_check_jenkins_dir_info"), \
+             patch.object(batch, "_trusted_jenkins", side_effect=lambda path: path.read_bytes()), \
+             patch.object(cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
+             patch.object(batch, "_postcheck_container") as postcheck, \
+             patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)):
+            self.assertIn("PLAN=PASS", cli.plan(**args))
+            digest = cli.apply(**args)
+        self.assertEqual(self.source.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(cli._digest(self.source.read_bytes()), digest)
+        self.assertTrue(verify_token(NEW_METRICS, json.loads(self.source.read_text())["metrics_verifier"]))
+        postcheck.assert_called_once_with(args["container"], args["container_file"], digest, "nonprod/" + self.source.name)
+        self.assertEqual([p.name for p in self.source.parent.iterdir()], [self.source.name])
+        self.assertEqual([p.name for p in directory.parent.iterdir()], ["nonprod"])
+
+    def test_jenkins_lock_shared_across_flat_and_scoped_sources(self):
+        from ssh_mcp_secrets import batch
+        directory = self.root / "deployment"
+        directory.mkdir()
+        flat = self.source.rename(directory / self.source.name)
+        scope = directory / "nonprod"
+        scope.mkdir()
+        scoped = scope / flat.name
+        self.write_private(scoped, self.sealed)
+        with patch.object(batch, "_trusted_jenkins", return_value=flat.read_bytes()), \
+             patch.object(batch, "_check_jenkins_dir_info"):
+            with cli._locked(flat, jenkins=True):
+                with self.assertRaises(BlockingIOError), cli._locked(scoped, jenkins=True):
+                    self.fail("Unexpected concurrent writer")
+            with cli._locked(scoped, jenkins=True):
+                with self.assertRaises(BlockingIOError), cli._locked(flat, jenkins=True):
+                    self.fail("Unexpected concurrent writer")
+        self.assertEqual(set(p.name for p in directory.iterdir()), {flat.name, "nonprod"})
+        self.assertEqual([p.name for p in scope.iterdir()], [scoped.name])
+
+    def test_jenkins_target_requires_explicit_pins_and_mount(self):
+        args = self.params("metrics")
+        with patch.object(cli.getpass, "getpass") as prompt:
+            with self.assertRaises(cli.RotationError):
+                cli.apply(**args, jenkins=True)
+            with self.assertRaises(cli.RotationError):
+                cli.apply(**args, container="synthetic-controller")
+            with self.assertRaises(cli.RotationError):
+                cli.apply(**args, expected_source="bad")
+            prompt.assert_not_called()
+        with patch.object(cli.os, "geteuid", return_value=0):
+            with self.assertRaises(cli.RotationError):
+                cli.apply(**args, jenkins=True, container="synthetic-controller",
+                          container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
+
+    def test_jenkins_controller_failure_reports_expected_digest(self):
+        from ssh_mcp_secrets import batch
+        directory = self.root / "deployment"
+        directory.mkdir()
+        self.source = self.source.rename(directory / self.source.name)
+        before = self.source.read_bytes()
+        self.source.chmod(0o640)
+        args = dict(self.params("metrics"), jenkins=True,
+                    expected_source=cli._digest(before),
+                    expected_inventory=cli._digest(self.inventory.read_bytes()),
+                    container="synthetic-controller",
+                    container_file="/run/jenkins/secrets/deployment/ssh-mcp-secrets")
+        with patch.object(cli.os, "geteuid", return_value=0), \
+             patch.object(cli.os, "fchown"), \
+             patch.object(batch, "_check_jenkins_dir_info"), \
+             patch.object(batch, "_trusted_jenkins", side_effect=lambda path: path.read_bytes()), \
+             patch.object(cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
+             patch.object(batch, "_postcheck_container", side_effect=OSError("synthetic readback failure")), \
+             patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)):
+            with self.assertRaises(cli.CommitUncertain) as failure:
+                cli.apply(**args)
+        self.assertNotEqual(before, self.source.read_bytes())
+        self.assertEqual(failure.exception.expected_digest, cli._digest(self.source.read_bytes()))
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
+
+    def test_precommit_candidate_tampering_detected(self):
+        before = self.source.read_bytes()
+        read = cli._read_file
+        def altered(path, **kw):
+            raw = read(path, **kw)
+            if path.name.startswith(cli._TEMP_PREFIX):
+                return raw + b" "
+            return raw
+        with patch.object(cli, "_read_file", side_effect=altered), \
+             patch.object(cli.getpass, "getpass", side_effect=(METRICS, NEW_METRICS, NEW_METRICS)):
+            with self.assertRaises(cli.RotationError):
+                cli.apply(**self.params("metrics"))
+        self.assertEqual(before, self.source.read_bytes())
+        self.assertEqual(list(self.root.glob(".ssh-mcp-commit-*")), [])
 
 if __name__ == "__main__":
     unittest.main()
