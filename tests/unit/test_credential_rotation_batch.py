@@ -1,6 +1,7 @@
 """Synthetic, offline checks for batch batch sealed credential tooling."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -220,7 +221,7 @@ class BatchRotationTests(unittest.TestCase):
             if postcheck_error is not None:
                 raise postcheck_error
             if not check_readback:
-                raise cli.ActivationUncertain("Synthetic readback failure")
+                raise cli.CommitUncertain("Synthetic readback failure")
         def trusted(path: Path) -> bytes:
             content = path.read_bytes()
             if readback_error is not None and hashlib.sha256(content).hexdigest() != original:
@@ -229,12 +230,13 @@ class BatchRotationTests(unittest.TestCase):
         with patch.object(batch.os, "geteuid", return_value=0), \
              patch.object(batch.os, "fchown", side_effect=destination_error), \
              patch.object(batch, "_trusted_jenkins", side_effect=trusted), \
+             patch.object(batch.cli, "_locked", return_value=nullcontext()), \
              patch.object(batch.cli, "_private_dir"), \
              patch.object(batch.cli, "_read_file", side_effect=lambda path, **kw: path.read_bytes()), \
              patch.object(batch.getpass, "getpass", side_effect=prompts), \
              patch.object(batch, "_postcheck_container", side_effect=readback):
             if not check_readback:
-                with self.assertRaises(cli.ActivationUncertain):
+                with self.assertRaises(cli.CommitUncertain):
                     batch.batch_handoff(jenkins_file=source, inventory=inventory,
                                         vm_map=vm_map, workdir=workdir,
                                         deployment="lab", issuer=ISSUER,
@@ -305,7 +307,7 @@ class BatchRotationTests(unittest.TestCase):
                 self.addCleanup(self.tmp.cleanup)
                 self.root = Path(self.tmp.name)
                 self.root.chmod(0o700)
-                with self.assertRaises(cli.ActivationUncertain):
+                with self.assertRaises(cli.CommitUncertain):
                     if error_kind == "source-readback":
                         self._mock_batch_handoff(readback_error=error)
                     else:
@@ -328,7 +330,7 @@ class BatchRotationTests(unittest.TestCase):
         ))
 
     def test_batch_uses_checked_inventory_bytes_not_second_file_read(self) -> None:
-        with patch.object(batch.cli, "_hosts", side_effect=AssertionError("unsafe inventory reread")):
+        with patch.object(batch.cli, "_read_inventory", side_effect=AssertionError("unsafe inventory reread")):
             result, _ = self._mock_batch_handoff()
         self.assertEqual(result["aliases"], 2)
 

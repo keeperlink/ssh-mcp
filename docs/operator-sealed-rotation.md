@@ -107,163 +107,112 @@ sudo grants. Never perform deployment in the batch helper.
 
 ## Protected inputs and restrictions
 
-The active JSON file and its parent must be owned by the executing operator.
-The parent must be a real directory with mode **0700**; the active file must
-be a regular, single-link, non-symlink **0600** file. The inventory must be a
-regular non-symlink file, not group/other writable. Do not loosen access
-controls to make the tool work. Use absolute paths; keep the generated stage
-and its manifest in the same protected directory. Never expose protected
-file contents, passwords or the generated stage through chat, audit logs,
-environment variables, argv, history, shell trace or CI.
+Run the reviewed installed utility in a trusted real TTY, after independently
+verifying signed inventory provenance, deployment, issuer, correct target,
+recovery access and downstream handoff. Prepare any recovery backups yourself:
+the utility never creates, manages, restores or retains previous revisions.
+Do not pass credentials in command arguments, environment variables, logs or
+chat. Use absolute paths. Before upgrading from the former stage/activation
+workflow, reconcile each existing protected staged pair with the current
+source and its intended consumers, then retire obsolete artifacts through
+operator-controlled cleanup. The new utility does not consume old stages.
 
-For example, set shell variables to **paths and public binding values only**
-(never passwords):
+For a standalone protected offline source, the parent directory must be owned
+by the operator and mode 0700; the source must be a regular single-link
+non-symlink file mode 0600. Do not point the utility at a running service mount.
+
+Set shell variables to paths and binding information only:
 
 ```sh
 SOURCE=/path/to/private/ssh-mcp-secrets
 INVENTORY=/path/to/approved/signed-inventory.json
 DEPLOYMENT=production
 ISSUER=https://your-approved-oauth-issuer.example
-```
 
-The read-only plan identifies the selected operation, host alias count and
-source revision without prompting for passwords or changing files:
-
-```sh
 ssh-mcp-secrets plan --source "$SOURCE" --inventory "$INVENTORY" \
+  --deployment "$DEPLOYMENT" --issuer "$ISSUER" --operation console
+
+ssh-mcp-secrets apply --source "$SOURCE" --inventory "$INVENTORY" \
   --deployment "$DEPLOYMENT" --issuer "$ISSUER" --operation console
 ```
 
-For `--operation`, choose exactly **migrate**, **oauth**, **console**,
-**sudo**, **add-sudo**, or **metrics**. For sudo rotation or enrollment also add
-`--host APPROVED_ALIAS`; use the actual signed inventory, not a guessed
-alias. Migration accepts only legacy v1 source; other modes require v2.
+Choose exactly **oauth**, **console**, **sudo**, **add-sudo**, or **metrics**
+for `--operation`. For sudo rotation/enrollment supply `--host APPROVED_ALIAS`.
+Only sealed-v2 sources are supported. The optional read-only plan reports the
+selected operation and the source/inventory SHA-256 values without prompts or
+writes. Independently check the signed inventory and exact target; optional
+`--expected-source-sha256` and `--expected-inventory-sha256` pin those bytes.
 
-Use `--operation add-sudo --host APPROVED_ALIAS` to enroll exactly one
-existing inventory host whose privileged policy explicitly permits sudo and
-which has no sealed entry. The explicit `--source` selects the credential
-revision, not the host alias or any deployment credential scope. Choose the
-correct protected source and corresponding signed inventory independently.
-The tool does not create hosts, contact them or overwrite existing entries;
-use `sudo` for rotation. The enrollment inventory path must be absolute and
-its exact bytes are pinned in the stage manifest, rechecked during staging,
-verification and activation. If it changes, discard and restage against the
-new independently verified inventory. For a nonempty mapping an existing
-envelope authenticates the deployment/issuer binding; for an empty mapping
-the operator must independently verify the binding. No signature validation
-is implied by these checks.
+## Direct Jenkins secretFile changes
 
-## Stage, verify, and explicitly activate
+For a Jenkins-managed offline source use the same apply operation as root,
+selecting the correct environment-specific file explicitly. Provide the
+independently verified digests and controller mount, as in batch-handoff:
 
-1. Run the same arguments with `stage` instead of `plan` in a real
-   interactive terminal. The utility uses hidden, confirmed password entry.
-   It never takes password values in CLI flags or environment variables.
-   It prepares a **complete** new sealed JSON revision, fsyncs its 0600
-   stage and matching private manifest, and leaves the active source intact.
-2. Record the returned stage **path** (not its contents). Independently
-   verify it:
+```sh
+ssh-mcp-secrets apply \
+  --jenkins-file /path/to/jenkins/secrets/deployment/ssh-mcp-secrets \
+  --inventory "$INVENTORY" --deployment "$DEPLOYMENT" --issuer "$ISSUER" \
+  --expected-source-sha256 EXPECTED_64_HEX_SHA256 \
+  --expected-inventory-sha256 EXPECTED_64_HEX_SHA256 \
+  --jenkins-container APPROVED_CONTROLLER_CONTAINER \
+  --jenkins-container-file /run/jenkins/secrets/deployment/ssh-mcp-secrets \
+  --operation add-sudo --host APPROVED_ALIAS
+```
 
-   ```sh
-   ssh-mcp-secrets verify --source "$SOURCE" --staged "$STAGED_PATH"
-   ```
+The deployment directory must be root:1000 mode 0750; the single-link regular
+secretFile must be root:1000 mode 0640. The utility verifies the source and
+inventory, takes the same private directory lock used by batch-handoff, prepares
+and validates the full sealed revision in memory, writes a securely created
+sibling temporary file, fsyncs it, rechecks source/inventory fingerprints, and
+atomically replaces only the selected file. It preserves the required file
+owner/mode, fsyncs the directory, verifies the committed bytes and checks the
+controller-visible digest. The local-file target follows the same guarded
+commit procedure with owner-only permissions.
 
-   The manifest pins the exact active source SHA-256 and complete staged
-   revision. An incomplete stage, changed active source, damaged artifact,
-   missing sidecar, bad ownership or permissions is rejected. A failed or
-   interrupted stage leaves the active revision untouched. To discard an
-   intact staged pair, use `ssh-mcp-secrets discard --source "$SOURCE"
-   --staged "$STAGED_PATH"`. Discard also permits obsolete stages after
-   the active revision has changed, but it always verifies stage integrity
-   and the protected directory first.
-3. Confirm independently: administrative recovery and retained backups;
-   the correct sealed-format-compatible signed target and rollback image;
-   and downstream consumer handoff. Plan, stage and verify operate on
-   protected offline files and do not require the application to stop.
-   For v1 migration, stop the application and database writers and complete
-   the approved database cutover and rollback snapshot procedure in
-   [sealed database cutover](sealed-db-cutover.md) **before** activation.
+`APPLY=PASS` means the offline source was committed and verified; it does not
+mean Jenkins provisioning, service deployment, consumer updates or remote
+password changes have occurred. The running service continues using its
+existing immutable revision until separately redeployed. Before applying,
+confirm the selected source really is independent of the running service and
+coordinate with other operators and downstream consumers; the advisory lock
+serializes cooperating tool invocations, not arbitrary external writers.
 
-   **Current activation limitation:** the utility requires
-   `--confirm-stopped` for every operation, including `add-sudo` on an
-   independent offline copy. This is a generic activation guard, not a
-   database migration requirement for host enrollment. The tool does not
-   independently verify service state or downstream readiness: these flags
-   are explicit operator attestations. Never assert that a running service
-   is stopped. If the operator requires activation without a preliminary
-   service stop, a reviewed utility change is required; staging and
-   verification may continue while the existing service runs.
-4. Only after the separately approved handoff, run:
-
-   ```sh
-   ssh-mcp-secrets activate --source "$SOURCE" --staged "$STAGED_PATH" \
-     --confirm-stopped --confirm-recovery --confirm-consumers-ready
-   ```
-
-   For a legacy-to-v2 migration also supply `--confirm-db-ready`.
-   Activation rechecks the source hash and staged integrity under a private
-   advisory lock, atomically renames the complete stage over the source
-   and fsyncs its directory. **The utility does not create a previous
-   source backup**; independently protected recovery copies are mandatory,
-   and prior legacy plaintext backups require retirement and rotation.
-   If an I/O failure occurs after the rename, the utility reports an
-   *uncertain activation outcome*. Compare the active digest before taking
-   another action; never blindly repeat an uncertain activation.
-5. Rebuild/deploy the approved sealed-compatible service with environment
-   and verifier exports derived from the **new active revision**, recreate
-   it and verify its actual loaded fingerprint, OAuth/Console login,
-   granted sudo, audit continuity, and metrics consumers. Clear/revoke
-   sessions and old client tokens as required. A file replacement alone
-   does not reload the running service.
+A precommit failure leaves the source unchanged and removes the tool-owned
+temporary file. Exit code 2 means the commit outcome is uncertain: compare
+the actual offline source and controller-visible digests with the reported
+expected committed SHA-256 before retrying. Reconcile an interrupted
+operation through independent access; never blindly repeat a password
+rotation or restore an older mismatched revision.
 
 ## Rotation handoffs and interrupted recovery
 
-- **OAuth:** verify the old password interactively, stage the new independent
-  verifier, then coordinate consent and session revocation with deployment.
-- **Console:** enter the old and a new password; every signed host's sealed
-  sudo entry is re-encrypted, the session generation changes, and prior
-  unlocks must be invalidated on restart. A lost old Console password
-  requires independent administrative re-enrollment, not a backdoor.
-- **Host sudo:** choose one verified alias and confirm independent admin
-  recovery access. Stage the encrypted new value **before** changing the
-  remote password. Pause that host's privileged work, change its password
-  through independent administration, then activate the prepared revision
-  and verify new-password success / old-password rejection. If interrupted
-  between host and service changes, **do not rollback to mismatched secrets**:
-  maintain the host isolation, inspect stage and active hashes and complete
-  the matching handoff through the independent recovery channel.
-- **Add host sudo:** independently verify the new signed host and its
-  privileged policy; select the intended protected credential source. Stage
-  with `add-sudo`, enter the existing Console password and a new unique
-  host password twice (choose a password not used on any other host), then
-  verify. Set that exact password through independent guest administration;
-  confirm password-required sudo and rejection of passwordless sudo.
-  No database migration, Console rekey, or early service interruption is
-  needed for preparation: existing host envelopes and other credentials
-  remain unchanged. An independent offline source and protected downstream
-  secret-file handoff do not reload the running container's immutable
-  credential snapshot. Nevertheless, the current activation CLI still
-  requires the stopped-service attestation described above; do not bypass
-  it or claim that a running service is stopped. Once activation and handoff
-  have been completed under the applicable approved procedure, reconcile
-  the downstream secret registration, deploy the approved signed inventory
-  and matching revision, and verify ordinary SSH and an approved privileged
-  command. The normal deployment replaces the running container; a file
-  handoff alone does not activate its new credentials. If interrupted,
-  reconcile source/stage digests and the host password before proceeding.
-- **Metrics:** stage the new bearer verifier and coordinate the protected
-  scraper-side replacement. Verify both new-token acceptance and old-token
-  rejection after deployment.
-- **Migration:** the v1 source is left untouched until separately authorized
-  activation. No plaintext staging copy is produced; separately existing
-  v1 backups still require explicit inventory and retirement.
+- **OAuth:** enter the old password and confirm the new independent password.
+  Coordinate consent, token/session revocation and deployment separately.
+- **Console:** enter the old and confirmed new password. All existing sealed
+  sudo envelopes are re-encrypted and the session generation changes in one
+  commit. Prior unlocks are invalidated on restart. Loss of the old Console
+  password requires independent administrative re-enrollment, not a backdoor.
+- **Host sudo:** confirm independent recovery access and pause privileged work
+  for the selected host. Commit the new encrypted value first, then change
+  the matching remote password through independent administration. Do not
+  restore a mismatched older revision if the handoff is interrupted.
+- **Add host sudo:** independently verify the signed inventory and explicit
+  privileged policy, select the intended protected source, and enter the
+  existing Console password and a new unique host password twice. The tool
+  adds exactly one envelope and preserves existing entries. Set the exact
+  password independently, confirm password-required sudo and rejection of
+  passwordless sudo, then deploy the approved inventory and matching revision.
+  No database migration or Console rekey is needed.
+- **Metrics:** commit the new bearer verifier and separately coordinate the
+  protected scraper-side replacement. Verify new-token acceptance and
+  old-token rejection after deployment.
 
-An interrupted rekey must not leave a partially activated secret: a complete
-staged file and manifest are required for activation. The tool never alters
-remote credentials by itself. Production rotation, signed-image rollback,
-database restoration and acceptance of all old-credential revocations remain
-separately authorized actions. Never restore a legacy plaintext secret
-or legacy-v1 image over rotated sealed-v2 credentials. Keep a signed
-v2-compatible recovery image with the current matching sealed secret.
-Previously completed one-time database migration and v1 rollback
-exercises do not block routine maintenance of a healthy v2 service.
-Document explicitly waived acceptance tests as skipped, not PASS.
+Separately approve Jenkins provisioning, signed service deployment and
+consumer changes. Verify loaded fingerprint, login, sudo proof, audit
+continuity and metrics after deployment. Do not repeat legacy database
+conversion on healthy v2 installations; actual offline database recovery
+requires stopped writers and protected snapshots as described in
+[SQLite state and recovery](sealed-db-cutover.md). Never restore retired
+passwords or legacy plaintext credentials over a rotated sealed-v2 service.
+Document waived acceptance tests as skipped, not PASS.

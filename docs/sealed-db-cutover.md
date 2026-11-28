@@ -31,7 +31,7 @@ cutover on an existing v2 service.**
 An unmigrated legacy-v1 database cannot start v2 authentication without
 a separately authorized offline conversion. The application rejects
 legacy Console verifier state. A historical migration requires a protected
-consistent snapshot, stopped writers, matching staged v2 Console generation,
+consistent snapshot, stopped writers, matching verified v2 Console generation,
 reviewed history-db cutover, session revocation, WAL checkpoint, VACUUM
 and integrity verification. Reconcile interruption before retrying.
 

@@ -138,12 +138,12 @@ class RotationErrorPaths(unittest.TestCase):
                 batch._postcheck_container(name, path, "a" * 64)
         with patch.object(batch.subprocess, "run",
                           return_value=SimpleNamespace(returncode=0, stdout=b"b" * 64 + b"  path\n")):
-            with self.assertRaises(cli.ActivationUncertain):
+            with self.assertRaises(cli.CommitUncertain):
                 batch._postcheck_container("controller",
                                            "/run/jenkins/secrets/deployment/secret", "a" * 64)
         with patch.object(batch.subprocess, "run",
                           return_value=SimpleNamespace(returncode=1, stdout=b"")):
-            with self.assertRaises(cli.ActivationUncertain):
+            with self.assertRaises(cli.CommitUncertain):
                 batch._postcheck_container("controller",
                                            "/run/jenkins/secrets/deployment/secret", "a" * 64)
         with patch.object(batch.subprocess, "run",

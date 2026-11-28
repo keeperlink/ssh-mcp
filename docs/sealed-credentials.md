@@ -1,7 +1,7 @@
 # Sealed managed credential format
 
-For the separately reviewed operator-only offline preparation and guarded
-activation procedure, see [operator sealed rotation](operator-sealed-rotation.md).
+For the separately reviewed operator-only atomic offline credential change
+procedure, see [operator sealed rotation](operator-sealed-rotation.md).
 
 Sealed v2 is the supported managed credential format: independent one-way
 OAuth, Console and metrics verifiers, plus per-host encrypted sudo credentials
@@ -193,8 +193,8 @@ or a requirement to repeat initial production conversion.
 `from_legacy` converts only a trusted, explicitly supplied v1 source and
 trusted signed-host username mappings, **in memory**. Unknown sudo aliases,
 invalid source credentials and wrong Console passwords fail. It never
-changes or writes the source; the caller must implement safe, staged
-permissions and atomic activation.
+changes or writes the source; the caller must implement safe temporary-file
+permissions and atomic source replacement.
 
 `rotate_console` returns an independently prepared copy, re-encrypting
 **all** existing per-host entries and changing the Console generation in
